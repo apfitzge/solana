@@ -1494,6 +1494,23 @@ fn main() {
                     .conflicts_with("no_snapshot")
             )
         ).subcommand(
+            SubCommand::with_name("create-minimized-snapshot")
+                .about("Create a minimized snapshot w/ only the accounts necessary for processing the specified slot range")
+                .arg(
+                    Arg::with_name("starting_slot")
+                        .long("starting-slot")
+                        .help("Slot to create the minimized snapshot at")
+                        .takes_value(true)
+                        .required(true)
+                )
+                .arg(
+                    Arg::with_name("ending_slot")
+                        .long("ending-slot")
+                        .help("Ending slot in range for transactions of interest")
+                        .takes_value(true)
+                        .required(true)
+                )
+        ).subcommand(
             SubCommand::with_name("accounts")
             .about("Print account stats and contents after processing the ledger")
             .arg(&no_snapshot_arg)
@@ -2570,6 +2587,9 @@ fn main() {
                         exit(1);
                     }
                 }
+            }
+            ("create-minimized-snapshot", Some(arg_matches)) => {
+                error!("create-minimized-snapshot not implemented yet");
             }
             ("accounts", Some(arg_matches)) => {
                 let halt_at_slot = value_t!(arg_matches, "halt_at_slot", Slot).ok();
