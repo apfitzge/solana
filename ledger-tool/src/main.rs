@@ -2589,6 +2589,21 @@ fn main() {
                 }
             }
             ("create-minimized-snapshot", Some(arg_matches)) => {
+                let starting_slot = value_t_or_exit!(arg_matches, "starting_slot", Slot);
+                let ending_slot = value_t_or_exit!(arg_matches, "ending_slot", Slot);
+                if ending_slot <= starting_slot {
+                    eprintln!(
+                        "ending_slot ({}) must be greater than starting_slot ({})",
+                        ending_slot, starting_slot
+                    );
+                    exit(1);
+                }
+
+                info!(
+                    "Creating minimized snapshot for transactions for slots in range {}..={}",
+                    starting_slot, ending_slot
+                );
+
                 error!("create-minimized-snapshot not implemented yet");
             }
             ("accounts", Some(arg_matches)) => {
