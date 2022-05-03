@@ -1496,6 +1496,7 @@ fn main() {
         ).subcommand(
             SubCommand::with_name("create-minimized-snapshot")
                 .about("Create a minimized snapshot w/ only the accounts necessary for processing the specified slot range")
+                .arg(&max_genesis_archive_unpacked_size_arg)
                 .arg(
                     Arg::with_name("starting_slot")
                         .long("starting-slot")
@@ -2589,6 +2590,7 @@ fn main() {
                 }
             }
             ("create-minimized-snapshot", Some(arg_matches)) => {
+                // 1. Process and validate arguments
                 let starting_slot = value_t_or_exit!(arg_matches, "starting_slot", Slot);
                 let ending_slot = value_t_or_exit!(arg_matches, "ending_slot", Slot);
                 if ending_slot <= starting_slot {
@@ -2598,6 +2600,36 @@ fn main() {
                     );
                     exit(1);
                 }
+                let genesis_config = open_genesis_config_by(&ledger_path, arg_matches);
+                let blockstore =
+                    open_blockstore(&ledger_path, AccessType::Secondary, wal_recovery_mode);
+                assert!(
+                    blockstore.meta(ending_slot).unwrap().is_some(),
+                    "Ending slot doesn't exist"
+                );
+
+                // 2. Create minimized_account_set
+                let mut ancestors = BTreeSet::new();
+                for ancestor in AncestorIterator::new(ending_slot, &blockstore) {
+                    ancestors.insert(ancestor);
+                    if ancestor <= starting_slot {
+                        break;
+                    }
+                }
+                info!("ancestors: {:?}", ancestors.iter());
+                let mut minimized_account_set = HashSet::new();
+                for ancestor in ancestors {
+                    for entries in blockstore.get_slot_entries(ancestor, 0) {
+                        for entry in entries {
+                            for transaction in entry.transactions {
+                                for pubkey in transaction.message.static_account_keys() {
+                                    minimized_account_set.insert(*pubkey);
+                                }
+                            }
+                        }
+                    }
+                }
+                info!("minimized_account_set: {:?}", minimized_account_set.iter());
 
                 info!(
                     "Creating minimized snapshot for transactions for slots in range {}..={}",
