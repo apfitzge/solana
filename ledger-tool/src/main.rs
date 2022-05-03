@@ -858,6 +858,7 @@ fn assert_capitalization(bank: &Bank) {
 }
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
+use solana_runtime::append_vec;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -2618,8 +2619,8 @@ fn main() {
                 }
                 info!("ancestors: {:?}", ancestors.iter());
                 let mut minimized_account_set = HashSet::new();
-                for ancestor in ancestors {
-                    for entries in blockstore.get_slot_entries(ancestor, 0) {
+                for ancestor in ancestors.iter() {
+                    for entries in blockstore.get_slot_entries(*ancestor, 0) {
                         for entry in entries {
                             for transaction in entry.transactions {
                                 for pubkey in transaction.message.static_account_keys() {
@@ -2630,6 +2631,47 @@ fn main() {
                     }
                 }
                 info!("minimized_account_set: {:?}", minimized_account_set.iter());
+
+                // Load the bank forks
+                let bank_forks = load_bank_forks(
+                    arg_matches,
+                    &genesis_config,
+                    &blockstore,
+                    ProcessOptions {
+                        halt_at_slot: Some(ending_slot),
+                        poh_verify: false,
+                        ..ProcessOptions::default()
+                    },
+                    snapshot_archive_path,
+                );
+                if let Err(err) = bank_forks {
+                    error!("Unable to load bank forks: {:?}", err);
+                    exit(1);
+                }
+
+                let (bank_forks, _) = Some(bank_forks).unwrap().unwrap();
+                let bank_forks = bank_forks.read().unwrap();
+                let bank = bank_forks.working_bank();
+
+                info!("Loaded working bank at slot {}", bank.slot());
+                let mut minimized_slot_set = HashSet::new();
+                for pubkey in minimized_account_set.iter() {
+                    let read_account_entry = bank
+                        .rc
+                        .accounts
+                        .accounts_db
+                        .accounts_index
+                        .get_account_read_entry(pubkey);
+                    if let Some(read_account_entry) = read_account_entry {
+                        for (slot, _) in read_account_entry.slot_list() {
+                            minimized_slot_set.insert(*slot);
+                        }
+                    }
+                }
+                info!(
+                    "Generated minimized_slot_set: {:?}",
+                    minimized_slot_set.iter()
+                );
 
                 info!(
                     "Creating minimized snapshot for transactions for slots in range {}..={}",
