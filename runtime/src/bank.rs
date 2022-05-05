@@ -6326,6 +6326,7 @@ impl Bank {
 
     pub fn calculate_capitalization(&self, debug_verify: bool) -> u64 {
         let can_cached_slot_be_unflushed = true; // implied yes
+        error!("ancestors: {:?}", self.ancestors);
         self.rc.accounts.calculate_capitalization(
             &self.ancestors,
             self.slot(),
@@ -6333,6 +6334,18 @@ impl Bank {
             debug_verify,
             self.epoch_schedule(),
             &self.rent_collector,
+        )
+    }
+
+    pub fn calculate_capitalization_for_minimize(&self, slots: &HashSet<Slot>) -> u64 {
+        self.rc.accounts.calculate_capitalization_for_minimize(
+            &self.ancestors,
+            self.slot(),
+            slots,
+            true,
+            false,
+            self.epoch_schedule(),
+            self.rent_collector(),
         )
     }
 
@@ -6358,6 +6371,12 @@ impl Bank {
         self.capitalization
             .store(self.calculate_capitalization(debug_verify), Relaxed);
         old
+    }
+
+    pub fn set_capitalization_for_minimize(&self, slots: &HashSet<Slot>) {
+        let capitalization = self.calculate_capitalization_for_minimize(slots);
+        error!("capitalization_for_minimize: {}", capitalization);
+        self.capitalization.store(capitalization, Relaxed);
     }
 
     pub fn get_accounts_hash(&self) -> Hash {
@@ -6427,8 +6446,73 @@ impl Bank {
         hash
     }
 
+    pub fn update_accounts_hash_with_index_option_for_minimize(
+        &self,
+        use_index: bool,
+        mut debug_verify: bool,
+        is_startup: bool,
+    ) -> Hash {
+        let (hash, total_lamports) = self
+            .rc
+            .accounts
+            .accounts_db
+            .update_accounts_hash_with_index_option_for_minimize(
+                use_index,
+                debug_verify,
+                self.slot(),
+                &HashSet::new(),
+                &self.ancestors,
+                Some(self.capitalization()),
+                false,
+                self.epoch_schedule(),
+                &self.rent_collector,
+                is_startup,
+            );
+        if total_lamports != self.capitalization() {
+            datapoint_info!(
+                "capitalization_mismatch",
+                ("slot", self.slot(), i64),
+                ("calculated_lamports", total_lamports, i64),
+                ("capitalization", self.capitalization(), i64),
+            );
+
+            if !debug_verify {
+                // cap mismatch detected. It has been logged to metrics above.
+                // Run both versions of the calculation to attempt to get more info.
+                debug_verify = true;
+                self.rc
+                    .accounts
+                    .accounts_db
+                    .update_accounts_hash_with_index_option_for_minimize(
+                        use_index,
+                        debug_verify,
+                        self.slot(),
+                        &HashSet::new(),
+                        &self.ancestors,
+                        Some(self.capitalization()),
+                        false,
+                        self.epoch_schedule(),
+                        &self.rent_collector,
+                        is_startup,
+                    );
+            }
+
+            panic!(
+                "capitalization_mismatch. slot: {}, calculated_lamports: {}, capitalization: {}",
+                self.slot(),
+                total_lamports,
+                self.capitalization()
+            );
+        }
+        hash
+    }
+
     pub fn update_accounts_hash(&self) -> Hash {
         self.update_accounts_hash_with_index_option(true, false, false)
+    }
+
+    pub fn update_accounts_hash_for_minimize(&self) -> Hash {
+        self.update_accounts_hash_with_index_option_for_minimize(false, false, false)
     }
 
     /// A snapshot bank should be purged of 0 lamport accounts which are not part of the hash

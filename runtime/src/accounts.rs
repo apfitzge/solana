@@ -780,6 +780,34 @@ impl Accounts {
             .1
     }
 
+    pub fn calculate_capitalization_for_minimize(
+        &self,
+        ancestors: &Ancestors,
+        slot: Slot,
+        slots: &HashSet<Slot>,
+        can_cached_slot_be_unflushed: bool,
+        debug_verify: bool,
+        epoch_schedule: &EpochSchedule,
+        rent_collector: &RentCollector,
+    ) -> u64 {
+        let use_index = false;
+        let is_startup = false; // there may be conditions where this is called at startup.
+        self.accounts_db
+            .update_accounts_hash_with_index_option_for_minimize(
+                use_index,
+                debug_verify,
+                slot,
+                slots,
+                ancestors,
+                None,
+                can_cached_slot_be_unflushed,
+                epoch_schedule,
+                rent_collector,
+                is_startup,
+            )
+            .1
+    }
+
     /// Only called from startup or test code.
     #[must_use]
     pub fn verify_bank_hash_and_lamports(

@@ -1498,6 +1498,14 @@ fn main() {
             SubCommand::with_name("create-minimized-snapshot")
                 .about("Create a minimized snapshot w/ only the accounts necessary for processing the specified slot range")
                 .arg(&max_genesis_archive_unpacked_size_arg)
+                .arg(&snapshot_version_arg)
+                .arg(
+                    Arg::with_name("output_directory")
+                        .index(1)
+                        .value_name("DIR")
+                        .takes_value(true)
+                        .help("Output directory for the snapshot [default: --snapshot-archive-path if present else --ledger directory]"),
+                )
                 .arg(
                     Arg::with_name("starting_slot")
                         .long("starting-slot")
@@ -2591,6 +2599,20 @@ fn main() {
                 }
             }
             ("create-minimized-snapshot", Some(arg_matches)) => {
+                let output_directory = value_t!(arg_matches, "output_directory", PathBuf)
+                    .unwrap_or_else(|_| match &snapshot_archive_path {
+                        Some(snapshot_archive_path) => snapshot_archive_path.clone(),
+                        None => ledger_path.clone(),
+                    });
+                let snapshot_version = arg_matches.value_of("snapshot_version").map_or(
+                    SnapshotVersion::default(),
+                    |s| {
+                        s.parse::<SnapshotVersion>().unwrap_or_else(|e| {
+                            eprintln!("Error: {}", e);
+                            exit(1)
+                        })
+                    },
+                );
                 // 1. Process and validate arguments
                 let starting_slot = value_t_or_exit!(arg_matches, "starting_slot", Slot);
                 let ending_slot = value_t_or_exit!(arg_matches, "ending_slot", Slot);
@@ -2632,13 +2654,15 @@ fn main() {
                 }
                 info!("minimized_account_set: {:?}", minimized_account_set.iter());
 
+                let snapshot_slot = starting_slot - 1;
+
                 // Load the bank forks
                 let bank_forks = load_bank_forks(
                     arg_matches,
                     &genesis_config,
                     &blockstore,
                     ProcessOptions {
-                        halt_at_slot: Some(ending_slot),
+                        halt_at_slot: Some(snapshot_slot),
                         poh_verify: false,
                         ..ProcessOptions::default()
                     },
@@ -2676,6 +2700,34 @@ fn main() {
                 info!(
                     "Creating minimized snapshot for transactions for slots in range {}..={}",
                     starting_slot, ending_slot
+                );
+
+                bank.rc
+                    .accounts
+                    .accounts_db
+                    .create_minimized_store(snapshot_slot, &minimized_slot_set);
+                bank.set_capitalization_for_minimize(&minimized_slot_set);
+
+                let full_snapshot_archive_info =
+                    snapshot_utils::bank_to_minimized_snapshot_archive(
+                        ledger_path,
+                        &bank,
+                        Some(snapshot_version),
+                        output_directory,
+                        ArchiveFormat::TarZstd,
+                        16,
+                        16,
+                    )
+                    .unwrap_or_else(|err| {
+                        eprintln!("Unable to create snapshot: {}", err);
+                        exit(1);
+                    });
+
+                info!(
+                    "Successfully created snapshot for slot {}, hash {}: {}",
+                    bank.slot(),
+                    bank.hash(),
+                    full_snapshot_archive_info.path().display(),
                 );
 
                 error!("create-minimized-snapshot not implemented yet");

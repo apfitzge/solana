@@ -1842,6 +1842,49 @@ pub fn bank_to_full_snapshot_archive(
     )
 }
 
+pub fn bank_to_minimized_snapshot_archive(
+    bank_snapshots_dir: impl AsRef<Path>,
+    bank: &Bank,
+    snapshot_version: Option<SnapshotVersion>,
+    snapshot_archives_dir: impl AsRef<Path>,
+    archive_format: ArchiveFormat,
+    maximum_full_snapshot_archives_to_retain: usize,
+    maximum_incremental_snapshot_archives_to_retain: usize,
+) -> Result<FullSnapshotArchiveInfo> {
+    let snapshot_version = snapshot_version.unwrap_or_default();
+
+    assert!(bank.is_complete());
+    bank.squash(); // Bank may not be a root
+    bank.force_flush_accounts_cache();
+    bank.clean_accounts(true, false, Some(bank.slot()));
+    bank.update_accounts_hash_for_minimize();
+    bank.rehash(); // Bank accounts may have been manually modified by the caller
+
+    let temp_dir = tempfile::tempdir_in(bank_snapshots_dir)?;
+    let snapshot_storages = bank.get_snapshot_storages(Some(bank.slot() - 1));
+    for snapshot_storage in snapshot_storages.iter() {
+        let ase = snapshot_storage.first().unwrap();
+        error!("snapshot_storage: {:?}", ase.slot);
+        for account in ase.all_accounts() {
+            info!("\t{}", account.meta.pubkey);
+        }
+    }
+    let bank_snapshot_info =
+        add_bank_snapshot(&temp_dir, bank, &snapshot_storages, snapshot_version)?;
+
+    package_and_archive_full_snapshot(
+        bank,
+        &bank_snapshot_info,
+        &temp_dir,
+        snapshot_archives_dir,
+        snapshot_storages,
+        archive_format,
+        snapshot_version,
+        maximum_full_snapshot_archives_to_retain,
+        maximum_incremental_snapshot_archives_to_retain,
+    )
+}
+
 /// Convenience function to create an incremental snapshot archive out of any Bank, regardless of
 /// state.  The Bank will be frozen during the process.
 ///
