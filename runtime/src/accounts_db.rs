@@ -5811,47 +5811,49 @@ impl AccountsDb {
 
     pub(crate) fn calculate_accounts_hash_helper_for_minimize(
         &self,
-        use_index: bool,
         slot: Slot,
         slots: &HashSet<Slot>,
         config: &CalcAccountsHashConfig<'_>,
     ) -> Result<(Hash, u64), BankHashVerificationError> {
         let _guard = self.active_stats.activate(ActiveStatItem::Hash);
-        error!("use_index={}", use_index);
-        if !use_index {
-            let mut collect_time = Measure::start("collect");
-            let combined_maps = slots
-                .iter()
-                .filter_map(|s| self.storage.get_slot_storage_entries(*s))
-                .collect::<Vec<_>>();
-            collect_time.stop();
-            let mut sort_time = Measure::start("sort_storages");
-            let min_root = self.accounts_index.min_alive_root();
-            let storages = SortedStorages::new_with_slots(
-                combined_maps.iter().zip(slots.iter().cloned()),
-                min_root,
-                Some(slot),
-            );
 
-            self.mark_old_slots_as_dirty(&storages, Some(config.epoch_schedule.slots_per_epoch));
-            sort_time.stop();
+        let mut collect_time = Measure::start("collect");
+        let combined_maps = slots
+            .iter()
+            .filter_map(|s| self.storage.get_slot_storage_entries(*s))
+            .collect::<Vec<_>>();
 
-            let mut timings = HashStats {
-                collect_snapshots_us: collect_time.as_us(),
-                storage_sort_us: sort_time.as_us(),
-                ..HashStats::default()
-            };
-            timings.calc_storage_size_quartiles(&combined_maps);
-
-            let result = self.calculate_accounts_hash_without_index(config, &storages, timings);
-
-            // now that calculate_accounts_hash_without_index is complete, we can remove old historical roots
-            self.remove_old_historical_roots(slot, &config.rent_collector.epoch_schedule);
-
-            result
-        } else {
-            self.calculate_accounts_hash(slot, config)
+        for combined_map in combined_maps.iter() {
+            for map in combined_map.iter() {
+                error!("slot={}: {:?}", map.slot(), map.count());
+            }
         }
+
+        collect_time.stop();
+        let mut sort_time = Measure::start("sort_storages");
+        let min_root = self.accounts_index.min_alive_root();
+        let storages = SortedStorages::new_with_slots(
+            combined_maps.iter().zip(slots.iter().cloned()),
+            min_root,
+            Some(slot),
+        );
+
+        self.mark_old_slots_as_dirty(&storages, Some(config.epoch_schedule.slots_per_epoch));
+        sort_time.stop();
+
+        let mut timings = HashStats {
+            collect_snapshots_us: collect_time.as_us(),
+            storage_sort_us: sort_time.as_us(),
+            ..HashStats::default()
+        };
+        timings.calc_storage_size_quartiles(&combined_maps);
+
+        let result = self.calculate_accounts_hash_without_index(config, &storages, timings);
+
+        // now that calculate_accounts_hash_without_index is complete, we can remove old historical roots
+        self.remove_old_historical_roots(slot, &config.rent_collector.epoch_schedule);
+
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5881,25 +5883,12 @@ impl AccountsDb {
     #[allow(clippy::too_many_arguments)]
     fn calculate_accounts_hash_helper_with_verify_for_minimize(
         &self,
-        use_index: bool,
-        debug_verify: bool,
         slot: Slot,
         slots: &HashSet<Slot>,
         config: CalcAccountsHashConfig<'_>,
-        expected_capitalization: Option<u64>,
     ) -> Result<(Hash, u64), BankHashVerificationError> {
         let (hash, total_lamports) =
-            self.calculate_accounts_hash_helper_for_minimize(use_index, slot, slots, &config)?;
-        if debug_verify {
-            // calculate the other way (store or non-store) and verify results match.
-            let (hash_other, total_lamports_other) =
-                self.calculate_accounts_hash_helper_for_minimize(!use_index, slot, slots, &config)?;
-
-            let success = hash == hash_other
-                && total_lamports == total_lamports_other
-                && total_lamports == expected_capitalization.unwrap_or(total_lamports);
-            assert!(success, "update_accounts_hash_with_index_option mismatch. hashes: {}, {}; lamorts: {}, {}; expected lamports: {:?}, using index: {}, slot: {}", hash, hash_other, total_lamports, total_lamports_other, expected_capitalization, use_index, slot);
-        }
+            self.calculate_accounts_hash_helper_for_minimize(slot, slots, &config)?;
         Ok((hash, total_lamports))
     }
 
@@ -5940,12 +5929,9 @@ impl AccountsDb {
     #[allow(clippy::too_many_arguments)]
     pub fn update_accounts_hash_with_index_option_for_minimize(
         &self,
-        use_index: bool,
-        debug_verify: bool,
         slot: Slot,
         slots: &HashSet<Slot>,
         ancestors: &Ancestors,
-        expected_capitalization: Option<u64>,
         can_cached_slot_be_unflushed: bool,
         epoch_schedule: &EpochSchedule,
         rent_collector: &RentCollector,
@@ -5954,8 +5940,6 @@ impl AccountsDb {
         let check_hash = false;
         let (hash, total_lamports) = self
             .calculate_accounts_hash_helper_with_verify_for_minimize(
-                use_index,
-                debug_verify,
                 slot,
                 slots,
                 CalcAccountsHashConfig {
@@ -5966,7 +5950,6 @@ impl AccountsDb {
                     epoch_schedule,
                     rent_collector,
                 },
-                expected_capitalization,
             )
             .unwrap(); // unwrap here will never fail since check_hash = false
         self.set_accounts_hash(slot, hash);

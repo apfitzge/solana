@@ -2704,8 +2704,6 @@ fn main() {
                 //     .accounts
                 //     .accounts_db
                 //     .create_minimized_store(snapshot_slot, &minimized_slot_set);
-                bank.set_capitalization_for_minimize(&minimized_slot_set);
-
                 let full_snapshot_archive_info =
                     snapshot_utils::bank_to_minimized_snapshot_archive(
                         ledger_path,
