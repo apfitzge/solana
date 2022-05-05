@@ -5813,22 +5813,22 @@ impl AccountsDb {
         &self,
         use_index: bool,
         slot: Slot,
-        _slots: &HashSet<Slot>,
+        slots: &HashSet<Slot>,
         config: &CalcAccountsHashConfig<'_>,
     ) -> Result<(Hash, u64), BankHashVerificationError> {
         let _guard = self.active_stats.activate(ActiveStatItem::Hash);
         error!("use_index={}", use_index);
         if !use_index {
             let mut collect_time = Measure::start("collect");
-            let (combined_maps, slots) =
-                self.get_snapshot_storages(slot, Some(slot - 1), config.ancestors);
-            error!("slots={:?}", slots);
+            let combined_maps = slots
+                .iter()
+                .filter_map(|s| self.storage.get_slot_storage_entries(*s))
+                .collect::<Vec<_>>();
             collect_time.stop();
-
             let mut sort_time = Measure::start("sort_storages");
             let min_root = self.accounts_index.min_alive_root();
             let storages = SortedStorages::new_with_slots(
-                combined_maps.iter().zip(slots.into_iter()),
+                combined_maps.iter().zip(slots.iter().cloned()),
                 min_root,
                 Some(slot),
             );
@@ -5893,12 +5893,12 @@ impl AccountsDb {
         if debug_verify {
             // calculate the other way (store or non-store) and verify results match.
             let (hash_other, total_lamports_other) =
-                self.calculate_accounts_hash_helper(!use_index, slot, &config)?;
+                self.calculate_accounts_hash_helper_for_minimize(!use_index, slot, slots, &config)?;
 
             let success = hash == hash_other
                 && total_lamports == total_lamports_other
                 && total_lamports == expected_capitalization.unwrap_or(total_lamports);
-            assert!(success, "update_accounts_hash_with_index_option mismatch. hashes: {}, {}; lamports: {}, {}; expected lamports: {:?}, using index: {}, slot: {}", hash, hash_other, total_lamports, total_lamports_other, expected_capitalization, use_index, slot);
+            assert!(success, "update_accounts_hash_with_index_option mismatch. hashes: {}, {}; lamorts: {}, {}; expected lamports: {:?}, using index: {}, slot: {}", hash, hash_other, total_lamports, total_lamports_other, expected_capitalization, use_index, slot);
         }
         Ok((hash, total_lamports))
     }

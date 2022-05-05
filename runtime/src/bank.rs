@@ -6374,9 +6374,8 @@ impl Bank {
     }
 
     pub fn set_capitalization_for_minimize(&self, slots: &HashSet<Slot>) {
-        let capitalization = self.calculate_capitalization_for_minimize(slots);
-        error!("capitalization_for_minimize: {}", capitalization);
-        self.capitalization.store(capitalization, Relaxed);
+        self.capitalization
+            .store(self.calculate_capitalization_for_minimize(slots), Relaxed);
     }
 
     pub fn get_accounts_hash(&self) -> Hash {
@@ -6448,6 +6447,7 @@ impl Bank {
 
     pub fn update_accounts_hash_with_index_option_for_minimize(
         &self,
+        slots: &HashSet<Slot>,
         use_index: bool,
         mut debug_verify: bool,
         is_startup: bool,
@@ -6460,7 +6460,7 @@ impl Bank {
                 use_index,
                 debug_verify,
                 self.slot(),
-                &HashSet::new(),
+                slots,
                 &self.ancestors,
                 Some(self.capitalization()),
                 false,
@@ -6487,7 +6487,7 @@ impl Bank {
                         use_index,
                         debug_verify,
                         self.slot(),
-                        &HashSet::new(),
+                        slots,
                         &self.ancestors,
                         Some(self.capitalization()),
                         false,
@@ -6511,8 +6511,8 @@ impl Bank {
         self.update_accounts_hash_with_index_option(true, false, false)
     }
 
-    pub fn update_accounts_hash_for_minimize(&self) -> Hash {
-        self.update_accounts_hash_with_index_option_for_minimize(false, false, false)
+    pub fn update_accounts_hash_for_minimize(&self, slots: &HashSet<Slot>) -> Hash {
+        self.update_accounts_hash_with_index_option_for_minimize(slots, false, false, false)
     }
 
     /// A snapshot bank should be purged of 0 lamport accounts which are not part of the hash

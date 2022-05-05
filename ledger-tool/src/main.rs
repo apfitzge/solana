@@ -2613,7 +2613,7 @@ fn main() {
                         })
                     },
                 );
-                // 1. Process and validate arguments
+
                 let starting_slot = value_t_or_exit!(arg_matches, "starting_slot", Slot);
                 let ending_slot = value_t_or_exit!(arg_matches, "ending_slot", Slot);
                 if ending_slot <= starting_slot {
@@ -2631,7 +2631,6 @@ fn main() {
                     "Ending slot doesn't exist"
                 );
 
-                // 2. Create minimized_account_set
                 let mut ancestors = BTreeSet::new();
                 for ancestor in AncestorIterator::new(ending_slot, &blockstore) {
                     ancestors.insert(ancestor);
@@ -2654,9 +2653,8 @@ fn main() {
                 }
                 info!("minimized_account_set: {:?}", minimized_account_set.iter());
 
-                let snapshot_slot = starting_slot - 1;
-
                 // Load the bank forks
+                let snapshot_slot = starting_slot - 1;
                 let bank_forks = load_bank_forks(
                     arg_matches,
                     &genesis_config,
@@ -2702,16 +2700,17 @@ fn main() {
                     starting_slot, ending_slot
                 );
 
-                bank.rc
-                    .accounts
-                    .accounts_db
-                    .create_minimized_store(snapshot_slot, &minimized_slot_set);
+                // bank.rc
+                //     .accounts
+                //     .accounts_db
+                //     .create_minimized_store(snapshot_slot, &minimized_slot_set);
                 bank.set_capitalization_for_minimize(&minimized_slot_set);
 
                 let full_snapshot_archive_info =
                     snapshot_utils::bank_to_minimized_snapshot_archive(
                         ledger_path,
                         &bank,
+                        &minimized_slot_set,
                         Some(snapshot_version),
                         output_directory,
                         ArchiveFormat::TarZstd,
@@ -2729,8 +2728,6 @@ fn main() {
                     bank.hash(),
                     full_snapshot_archive_info.path().display(),
                 );
-
-                error!("create-minimized-snapshot not implemented yet");
             }
             ("accounts", Some(arg_matches)) => {
                 let halt_at_slot = value_t!(arg_matches, "halt_at_slot", Slot).ok();

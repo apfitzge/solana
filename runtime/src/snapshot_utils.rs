@@ -1845,6 +1845,7 @@ pub fn bank_to_full_snapshot_archive(
 pub fn bank_to_minimized_snapshot_archive(
     bank_snapshots_dir: impl AsRef<Path>,
     bank: &Bank,
+    slots: &HashSet<Slot>,
     snapshot_version: Option<SnapshotVersion>,
     snapshot_archives_dir: impl AsRef<Path>,
     archive_format: ArchiveFormat,
@@ -1857,20 +1858,33 @@ pub fn bank_to_minimized_snapshot_archive(
     bank.squash(); // Bank may not be a root
     bank.force_flush_accounts_cache();
     bank.clean_accounts(true, false, Some(bank.slot()));
-    bank.update_accounts_hash_for_minimize();
+    bank.update_accounts_hash_for_minimize(slots);
     bank.rehash(); // Bank accounts may have been manually modified by the caller
 
     let temp_dir = tempfile::tempdir_in(bank_snapshots_dir)?;
-    let snapshot_storages = bank.get_snapshot_storages(Some(bank.slot() - 1));
-    for snapshot_storage in snapshot_storages.iter() {
-        let ase = snapshot_storage.first().unwrap();
-        error!("snapshot_storage: {:?}", ase.slot);
-        for account in ase.all_accounts() {
-            info!("\t{}", account.meta.pubkey);
+    let mut snapshot_storages = Vec::with_capacity(slots.len());
+    for slot in slots {
+        if let Some(stores_lock) = bank.accounts().accounts_db.storage.get_slot_stores(*slot) {
+            let stores = stores_lock
+                .read()
+                .unwrap()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            snapshot_storages.push(stores);
+        }
+    }
+
+    for snapshot_storages in snapshot_storages.iter() {
+        for snapshot_storage in snapshot_storages {
+            error!("snapshot_storage: {:?}", snapshot_storage.slot);
+            for account in snapshot_storage.all_accounts() {
+                info!("\t{}", account.meta.pubkey);
+            }
         }
     }
     let bank_snapshot_info =
-        add_bank_snapshot(&temp_dir, bank, &snapshot_storages, snapshot_version)?;
+        add_bank_snapshot(&temp_dir, bank, &snapshot_storages[..], snapshot_version)?;
 
     package_and_archive_full_snapshot(
         bank,
