@@ -858,7 +858,6 @@ fn assert_capitalization(bank: &Bank) {
 }
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
-use solana_runtime::append_vec;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]

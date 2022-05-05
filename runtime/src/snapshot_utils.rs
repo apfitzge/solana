@@ -1876,14 +1876,6 @@ pub fn bank_to_minimized_snapshot_archive(
         }
     }
 
-    for snapshot_storages in snapshot_storages.iter() {
-        for snapshot_storage in snapshot_storages {
-            error!("snapshot_storage: {:?}", snapshot_storage.slot);
-            for account in snapshot_storage.all_accounts() {
-                info!("\t{}", account.meta.pubkey);
-            }
-        }
-    }
     let bank_snapshot_info =
         add_bank_snapshot(&temp_dir, bank, &snapshot_storages[..], snapshot_version)?;
 

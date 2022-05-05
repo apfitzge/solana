@@ -3047,10 +3047,6 @@ impl AccountsDb {
                 write_versions.push(account.account.meta.write_version);
             }
 
-            for account in accounts.iter() {
-                error!("pubkey={}", account.0);
-            }
-
             let minimized_store = self.get_store_for_minimize(slot, aligned_total);
             let minimized_store_copy = minimized_store.clone();
             info!("slot {} minimized-store: {:?}", slot, minimized_store);
@@ -3076,8 +3072,6 @@ impl AccountsDb {
                     }
                 });
             }
-
-            error!("minimized_store after it all: {:?}", minimized_store_copy);
         }
 
         dead_storages.extend(
@@ -5773,11 +5767,9 @@ impl AccountsDb {
         config: &CalcAccountsHashConfig<'_>,
     ) -> Result<(Hash, u64), BankHashVerificationError> {
         let _guard = self.active_stats.activate(ActiveStatItem::Hash);
-        error!("use_index={}", use_index);
         if !use_index {
             let mut collect_time = Measure::start("collect");
             let (combined_maps, slots) = self.get_snapshot_storages(slot, None, config.ancestors);
-            error!("slots={:?}", slots);
             collect_time.stop();
 
             let mut sort_time = Measure::start("sort_storages");
@@ -5822,12 +5814,6 @@ impl AccountsDb {
             .iter()
             .filter_map(|s| self.storage.get_slot_storage_entries(*s))
             .collect::<Vec<_>>();
-
-        for combined_map in combined_maps.iter() {
-            for map in combined_map.iter() {
-                error!("slot={}: {:?}", map.slot(), map.count());
-            }
-        }
 
         collect_time.stop();
         let mut sort_time = Measure::start("sort_storages");
@@ -6226,10 +6212,6 @@ impl AccountsDb {
         can_cached_slot_be_unflushed: bool,
     ) -> Result<(), BankHashVerificationError> {
         use BankHashVerificationError::*;
-
-        for s in self.storage.all_slots() {
-            error!("slot {} in storage...", s);
-        }
 
         let use_index = false;
         let check_hash = false; // this will not be supported anymore
