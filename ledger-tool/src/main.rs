@@ -2659,7 +2659,7 @@ fn main() {
                         break;
                     }
                 }
-                info!("ancestors: {:?}", ancestors.iter());
+
                 let mut minimized_account_set = HashSet::new();
                 for ancestor in ancestors.iter() {
                     for entries in blockstore.get_slot_entries(*ancestor, 0) {
@@ -2673,41 +2673,33 @@ fn main() {
                     }
                 }
 
-                for (pubkey, vote_account) in bank.vote_accounts().iter() {
-                    info!("adding vote account to minimized account set: {}", pubkey);
+                for (pubkey, _) in bank.vote_accounts().iter() {
                     minimized_account_set.insert(*pubkey);
                 }
 
-                for (pubkey, _account) in bank
+                for (pubkey, _) in bank
                     .get_program_accounts(&stake::program::id(), &ScanConfig::default())
                     .unwrap()
                     .into_iter()
                 {
-                    info!("adding stake account to minimized account set: {}", pubkey);
                     minimized_account_set.insert(pubkey);
                 }
 
-                for (pubkey, account) in genesis_config.accounts.iter() {
-                    info!("adding genesis account: {}", pubkey);
+                for (pubkey, _) in genesis_config.accounts.iter() {
                     minimized_account_set.insert(*pubkey);
                 }
 
                 for (pubkey, _) in bank.feature_set.active.iter() {
-                    info!("adding active feature key: {}", pubkey);
                     minimized_account_set.insert(*pubkey);
                 }
 
                 for pubkey in bank.feature_set.inactive.iter() {
-                    info!("adding inactive feature key: {}", pubkey);
                     minimized_account_set.insert(*pubkey);
                 }
 
                 for pubkey in solana_sdk::sysvar::ALL_IDS.iter() {
-                    info!("adding sysvar account: {}", pubkey);
                     minimized_account_set.insert(*pubkey);
                 }
-
-                info!("minimized_account_set: {:?}", minimized_account_set.iter());
 
                 info!("Loaded working bank at slot {}", bank.slot());
                 let mut minimized_slot_set = HashSet::new();
@@ -2724,10 +2716,6 @@ fn main() {
                         }
                     }
                 }
-                info!(
-                    "Generated minimized_slot_set: {:?}",
-                    minimized_slot_set.iter()
-                );
 
                 info!(
                     "Creating minimized snapshot for transactions for slots in range {}..={}",
@@ -2744,7 +2732,6 @@ fn main() {
                         .accounts_db
                         .minimize_slot_store(*slot, &minimized_account_set)
                     {
-                        storage.flush();
                         slot_stores.push((*slot, storage));
                     }
                 }
@@ -2760,9 +2747,9 @@ fn main() {
                         &slot_stores,
                         Some(snapshot_version),
                         output_directory,
-                        ArchiveFormat::Tar,
-                        16,
-                        16,
+                        ArchiveFormat::TarZstd,
+                        usize::MAX,
+                        usize::MAX,
                     )
                     .unwrap_or_else(|err| {
                         eprintln!("Unable to create snapshot: {}", err);

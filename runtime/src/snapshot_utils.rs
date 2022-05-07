@@ -1867,53 +1867,8 @@ pub fn bank_to_minimized_snapshot_archive(
     let temp_dir = tempfile::tempdir_in(bank_snapshots_dir)?;
     let mut snapshot_storages = Vec::with_capacity(slot_stores.len());
 
-    for (slot, slot_store) in slot_stores.iter() {
-        error!(
-            "slot {} has {}({}) accounts for snapshot",
-            slot,
-            slot_store.count(),
-            slot_store.all_accounts().len()
-        );
+    for (_slot, slot_store) in slot_stores.iter() {
         snapshot_storages.push(vec![slot_store.clone()]);
-
-        // if let Some(stores_lock) = bank.accounts().accounts_db.storage.get_slot_stores(slot) {
-        //     let stores = stores_lock
-        //         .read()
-        //         .unwrap()
-        //         .values()
-        //         .cloned()
-        //         .collect::<Vec<_>>();
-
-        //     let min_store_size = stores.iter().fold(usize::MAX, |a, store| {
-        //         std::cmp::min(a, store.all_accounts().len())
-        //     });
-        //     let stores: Vec<_> = stores
-        //         .into_iter()
-        //         .filter(|store| store.all_accounts().len() == min_store_size)
-        //         .collect();
-
-        //     if stores.len() != 1 {
-        //         error!("huh: {:?}", stores);
-        //         for store in stores.iter() {
-        //             error!(
-        //                 "slot {} in a wtf state: {:?} {}",
-        //                 slot,
-        //                 store.append_vec_id(),
-        //                 store.count()
-        //             );
-        //             for account in store.all_accounts() {
-        //                 error!("account: {}", account.meta.pubkey);
-        //             }
-        //         }
-        //     }
-        //     assert!(stores.len() == 1);
-        //     error!(
-        //         "slot {} has {:?} accounts for snapshot",
-        //         slot,
-        //         stores.first().unwrap().count()
-        //     );
-        //     snapshot_storages.push(stores);
-        // }
     }
 
     let bank_snapshot_info =
