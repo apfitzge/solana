@@ -2630,28 +2630,6 @@ fn main() {
                     "Ending slot doesn't exist"
                 );
 
-                let mut ancestors = BTreeSet::new();
-                for ancestor in AncestorIterator::new(ending_slot, &blockstore) {
-                    ancestors.insert(ancestor);
-                    if ancestor <= starting_slot {
-                        break;
-                    }
-                }
-                info!("ancestors: {:?}", ancestors.iter());
-                let mut minimized_account_set = HashSet::new();
-                for ancestor in ancestors.iter() {
-                    for entries in blockstore.get_slot_entries(*ancestor, 0) {
-                        for entry in entries {
-                            for transaction in entry.transactions {
-                                for pubkey in transaction.message.static_account_keys() {
-                                    minimized_account_set.insert(*pubkey);
-                                }
-                            }
-                        }
-                    }
-                }
-                info!("minimized_account_set: {:?}", minimized_account_set.iter());
-
                 // Load the bank forks
                 let snapshot_slot = starting_slot - 1;
                 let bank_forks = load_bank_forks(
@@ -2673,6 +2651,63 @@ fn main() {
                 let (bank_forks, _) = Some(bank_forks).unwrap().unwrap();
                 let bank_forks = bank_forks.read().unwrap();
                 let bank = bank_forks.working_bank();
+
+                let mut ancestors = BTreeSet::new();
+                for ancestor in AncestorIterator::new(ending_slot, &blockstore) {
+                    ancestors.insert(ancestor);
+                    if ancestor <= starting_slot {
+                        break;
+                    }
+                }
+                info!("ancestors: {:?}", ancestors.iter());
+                let mut minimized_account_set = HashSet::new();
+                for ancestor in ancestors.iter() {
+                    for entries in blockstore.get_slot_entries(*ancestor, 0) {
+                        for entry in entries {
+                            for transaction in entry.transactions {
+                                for pubkey in transaction.message.static_account_keys() {
+                                    minimized_account_set.insert(*pubkey);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (pubkey, vote_account) in bank.vote_accounts().iter() {
+                    info!("adding vote account to minimized account set: {}", pubkey);
+                    minimized_account_set.insert(*pubkey);
+                }
+
+                for (pubkey, _account) in bank
+                    .get_program_accounts(&stake::program::id(), &ScanConfig::default())
+                    .unwrap()
+                    .into_iter()
+                {
+                    info!("adding stake account to minimized account set: {}", pubkey);
+                    minimized_account_set.insert(pubkey);
+                }
+
+                for (pubkey, account) in genesis_config.accounts.iter() {
+                    info!("adding genesis account: {}", pubkey);
+                    minimized_account_set.insert(*pubkey);
+                }
+
+                for (pubkey, _) in bank.feature_set.active.iter() {
+                    info!("adding active feature key: {}", pubkey);
+                    minimized_account_set.insert(*pubkey);
+                }
+
+                for pubkey in bank.feature_set.inactive.iter() {
+                    info!("adding inactive feature key: {}", pubkey);
+                    minimized_account_set.insert(*pubkey);
+                }
+
+                for pubkey in solana_sdk::sysvar::ALL_IDS.iter() {
+                    info!("adding sysvar account: {}", pubkey);
+                    minimized_account_set.insert(*pubkey);
+                }
+
+                info!("minimized_account_set: {:?}", minimized_account_set.iter());
 
                 info!("Loaded working bank at slot {}", bank.slot());
                 let mut minimized_slot_set = HashSet::new();
@@ -2699,18 +2734,33 @@ fn main() {
                     starting_slot, ending_slot
                 );
 
-                // bank.rc
-                //     .accounts
-                //     .accounts_db
-                //     .create_minimized_store(snapshot_slot, &minimized_slot_set);
+                let mut sorted_slots = minimized_slot_set.iter().cloned().collect::<Vec<_>>();
+                sorted_slots.sort();
+
+                let mut slot_stores = Vec::new();
+                for slot in sorted_slots.iter() {
+                    if let Some(storage) = bank
+                        .accounts()
+                        .accounts_db
+                        .minimize_slot_store(*slot, &minimized_account_set)
+                    {
+                        storage.flush();
+                        slot_stores.push((*slot, storage));
+                    }
+                }
+                bank.force_flush_accounts_cache();
+                bank.accounts()
+                    .accounts_db
+                    .shrink_all_slots(false, Some(snapshot_slot));
+
                 let full_snapshot_archive_info =
                     snapshot_utils::bank_to_minimized_snapshot_archive(
                         ledger_path,
                         &bank,
-                        &minimized_slot_set,
+                        &slot_stores,
                         Some(snapshot_version),
                         output_directory,
-                        ArchiveFormat::TarZstd,
+                        ArchiveFormat::Tar,
                         16,
                         16,
                     )

@@ -45,6 +45,8 @@ use {
 mod archive_format;
 pub use archive_format::*;
 
+use crate::accounts_db::AccountStorageEntry;
+
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
 pub const DEFAULT_FULL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS: Slot = 25_000;
@@ -1845,7 +1847,7 @@ pub fn bank_to_full_snapshot_archive(
 pub fn bank_to_minimized_snapshot_archive(
     bank_snapshots_dir: impl AsRef<Path>,
     bank: &Bank,
-    slots: &HashSet<Slot>,
+    slot_stores: &Vec<(Slot, Arc<AccountStorageEntry>)>,
     snapshot_version: Option<SnapshotVersion>,
     snapshot_archives_dir: impl AsRef<Path>,
     archive_format: ArchiveFormat,
@@ -1858,22 +1860,60 @@ pub fn bank_to_minimized_snapshot_archive(
     bank.squash(); // Bank may not be a root
     bank.force_flush_accounts_cache();
     bank.clean_accounts(true, false, Some(bank.slot()));
-    bank.set_capitalization_for_minimize(slots);
-    bank.update_accounts_hash_for_minimize(slots);
+    bank.set_capitalization_for_minimize(slot_stores);
+    bank.update_accounts_hash_for_minimize(slot_stores);
     bank.rehash(); // Bank accounts may have been manually modified by the caller
 
     let temp_dir = tempfile::tempdir_in(bank_snapshots_dir)?;
-    let mut snapshot_storages = Vec::with_capacity(slots.len());
-    for slot in slots {
-        if let Some(stores_lock) = bank.accounts().accounts_db.storage.get_slot_stores(*slot) {
-            let stores = stores_lock
-                .read()
-                .unwrap()
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
-            snapshot_storages.push(stores);
-        }
+    let mut snapshot_storages = Vec::with_capacity(slot_stores.len());
+
+    for (slot, slot_store) in slot_stores.iter() {
+        error!(
+            "slot {} has {}({}) accounts for snapshot",
+            slot,
+            slot_store.count(),
+            slot_store.all_accounts().len()
+        );
+        snapshot_storages.push(vec![slot_store.clone()]);
+
+        // if let Some(stores_lock) = bank.accounts().accounts_db.storage.get_slot_stores(slot) {
+        //     let stores = stores_lock
+        //         .read()
+        //         .unwrap()
+        //         .values()
+        //         .cloned()
+        //         .collect::<Vec<_>>();
+
+        //     let min_store_size = stores.iter().fold(usize::MAX, |a, store| {
+        //         std::cmp::min(a, store.all_accounts().len())
+        //     });
+        //     let stores: Vec<_> = stores
+        //         .into_iter()
+        //         .filter(|store| store.all_accounts().len() == min_store_size)
+        //         .collect();
+
+        //     if stores.len() != 1 {
+        //         error!("huh: {:?}", stores);
+        //         for store in stores.iter() {
+        //             error!(
+        //                 "slot {} in a wtf state: {:?} {}",
+        //                 slot,
+        //                 store.append_vec_id(),
+        //                 store.count()
+        //             );
+        //             for account in store.all_accounts() {
+        //                 error!("account: {}", account.meta.pubkey);
+        //             }
+        //         }
+        //     }
+        //     assert!(stores.len() == 1);
+        //     error!(
+        //         "slot {} has {:?} accounts for snapshot",
+        //         slot,
+        //         stores.first().unwrap().count()
+        //     );
+        //     snapshot_storages.push(stores);
+        // }
     }
 
     let bank_snapshot_info =

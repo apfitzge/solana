@@ -533,6 +533,8 @@ pub struct BankRc {
 #[cfg(RUSTC_WITH_SPECIALIZATION)]
 use solana_frozen_abi::abi_example::AbiExample;
 
+use crate::accounts_db::AccountStorageEntry;
+
 #[cfg(RUSTC_WITH_SPECIALIZATION)]
 impl AbiExample for BankRc {
     fn example() -> Self {
@@ -6336,7 +6338,10 @@ impl Bank {
         )
     }
 
-    pub fn calculate_capitalization_for_minimize(&self, slots: &HashSet<Slot>) -> u64 {
+    pub fn calculate_capitalization_for_minimize(
+        &self,
+        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
+    ) -> u64 {
         self.rc.accounts.calculate_capitalization_for_minimize(
             &self.ancestors,
             self.slot(),
@@ -6371,7 +6376,7 @@ impl Bank {
         old
     }
 
-    pub fn set_capitalization_for_minimize(&self, slots: &HashSet<Slot>) {
+    pub fn set_capitalization_for_minimize(&self, slots: &Vec<(Slot, Arc<AccountStorageEntry>)>) {
         self.capitalization
             .store(self.calculate_capitalization_for_minimize(slots), Relaxed);
     }
@@ -6445,7 +6450,7 @@ impl Bank {
 
     pub fn update_accounts_hash_with_index_option_for_minimize(
         &self,
-        slots: &HashSet<Slot>,
+        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
         is_startup: bool,
     ) -> Hash {
         let (hash, total_lamports) = self
@@ -6483,7 +6488,10 @@ impl Bank {
         self.update_accounts_hash_with_index_option(true, false, false)
     }
 
-    pub fn update_accounts_hash_for_minimize(&self, slots: &HashSet<Slot>) -> Hash {
+    pub fn update_accounts_hash_for_minimize(
+        &self,
+        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
+    ) -> Hash {
         self.update_accounts_hash_with_index_option_for_minimize(slots, false)
     }
 

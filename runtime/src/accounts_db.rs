@@ -2969,6 +2969,137 @@ impl AccountsDb {
             .unwrap_or(self.create_and_insert_store(slot, aligned_total, "minimize"))
     }
 
+    pub fn minimize_slot_store(
+        &self,
+        slot: Slot,
+        minimized_account_set: &HashSet<Pubkey>,
+    ) -> Option<Arc<AccountStorageEntry>> {
+        let stores = self.storage.get_slot_storage_entries(slot).unwrap();
+        let (stored_accounts, num_stores, original_bytes) =
+            self.get_unique_accounts_from_storages(stores.iter());
+
+        let mut stored_accounts: Vec<_> = stored_accounts.into_iter().collect();
+        let original_num_accounts = stored_accounts.len();
+
+        if slot == 109 {
+            error!(
+                "109 contains: {:?}",
+                stored_accounts.iter().map(|x| x.0).collect::<Vec<_>>()
+            );
+        }
+
+        let mut stored_accounts: Vec<_> = stored_accounts
+            .into_iter()
+            .filter(|(pubkey, account)| minimized_account_set.contains(pubkey))
+            .collect();
+        stored_accounts.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        if slot == 109 {
+            error!(
+                "109 contains: {:?}",
+                stored_accounts.iter().map(|x| x.0).collect::<Vec<_>>()
+            );
+        }
+
+        let len = stored_accounts.len();
+        // if len == original_num_accounts || slot == 0 {
+        let test_slots: HashSet<Slot> = vec![100, 101, 102, 103, 104, 105, 106, 107, 108]
+            .into_iter()
+            .collect();
+        if len == original_num_accounts || slot == 0 || !test_slots.contains(&slot) {
+            info!(
+                "skipping slot store minimization for slot {} because no accounts are filtered out",
+                slot
+            );
+            assert!(stores.len() == 1);
+            return Some(stores.first().unwrap().clone());
+        }
+
+        let alive_accounts_collect = Mutex::new(Vec::with_capacity(len));
+        let unrefed_pubkeys_collect = Mutex::new(Vec::with_capacity(len));
+
+        // shrink stats?
+        let alive_total_collect = AtomicUsize::new(0);
+
+        self.thread_pool_clean.install(|| {
+            let chunk_size = 50; // # acounts/thread
+            let chunks = len / chunk_size + 1;
+            (0..chunks).into_par_iter().for_each(|chunk| {
+                let skip = chunk * chunk_size;
+
+                let mut alive_accounts = Vec::with_capacity(chunk_size);
+                let mut unrefed_pubkeys = Vec::with_capacity(chunk_size);
+
+                let alive_total = self.load_accounts_index_for_shrink(
+                    stored_accounts.iter().skip(skip).take(chunk_size),
+                    &mut alive_accounts,
+                    &mut unrefed_pubkeys,
+                );
+
+                // collect
+                alive_accounts_collect
+                    .lock()
+                    .unwrap()
+                    .append(&mut alive_accounts);
+                unrefed_pubkeys_collect
+                    .lock()
+                    .unwrap()
+                    .append(&mut unrefed_pubkeys);
+                alive_total_collect.fetch_add(alive_total, Ordering::Relaxed);
+            });
+        });
+
+        let alive_accounts = alive_accounts_collect.into_inner().unwrap();
+        let unrefed_pubkeys = unrefed_pubkeys_collect.into_inner().unwrap();
+        let alive_total = alive_total_collect.load(Ordering::Relaxed);
+        let aligned_total = Self::page_align(alive_total as u64);
+
+        let total_starting_accounts = stored_accounts.len();
+        let total_accounts_after_shrink = alive_accounts.len();
+        info!(
+            "minimizing: slot: {}, accounts: ({} => {} => {}) bytes: ({} ; aligned to: {})",
+            slot,
+            original_num_accounts,
+            total_starting_accounts,
+            total_accounts_after_shrink,
+            alive_total,
+            aligned_total,
+        );
+
+        if aligned_total > 0 {
+            let mut accounts = Vec::with_capacity(alive_accounts.len());
+            let mut hashes = Vec::with_capacity(alive_accounts.len());
+            let mut write_versions = Vec::with_capacity(alive_accounts.len());
+
+            for (pubkey, account) in alive_accounts {
+                accounts.push((pubkey, &account.account));
+                hashes.push(account.account.hash);
+                write_versions.push(account.account.meta.write_version);
+            }
+
+            let minimized_store = self.get_store_for_minimize(slot, aligned_total);
+            let result = minimized_store.clone();
+            info!("slot {} minimized-store: {:?}", slot, minimized_store);
+            self.store_accounts_frozen(
+                (slot, &accounts[..]),
+                Some(&hashes),
+                Some(Box::new(move |_, _| minimized_store.clone())),
+                Some(Box::new(write_versions.into_iter())),
+            );
+
+            // needed?
+            self.shrink_candidate_slots.lock().unwrap().remove(&slot);
+            info!("dead_storages: {:?}", stores);
+            self.drop_or_recycle_stores(stores);
+
+            Some(result)
+        } else {
+            info!("dead_storages: {:?}", stores);
+            self.drop_or_recycle_stores(stores);
+            None
+        }
+    }
+
     pub fn create_minimized_store(&self, slot: Slot, minimized_slot_set: &HashSet<Slot>) {
         let stores: Vec<_> = minimized_slot_set
             .iter()
@@ -5772,6 +5903,12 @@ impl AccountsDb {
             let (combined_maps, slots) = self.get_snapshot_storages(slot, None, config.ancestors);
             collect_time.stop();
 
+            for combined_map in combined_maps.iter() {
+                for map in combined_map.iter() {
+                    error!("i've got slot {} w/ {} accounts", map.slot(), map.count());
+                }
+            }
+
             let mut sort_time = Measure::start("sort_storages");
             let min_root = self.accounts_index.min_alive_root();
             let storages = SortedStorages::new_with_slots(
@@ -5804,16 +5941,18 @@ impl AccountsDb {
     pub(crate) fn calculate_accounts_hash_helper_for_minimize(
         &self,
         slot: Slot,
-        slots: &HashSet<Slot>,
+        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
         config: &CalcAccountsHashConfig<'_>,
     ) -> Result<(Hash, u64), BankHashVerificationError> {
         let _guard = self.active_stats.activate(ActiveStatItem::Hash);
 
         let mut collect_time = Measure::start("collect");
-        let combined_maps = slots
+
+        let combined_maps: Vec<_> = slots
             .iter()
-            .filter_map(|s| self.storage.get_slot_storage_entries(*s))
-            .collect::<Vec<_>>();
+            .map(|(slot, storage)| vec![storage.clone()])
+            .collect();
+        let slots: Vec<_> = slots.iter().map(|(slot, storage)| *slot).collect();
 
         collect_time.stop();
         let mut sort_time = Measure::start("sort_storages");
@@ -5870,7 +6009,7 @@ impl AccountsDb {
     fn calculate_accounts_hash_helper_with_verify_for_minimize(
         &self,
         slot: Slot,
-        slots: &HashSet<Slot>,
+        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
         config: CalcAccountsHashConfig<'_>,
     ) -> Result<(Hash, u64), BankHashVerificationError> {
         let (hash, total_lamports) =
@@ -5916,7 +6055,7 @@ impl AccountsDb {
     pub fn update_accounts_hash_with_index_option_for_minimize(
         &self,
         slot: Slot,
-        slots: &HashSet<Slot>,
+        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
         ancestors: &Ancestors,
         can_cached_slot_be_unflushed: bool,
         epoch_schedule: &EpochSchedule,

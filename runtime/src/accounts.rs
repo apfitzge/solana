@@ -1,3 +1,5 @@
+use crate::accounts_db::AccountStorageEntry;
+
 use {
     crate::{
         account_overrides::AccountOverrides,
@@ -784,7 +786,7 @@ impl Accounts {
         &self,
         ancestors: &Ancestors,
         slot: Slot,
-        slots: &HashSet<Slot>,
+        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
         can_cached_slot_be_unflushed: bool,
         epoch_schedule: &EpochSchedule,
         rent_collector: &RentCollector,
