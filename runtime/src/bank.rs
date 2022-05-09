@@ -6340,7 +6340,7 @@ impl Bank {
 
     pub fn calculate_capitalization_for_minimize(
         &self,
-        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
+        slots: &Vec<(Slot, Vec<Arc<AccountStorageEntry>>)>,
     ) -> u64 {
         self.rc.accounts.calculate_capitalization_for_minimize(
             &self.ancestors,
@@ -6376,7 +6376,10 @@ impl Bank {
         old
     }
 
-    pub fn set_capitalization_for_minimize(&self, slots: &Vec<(Slot, Arc<AccountStorageEntry>)>) {
+    pub fn set_capitalization_for_minimize(
+        &self,
+        slots: &Vec<(Slot, Vec<Arc<AccountStorageEntry>>)>,
+    ) {
         self.capitalization
             .store(self.calculate_capitalization_for_minimize(slots), Relaxed);
     }
@@ -6450,7 +6453,7 @@ impl Bank {
 
     pub fn update_accounts_hash_with_index_option_for_minimize(
         &self,
-        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
+        slots: &Vec<(Slot, Vec<Arc<AccountStorageEntry>>)>,
         is_startup: bool,
     ) -> Hash {
         let (hash, total_lamports) = self
@@ -6490,7 +6493,7 @@ impl Bank {
 
     pub fn update_accounts_hash_for_minimize(
         &self,
-        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
+        slots: &Vec<(Slot, Vec<Arc<AccountStorageEntry>>)>,
     ) -> Hash {
         self.update_accounts_hash_with_index_option_for_minimize(slots, false)
     }

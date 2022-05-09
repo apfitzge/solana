@@ -1847,7 +1847,7 @@ pub fn bank_to_full_snapshot_archive(
 pub fn bank_to_minimized_snapshot_archive(
     bank_snapshots_dir: impl AsRef<Path>,
     bank: &Bank,
-    slot_stores: &Vec<(Slot, Arc<AccountStorageEntry>)>,
+    slot_stores: &Vec<(Slot, Vec<Arc<AccountStorageEntry>>)>,
     snapshot_version: Option<SnapshotVersion>,
     snapshot_archives_dir: impl AsRef<Path>,
     archive_format: ArchiveFormat,
@@ -1860,16 +1860,21 @@ pub fn bank_to_minimized_snapshot_archive(
     bank.squash(); // Bank may not be a root
     bank.force_flush_accounts_cache();
     bank.clean_accounts(true, false, Some(bank.slot()));
-    bank.set_capitalization_for_minimize(slot_stores);
-    bank.update_accounts_hash_for_minimize(slot_stores);
+
+    bank.set_capitalization();
+    bank.update_accounts_hash();
+    // bank.set_capitalization_for_minimize(slot_stores);
+    // bank.update_accounts_hash_for_minimize(slot_stores);
     bank.rehash(); // Bank accounts may have been manually modified by the caller
 
     let temp_dir = tempfile::tempdir_in(bank_snapshots_dir)?;
-    let mut snapshot_storages = Vec::with_capacity(slot_stores.len());
+    // let mut snapshot_storages = Vec::with_capacity(slot_stores.len());
 
-    for (_slot, slot_store) in slot_stores.iter() {
-        snapshot_storages.push(vec![slot_store.clone()]);
-    }
+    // for (_slot, slot_store) in slot_stores.iter() {
+    //     snapshot_storages.push(slot_store.clone());
+    // }
+
+    let snapshot_storages = bank.get_snapshot_storages(None);
 
     let bank_snapshot_info =
         add_bank_snapshot(&temp_dir, bank, &snapshot_storages[..], snapshot_version)?;

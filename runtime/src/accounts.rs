@@ -320,6 +320,10 @@ impl Accounts {
                                             .push((programdata_address, programdata_account));
                                     } else {
                                         error_counters.account_not_found += 1;
+                                        error!(
+                                            "could not find program account: {}",
+                                            programdata_address
+                                        );
                                         return Err(TransactionError::ProgramAccountNotFound);
                                     }
                                 } else {
@@ -432,6 +436,10 @@ impl Accounts {
             Some(program_account) => program_account.0,
             None => {
                 error_counters.account_not_found += 1;
+                error!(
+                    "could not find program account w/ index: {}",
+                    program_account_index
+                );
                 return Err(TransactionError::ProgramAccountNotFound);
             }
         };
@@ -454,6 +462,7 @@ impl Accounts {
                 }
                 None => {
                     error_counters.account_not_found += 1;
+                    error!("could not find program account: {}", program_id);
                     return Err(TransactionError::ProgramAccountNotFound);
                 }
             };
@@ -483,6 +492,7 @@ impl Accounts {
                         }
                         None => {
                             error_counters.account_not_found += 1;
+                            error!("could not find program account: {}", program_id);
                             return Err(TransactionError::ProgramAccountNotFound);
                         }
                     };
@@ -786,7 +796,7 @@ impl Accounts {
         &self,
         ancestors: &Ancestors,
         slot: Slot,
-        slots: &Vec<(Slot, Arc<AccountStorageEntry>)>,
+        slots: &Vec<(Slot, Vec<Arc<AccountStorageEntry>>)>,
         can_cached_slot_be_unflushed: bool,
         epoch_schedule: &EpochSchedule,
         rent_collector: &RentCollector,

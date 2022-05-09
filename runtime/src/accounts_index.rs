@@ -1070,7 +1070,7 @@ impl<T: IndexValue> AccountsIndex<T> {
             .map(ReadAccountMapEntry::from_account_map_entry)
     }
 
-    fn slot_list_mut<RT>(
+    pub fn slot_list_mut<RT>(
         &self,
         pubkey: &Pubkey,
         user: impl for<'a> FnOnce(&mut RwLockWriteGuard<'a, SlotList<T>>) -> RT,
