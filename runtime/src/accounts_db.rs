@@ -3056,7 +3056,6 @@ impl AccountsDb {
         storage: Arc<AccountStorageEntry>,
         minimized_account_set: &HashSet<Pubkey>,
     ) -> Option<Arc<AccountStorageEntry>> {
-        return Some(storage);
         let slot = storage.slot();
         let storages = vec![storage.clone()];
         let (stored_accounts, _, original_bytes) =
@@ -3075,7 +3074,10 @@ impl AccountsDb {
                     .partition(|(pubkey, _account)| minimized_account_set.contains(pubkey));
 
                 filtered_accounts.iter().for_each(|(pubkey, _account)| {
-                    self.remove_account_from_index(storage.append_vec_id(), pubkey)
+                    self.remove_account_from_index(storage.append_vec_id(), pubkey);
+                    if let Some(cache) = self.accounts_cache.slot_cache(slot) {
+                        cache.remove(&pubkey);
+                    }
                 });
 
                 let mut accounts = Vec::with_capacity(CHUNK_SIZE);

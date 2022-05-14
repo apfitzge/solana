@@ -1861,7 +1861,7 @@ pub fn bank_to_minimized_snapshot_archive(
     bank.force_flush_accounts_cache();
     bank.clean_accounts(true, false, Some(bank.slot()));
 
-    bank.set_capitalization();
+    bank.set_capitalization_for_minimize(&Vec::new());
     bank.update_accounts_hash();
     // bank.set_capitalization_for_minimize(slot_stores);
     // bank.update_accounts_hash_for_minimize(slot_stores);

@@ -6381,7 +6381,7 @@ impl Bank {
         slots: &Vec<(Slot, Vec<Arc<AccountStorageEntry>>)>,
     ) {
         self.capitalization
-            .store(self.calculate_capitalization_for_minimize(slots), Relaxed);
+            .store(self.calculate_capitalization(false), Relaxed);
     }
 
     pub fn get_accounts_hash(&self) -> Hash {

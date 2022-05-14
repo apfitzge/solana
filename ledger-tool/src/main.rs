@@ -2674,6 +2674,7 @@ fn main() {
                                     minimized_account_set.insert(*pubkey);
 
                                     if let Some(account) = bank.get_account(pubkey) {
+                                        minimized_account_set.insert(*account.owner());
                                         if account.executable() {
                                             if bpf_loader_upgradeable::check_id(account.owner()) {
                                                 if let Ok(UpgradeableLoaderState::Program {
@@ -2762,47 +2763,55 @@ fn main() {
                 let mut to_check: HashSet<_> = minimized_slot_set.iter().cloned().collect();
                 let mut loop_count = 0;
                 while !to_check.is_empty() {
-                    error!("PROGRAM ADDING LOOP COUNT: {}", loop_count);
+                    error!(
+                        "PROGRAM ADDING LOOP COUNT: {} {}",
+                        loop_count,
+                        minimized_slot_set.len()
+                    );
                     loop_count += 1;
 
                     for storages in storages_by_slot.iter() {
                         let slot = storages.first().unwrap().slot();
-                        if to_check.contains(&slot) && !minimized_slot_set.contains(&slot) {
+                        if to_check.contains(&slot) {
                             minimized_slot_set.insert(slot);
                             for storage in storages {
                                 for account in storage.all_accounts() {
-                                    if let Some(account) = bank.get_account(&account.meta.pubkey) {
+                                    let pubkey = account.meta.pubkey;
+                                    if let Some(account) = bank.get_account(&pubkey) {
                                         if account.executable() {
                                             if bpf_loader_upgradeable::check_id(account.owner()) {
                                                 if let Ok(UpgradeableLoaderState::Program {
                                                     programdata_address,
                                                 }) = account.state()
                                                 {
-                                                    let entry = bank
+                                                    if let Some(entry) = bank
                                                         .accounts()
                                                         .accounts_db
                                                         .accounts_index
                                                         .get_account_read_entry(
                                                             &programdata_address,
                                                         )
-                                                        .unwrap();
-                                                    let slot_list = entry.slot_list();
-                                                    slot_list.into_iter().for_each(|(s, _)| {
-                                                        if !minimized_slot_set.contains(s) {
-                                                            to_check.insert(*s);
-                                                        }
-                                                    });
+                                                    {
+                                                        let slot_list = entry.slot_list();
+                                                        slot_list.into_iter().for_each(|(s, _)| {
+                                                            if !minimized_slot_set.contains(s) {
+                                                                to_check.insert(*s);
+                                                            }
+                                                        });
+                                                    } else {
+                                                        error!("could not find account {}", pubkey);
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
+                            to_check.remove(&slot);
                         }
-                        to_check.remove(&slot);
                     }
                 }
-                exit(1);
+                error!("minimized_slot_set len: {}", minimized_slot_set.len());
 
                 // for pubkey in minimized_account_set.iter() {
                 //     let read_account_entry = bank
@@ -2846,15 +2855,15 @@ fn main() {
                 sorted_slots.sort();
 
                 let mut slot_stores = Vec::new();
-                // for slot in sorted_slots.iter() {
-                //     let stores = bank
-                //         .accounts()
-                //         .accounts_db
-                //         .minimize_slot_stores(*slot, &minimized_account_set);
-                //     if let Some(stores) = stores {
-                //         slot_stores.push((*slot, stores));
-                //     }
-                // }
+                for slot in sorted_slots.iter() {
+                    let stores = bank
+                        .accounts()
+                        .accounts_db
+                        .minimize_slot_stores(*slot, &minimized_account_set);
+                    if let Some(stores) = stores {
+                        slot_stores.push((*slot, stores));
+                    }
+                }
 
                 let mut fully_removed_slots = HashSet::new();
                 for storages in storages_by_slot.into_iter() {
@@ -2885,54 +2894,59 @@ fn main() {
                     .accounts_db
                     .remove_slots_for_minimize(fully_removed_slots.iter());
 
-                // let storages_by_slot = bank.get_snapshot_storages(None);
-                // let num_after: usize = storages_by_slot.iter().map(|s| s.len()).sum();
-                // let for_snapshot: usize = slot_stores.iter().map(|s| s.1.len()).sum();
-                // error!(
-                //     "num_before: {}, num_after: {} (for_snapshot={})",
-                //     num_before, num_after, for_snapshot
-                // );
+                error!("Done removing....");
+                bank.force_flush_accounts_cache();
+                error!("Flushed...");
 
-                // if num_after != for_snapshot {
-                //     let slot_stores_slot_to_storage_count: HashMap<_, _> = slot_stores
-                //         .iter()
-                //         .map(|(slot, stores)| (*slot, stores.len()))
-                //         .collect();
-
-                //     let storages_by_slot_slot_to_storage_count: HashMap<_, _> = storages_by_slot
-                //         .iter()
-                //         .map(|storages| (storages.first().unwrap().slot(), storages.len()))
-                //         .collect();
-
-                //     let slot_stores_slots: HashSet<Slot> =
-                //         slot_stores_slot_to_storage_count.keys().cloned().collect();
-                //     let storages_by_slot_slots: HashSet<Slot> =
-                //         storages_by_slot_slot_to_storage_count
-                //             .keys()
-                //             .cloned()
+                // let slot_to_store_ids_snapshot: HashMap<Slot, Vec<_>> = bank
+                //     .get_snapshot_storages(None)
+                //     .into_iter()
+                //     .map(|storages| {
+                //         let slot = storages.first().unwrap().slot();
+                //         let store_ids = storages
+                //             .into_iter()
+                //             .map(|storage| storage.append_vec_id())
                 //             .collect();
+                //         (slot, store_ids)
+                //     })
+                //     .collect();
 
-                //     assert!(slot_stores_slots.len() == storages_by_slot_slots.len());
-                //     assert!(
-                //         slot_stores_slots
-                //             .difference(&storages_by_slot_slots)
-                //             .count()
-                //             == 0
-                //     );
-                //     assert!(
-                //         storages_by_slot_slots
-                //             .difference(&slot_stores_slots)
-                //             .count()
-                //             == 0
-                //     );
+                let (storages, slots) = bank.accounts().accounts_db.get_snapshot_storages(
+                    bank.slot(),
+                    None,
+                    Some(&bank.ancestors),
+                );
+                let slot_to_store_ids_snapshot: HashMap<Slot, Vec<_>> = storages
+                    .into_iter()
+                    .map(|storages| {
+                        let slot = storages.first().unwrap().slot();
+                        let store_ids = storages
+                            .into_iter()
+                            .map(|storage| storage.append_vec_id())
+                            .collect();
+                        (slot, store_ids)
+                    })
+                    .collect();
 
-                //     for (key, stores_len) in slot_stores_slot_to_storage_count.iter() {
-                //         let stores_len2 = storages_by_slot_slot_to_storage_count.get(key).unwrap();
-                //         assert_eq!(stores_len, stores_len2);
-                //     }
-                // }
+                let slot_to_store_ids_custom: HashMap<Slot, Vec<_>> = slot_stores
+                    .iter()
+                    .map(|(slot, storages)| {
+                        let store_ids = storages
+                            .into_iter()
+                            .map(|storage| storage.append_vec_id())
+                            .collect();
+                        (*slot, store_ids)
+                    })
+                    .collect();
 
-                // assert!(num_after == for_snapshot);
+                for slot in slot_to_store_ids_snapshot.keys() {
+                    error!("slot {}", slot);
+                    let store_ids1 = slot_to_store_ids_snapshot.get(slot).unwrap();
+                    let store_ids2 = slot_to_store_ids_custom.get(slot).unwrap();
+
+                    assert_eq!(store_ids1.len(), store_ids2.len());
+                    assert_eq!(store_ids1, store_ids2);
+                }
 
                 let full_snapshot_archive_info =
                     snapshot_utils::bank_to_minimized_snapshot_archive(
