@@ -2826,7 +2826,7 @@ impl Blockstore {
                         entry
                             .transactions
                             .iter()
-                            .flat_map(|tx| tx.message.static_account_keys().into_iter().cloned())
+                            .flat_map(|tx| tx.message.static_account_keys().iter().cloned())
                             .collect()
                     })
                     .collect()
