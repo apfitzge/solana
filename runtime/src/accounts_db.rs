@@ -2958,7 +2958,11 @@ impl AccountsDb {
             }
         }
 
-        self.remove_slots_for_minimize(dead_slots.iter());
+        self.purge_slots_from_cache_and_store(
+            dead_slots.iter(),
+            &self.external_purge_slots_stats,
+            true,
+        );
         self.drop_or_recycle_stores(dead_storages);
     }
 
@@ -4276,17 +4280,6 @@ impl AccountsDb {
             }
         }
         recycle_stores_write_elapsed.as_us()
-    }
-
-    pub fn remove_slots_for_minimize<'a>(
-        &self,
-        slots_to_remove: impl Iterator<Item = &'a Slot> + Clone,
-    ) {
-        self.purge_slots_from_cache_and_store(
-            slots_to_remove,
-            &self.external_purge_slots_stats,
-            true,
-        );
     }
 
     /// Purges every slot in `removed_slots` from both the cache and storage. This includes
