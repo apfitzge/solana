@@ -27,7 +27,7 @@ use {
             self, AccessType, BlockstoreOptions, BlockstoreRecoveryMode, Database,
             LedgerColumnOptions,
         },
-        blockstore_processor::{BlockstoreProcessorError, ProcessOptions},
+        blockstore_processor::{BlockstoreProcessorError, ProcessCallback, ProcessOptions},
         shred::Shred,
     },
     solana_measure::measure::Measure,
@@ -874,15 +874,9 @@ fn open_genesis_config_by(ledger_path: &Path, matches: &ArgMatches<'_>) -> Genes
 
 fn minimize_bank_for_snapshot(
     genesis_config: &GenesisConfig,
-    blockstore: &Blockstore,
     bank: Arc<Bank>,
-    snapshot_slot: Slot,
-    ending_slot: Slot,
+    mut minimized_account_set: HashSet<Pubkey>,
 ) {
-    let mut minimized_account_set = blockstore
-        .get_accounts_used_in_range(snapshot_slot, ending_slot)
-        .unwrap();
-
     for (pubkey, _) in bank.vote_accounts().iter() {
         minimized_account_set.insert(*pubkey);
     }
@@ -929,7 +923,7 @@ fn minimize_bank_for_snapshot(
         .collect();
     minimized_account_set.extend(owner_accounts.into_iter());
 
-    let programdata_accounts: HashSet<_> = minimized_account_set
+    let program_data_accounts: HashSet<_> = minimized_account_set
         .iter()
         .filter_map(|pubkey| {
             bank.get_account(pubkey)
@@ -947,15 +941,7 @@ fn minimize_bank_for_snapshot(
                 })
         })
         .collect();
-    minimized_account_set.extend(programdata_accounts.into_iter());
-
-    info!(
-        "Generated minimized account set with {} accounts for slots {}..={}",
-        minimized_account_set.len(),
-        snapshot_slot,
-        ending_slot
-    );
-
+    minimized_account_set.extend(program_data_accounts.into_iter());
     let mut minimized_slot_set = HashSet::new();
     minimized_account_set.iter().for_each(|pubkey| {
         if let Some(read_entry) = bank
@@ -971,7 +957,7 @@ fn minimize_bank_for_snapshot(
     });
 
     bank.accounts().accounts_db.minimize_accounts_db(
-        snapshot_slot,
+        bank.slot(),
         &minimized_account_set,
         &minimized_slot_set,
     );
@@ -2491,6 +2477,49 @@ fn main() {
                     ""
                 };
 
+                let minimized_account_set = if is_minimize {
+                    let minimized_account_set = blockstore
+                        .get_accounts_used_in_range(snapshot_slot, ending_slot.unwrap())
+                        .unwrap();
+
+                    let minimized_account_set =
+                        Arc::new(std::sync::Mutex::new(minimized_account_set));
+
+                    let freeze_callback = {
+                        let minimized_account_set = minimized_account_set.clone();
+                        Arc::new(move |bank: &Bank| {
+                            let mut minimized_account_set = minimized_account_set.lock().unwrap();
+                            bank.accounts()
+                                .accounts_db
+                                .get_touched_accounts(bank.slot(), &mut minimized_account_set);
+                        })
+                    };
+
+                    let bank_forks = load_bank_forks(
+                        arg_matches,
+                        &genesis_config,
+                        &blockstore,
+                        ProcessOptions {
+                            halt_at_slot: ending_slot,
+                            poh_verify: false,
+                            freeze_callback: Some(freeze_callback),
+                            ..ProcessOptions::default()
+                        },
+                        snapshot_archive_path.clone(),
+                        incremental_snapshot_archive_path.clone(),
+                    )
+                    .unwrap()
+                    .0;
+                    Some(
+                        Arc::<std::sync::Mutex<HashSet<Pubkey>>>::try_unwrap(minimized_account_set)
+                            .unwrap()
+                            .into_inner()
+                            .unwrap(),
+                    )
+                } else {
+                    None
+                };
+
                 info!(
                     "Creating {}snapshot of slot {} in {}",
                     snapshot_type_str,
@@ -2719,10 +2748,8 @@ fn main() {
                         if is_minimize {
                             minimize_bank_for_snapshot(
                                 &genesis_config,
-                                &blockstore,
                                 bank.clone(),
-                                snapshot_slot,
-                                ending_slot.unwrap(),
+                                minimized_account_set.unwrap(),
                             );
                         }
 

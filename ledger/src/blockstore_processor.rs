@@ -592,6 +592,7 @@ pub struct ProcessOptions {
     pub full_leader_cache: bool,
     pub halt_at_slot: Option<Slot>,
     pub entry_callback: Option<ProcessCallback>,
+    pub freeze_callback: Option<ProcessCallback>,
     pub new_hard_forks: Option<Vec<Slot>>,
     pub debug_keys: Option<Arc<HashSet<Pubkey>>>,
     pub account_indexes: AccountSecondaryIndexes,
@@ -1454,6 +1455,10 @@ fn process_single_slot(
         blockstore.insert_bank_hash(bank.slot(), bank.hash(), false);
     }
     cache_block_meta(bank, cache_block_meta_sender);
+
+    if let Some(freeze_callback) = &opts.freeze_callback {
+        freeze_callback(bank);
+    }
 
     Ok(())
 }

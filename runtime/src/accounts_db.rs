@@ -6331,6 +6331,10 @@ impl AccountsDb {
         (hashes, scan.as_us(), accumulate)
     }
 
+    pub fn get_touched_accounts(&self, slot: Slot, accounts: &mut HashSet<Pubkey>) {
+        let (hashes, _, _) = self.get_pubkey_hash_for_slot(slot);
+        accounts.extend(hashes.into_iter().map(|(pubkey, _hash)| pubkey));
+    }
     pub fn get_accounts_delta_hash_with_rewrites(
         &self,
         slot: Slot,
