@@ -358,6 +358,58 @@ impl AppendVec {
         Ok((new, num_accounts))
     }
 
+    pub fn new_from_file_without_size<P: AsRef<Path>>(path: P) -> io::Result<(Self, usize)> {
+        let data = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(false)
+            .open(&path)?;
+
+        let file_size = std::fs::metadata(&path)?.len() as usize;
+        AppendVec::sanitize_len_and_size(file_size, file_size);
+
+        let map = unsafe {
+            let result = MmapMut::map_mut(&data);
+            if result.is_err() {
+                // for vm.max_map_count, error is: {code: 12, kind: Other, message: "Cannot allocate memory"}
+                info!("memory map error: {:?}. This may be because vm.max_map_count is not set correctly.", result);
+            }
+            result?
+        };
+
+        let new = AppendVec {
+            path: path.as_ref().to_path_buf(),
+            map,
+            append_lock: Mutex::new(()),
+            current_len: AtomicUsize::new(file_size),
+            file_size: file_size as u64,
+            remove_on_drop: true,
+        };
+
+        let (sanitized, num_accounts) = {
+            let mut offset = 0;
+
+            // This discards allocated accounts immediately after check at each loop iteration.
+            //
+            // This code should not reuse AppendVec.accounts() method as the current form or
+            // extend it to be reused here because it would allow attackers to accumulate
+            // some measurable amount of memory needlessly.
+            let mut num_accounts = 0;
+            while let Some((account, next_offset)) = new.get_account(offset) {
+                assert!(account.sanitize());
+                offset = next_offset;
+                num_accounts += 1;
+            }
+            let aligned_current_len = u64_align!(new.current_len.load(Ordering::Acquire));
+
+            new.current_len.store(offset, Ordering::Relaxed);
+
+            (true, num_accounts)
+        };
+
+        Ok((new, num_accounts))
+    }
+
     fn sanitize_layout_and_length(&self) -> (bool, usize) {
         let mut offset = 0;
 

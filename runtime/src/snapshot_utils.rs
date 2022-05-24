@@ -43,11 +43,22 @@ use {
 };
 
 mod archive_format;
+use std::{
+    collections::hash_map::Entry,
+    sync::{atomic::AtomicU32, Mutex},
+};
+
 pub use archive_format::*;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    account_info::AccountInfo, accounts_index::AccountsIndex,
+    account_info::AccountInfo,
+    accounts_db::{
+        AccountStorageEntry, AccountsDb, AppendVecId, GenerateIndexAccountsMap,
+        GenerateIndexTimings, IndexAccountMapEntry, StorageSizeAndCountMap,
+    },
+    accounts_index::AccountsIndex,
+    append_vec::{AppendVec, AppendVecAccountsIter},
     hardened_unpack::streaming_unpack_snapshot,
 };
 
@@ -1085,7 +1096,7 @@ where
     let unpacked_snapshots_dir = unpack_dir.path().join("snapshots");
 
     let mut measure_untar_and_index = Measure::start(measure_name);
-    let unpacked_append_vec_map = streaming_untar_snapshot_in(
+    let (storage, storage_info) = streaming_untar_snapshot_in(
         snapshot_archive_path,
         unpack_dir.path(),
         account_paths,
@@ -1502,7 +1513,10 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     ledger_dir: &Path,
     account_paths: &[PathBuf],
     parallel_archivers: usize,
-) -> Result<AccountsIndex<AccountInfo>> {
+) -> Result<(
+    HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    StorageSizeAndCountMap,
+)> {
     assert!(parallel_archivers > 0);
     // a shared 'reader' that reads the decompressed stream once, keeps some history, and acts as a reader for multiple parallel archive readers
     let shared_buffer = SharedBuffer::new(reader());
@@ -1548,15 +1562,118 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         .build()
         .unwrap();
 
-    while let Ok(append_vec_pathbuf) = rx.recv() {
-        indexing_thread_pool.spawn(move || {
-            error!("indexing thread received: {:?}", append_vec_pathbuf);
-        })
+    fn get_slot_and_append_vec_id(filename: &str) -> (Slot, AppendVecId) {
+        let mut split = filename.split('.');
+        let slot = split.next().unwrap().parse().unwrap();
+        let append_vec_id = split.next().unwrap().parse().unwrap();
+        assert!(split.next().is_none());
+
+        (slot, append_vec_id)
     }
 
-    std::process::exit(1);
+    let (es_tx, es_rx) = crossbeam_channel::unbounded();
 
-    Err(SnapshotError::NoSnapshotArchives)
+    let next_append_vec_id = Arc::new(AtomicU32::new(0));
+    let storage: Arc<Mutex<HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let storage_info = Arc::new(StorageSizeAndCountMap::default());
+    let storage_info_timings = Arc::new(Mutex::new(GenerateIndexTimings::default()));
+
+    while let Ok(append_vec_pathbuf) = rx.recv() {
+        let storage_info = storage_info.clone();
+        let storage_info_timings = storage_info_timings.clone();
+        let es_tx = es_tx.clone();
+        let storage = storage.clone();
+        let next_append_vec_id = next_append_vec_id.clone();
+        indexing_thread_pool.spawn(move || {
+            let new_append_vec_id =
+                next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let (slot, append_vec_id) = get_slot_and_append_vec_id(&append_vec_pathbuf.0);
+
+            let path_buf = append_vec_pathbuf.1;
+            let remapped_file_name = AppendVec::file_name(slot, new_append_vec_id);
+            let remapped_append_vec_path = path_buf.parent().unwrap().join(&remapped_file_name);
+
+            if append_vec_id != new_append_vec_id {
+                error!("renaming: {:?} -> {:?}", path_buf, remapped_append_vec_path);
+                std::fs::rename(path_buf, &remapped_append_vec_path);
+            }
+
+            let filesize = std::fs::metadata(&remapped_append_vec_path).unwrap().len() as usize;
+            let (accounts, num_accounts) =
+                AppendVec::new_from_file_without_size(&remapped_append_vec_path).unwrap();
+            let u_storage_entry = Arc::new(AccountStorageEntry::new_existing(
+                slot,
+                new_append_vec_id,
+                accounts,
+                num_accounts,
+            ));
+
+            let pubkey_to_index_entry = temporary_process_storage_entry(&u_storage_entry);
+            AccountsDb::update_storage_info(
+                &storage_info.clone(),
+                &pubkey_to_index_entry,
+                &storage_info_timings,
+            );
+
+            if !storage.lock().unwrap().contains_key(&slot) {
+                storage.lock().unwrap().insert(slot, HashMap::new());
+            }
+            storage
+                .lock()
+                .unwrap()
+                .get_mut(&slot)
+                .unwrap()
+                .insert(append_vec_id, u_storage_entry);
+
+            es_tx.send(());
+        });
+    }
+
+    drop(es_tx); // drop the local copy so that when the other clones get dropped we get an Err. After redoing this we just pass to a function
+    while let Ok(()) = es_rx.recv() {}
+
+    let storage = Arc::try_unwrap(storage).unwrap().into_inner().unwrap();
+    error!(
+        "I have created the storage map w/ keys: {:?}",
+        storage.keys()
+    );
+
+    let storage_info = Arc::try_unwrap(storage_info).unwrap();
+
+    Ok((storage, storage_info))
+}
+
+fn temporary_process_storage_entry(
+    storage_entry: &Arc<AccountStorageEntry>,
+) -> GenerateIndexAccountsMap {
+    let num_accounts = storage_entry.approx_stored_count();
+    let mut accounts_map = GenerateIndexAccountsMap::with_capacity(num_accounts);
+    AppendVecAccountsIter::new(&storage_entry.accounts).for_each(|stored_account| {
+        let this_version = stored_account.meta.write_version;
+        let pubkey = stored_account.meta.pubkey;
+        match accounts_map.entry(pubkey) {
+            Entry::Vacant(entry) => {
+                entry.insert(IndexAccountMapEntry {
+                    write_version: this_version,
+                    store_id: storage_entry.append_vec_id(),
+                    stored_account,
+                });
+            }
+            Entry::Occupied(mut entry) => {
+                let occupied_version = entry.get().write_version;
+                if occupied_version < this_version {
+                    entry.insert(IndexAccountMapEntry {
+                        write_version: this_version,
+                        store_id: storage_entry.append_vec_id(),
+                        stored_account,
+                    });
+                }
+            }
+        }
+    });
+    accounts_map
 }
 
 fn unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
@@ -1603,41 +1720,43 @@ fn streaming_untar_snapshot_file(
     account_paths: &[PathBuf],
     archive_format: ArchiveFormat,
     parallel_divisions: usize,
-) -> Result<AccountsIndex<AccountInfo>> {
+) -> Result<(
+    HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    StorageSizeAndCountMap,
+)> {
     let open_file = || File::open(&snapshot_tar).unwrap();
-    let accounts_index = match archive_format {
+    match archive_format {
         ArchiveFormat::TarBzip2 => streaming_unpack_snapshot_local(
             || BzDecoder::new(BufReader::new(open_file())),
             unpack_dir,
             account_paths,
             parallel_divisions,
-        )?,
+        ),
         ArchiveFormat::TarGzip => streaming_unpack_snapshot_local(
             || GzDecoder::new(BufReader::new(open_file())),
             unpack_dir,
             account_paths,
             parallel_divisions,
-        )?,
+        ),
         ArchiveFormat::TarZstd => streaming_unpack_snapshot_local(
             || zstd::stream::read::Decoder::new(BufReader::new(open_file())).unwrap(),
             unpack_dir,
             account_paths,
             parallel_divisions,
-        )?,
+        ),
         ArchiveFormat::TarLz4 => streaming_unpack_snapshot_local(
             || lz4::Decoder::new(BufReader::new(open_file())).unwrap(),
             unpack_dir,
             account_paths,
             parallel_divisions,
-        )?,
+        ),
         ArchiveFormat::Tar => streaming_unpack_snapshot_local(
             || BufReader::new(open_file()),
             unpack_dir,
             account_paths,
             parallel_divisions,
-        )?,
-    };
-    Ok(accounts_index)
+        ),
+    }
 }
 
 fn untar_snapshot_file(
@@ -1689,7 +1808,10 @@ fn streaming_untar_snapshot_in<P: AsRef<Path>>(
     account_paths: &[PathBuf],
     archive_format: ArchiveFormat,
     parallel_divisions: usize,
-) -> Result<AccountsIndex<AccountInfo>> {
+) -> Result<(
+    HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    StorageSizeAndCountMap,
+)> {
     streaming_untar_snapshot_file(
         snapshot_tar.as_ref(),
         unpack_dir,
