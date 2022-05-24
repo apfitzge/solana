@@ -255,7 +255,7 @@ struct SlotIndexGenerationInfo {
 }
 
 #[derive(Default, Debug)]
-struct GenerateIndexTimings {
+pub struct GenerateIndexTimings {
     pub index_time: u64,
     pub scan_time: u64,
     pub insertion_time_us: u64,
@@ -272,11 +272,11 @@ struct GenerateIndexTimings {
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
-struct StorageSizeAndCount {
+pub struct StorageSizeAndCount {
     pub stored_size: usize,
     pub count: usize,
 }
-type StorageSizeAndCountMap = DashMap<AppendVecId, StorageSizeAndCount>;
+pub type StorageSizeAndCountMap = DashMap<AppendVecId, StorageSizeAndCount>;
 
 impl GenerateIndexTimings {
     pub fn report(&self) {
@@ -1717,13 +1717,13 @@ impl<'a> ReadableAccount for StoredAccountMeta<'a> {
     }
 }
 
-struct IndexAccountMapEntry<'a> {
+pub struct IndexAccountMapEntry<'a> {
     pub write_version: StoredMetaWriteVersion,
     pub store_id: AppendVecId,
     pub stored_account: StoredAccountMeta<'a>,
 }
 
-type GenerateIndexAccountsMap<'a> = HashMap<Pubkey, IndexAccountMapEntry<'a>>;
+pub type GenerateIndexAccountsMap<'a> = HashMap<Pubkey, IndexAccountMapEntry<'a>>;
 
 /// called on a struct while scanning append vecs
 trait AppendVecScan: Send + Sync + Clone {
@@ -8315,7 +8315,7 @@ impl AccountsDb {
         accounts_data_len_from_duplicates as u64
     }
 
-    fn update_storage_info(
+    pub fn update_storage_info(
         storage_info: &StorageSizeAndCountMap,
         accounts_map: &GenerateIndexAccountsMap<'_>,
         timings: &Mutex<GenerateIndexTimings>,

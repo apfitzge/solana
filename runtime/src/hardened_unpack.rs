@@ -427,7 +427,6 @@ pub fn streaming_unpack_snapshot<A: Read>(
     parallel_selector: Option<ParallelSelector>,
 ) -> Result<()> {
     assert!(!account_paths.is_empty());
-    let mut unpacked_append_vec_map = UnpackedAppendVecMap::new();
     let mut i = 0;
 
     streaming_unpack_archive(
