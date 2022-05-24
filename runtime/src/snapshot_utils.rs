@@ -44,6 +44,12 @@ use {
 
 mod archive_format;
 pub use archive_format::*;
+use rayon::ThreadPoolBuilder;
+
+use crate::{
+    account_info::AccountInfo, accounts_index::AccountsIndex,
+    hardened_unpack::streaming_unpack_snapshot,
+};
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
@@ -173,6 +179,14 @@ struct UnarchivedSnapshot {
     unpacked_append_vec_map: UnpackedAppendVecMap,
     unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion,
     measure_untar: Measure,
+}
+
+/// Helper type to bundle up the tresults form `unarchive_and_index_snapshot()`
+#[derive(Debug)]
+struct UnarchivedIndexedSnapshot {
+    unpack_dir: TempDir,
+    accounts_index: AccountsIndex<AccountInfo>,
+    measure_unarchive_and_index: Measure,
 }
 
 /// Helper type for passing around the unpacked snapshots dir and the snapshot version together
@@ -826,6 +840,17 @@ pub fn bank_from_snapshot_archives(
         std::cmp::max(1, num_cpus::get() / 4),
     );
 
+    let unarchived_and_indexed_full_snapshot = unarchive_and_index_snapshot(
+        &bank_snapshots_dir,
+        TMP_SNAPSHOT_ARCHIVE_PREFIX,
+        full_snapshot_archive_info.path(),
+        "snapshot untar and index",
+        account_paths,
+        full_snapshot_archive_info.archive_format(),
+        parallel_divisions,
+    );
+    std::process::exit(1);
+
     let unarchived_full_snapshot = unarchive_snapshot(
         &bank_snapshots_dir,
         TMP_SNAPSHOT_ARCHIVE_PREFIX,
@@ -1032,6 +1057,41 @@ fn verify_bank_against_expected_slot_hash(
     }
 
     Ok(())
+}
+
+/// Perform the common tasks when unarchiving and indexing a snapshot. Handles creating
+/// the temporary directories, untaring, indexing, reading the version file, and returning
+/// those fields plus the accounts index.
+fn unarchive_and_index_snapshot<P, Q>(
+    bank_snapshots_dir: P,
+    unpacked_snapshots_dir_prefix: &'static str,
+    snapshot_archive_path: Q,
+    measure_name: &'static str,
+    account_paths: &[PathBuf],
+    archive_format: ArchiveFormat,
+    parallel_divisions: usize,
+) -> Result<UnarchivedIndexedSnapshot>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    let unpack_dir = tempfile::Builder::new()
+        .prefix(unpacked_snapshots_dir_prefix)
+        .tempdir_in(bank_snapshots_dir)?;
+    let unpacked_snapshots_dir = unpack_dir.path().join("snapshots");
+
+    let mut measure_untar_and_index = Measure::start(measure_name);
+    let unpacked_append_vec_map = streaming_untar_snapshot_in(
+        snapshot_archive_path,
+        unpack_dir.path(),
+        account_paths,
+        archive_format,
+        parallel_divisions,
+    )?;
+    measure_untar_and_index.stop();
+    info!("{}", measure_untar_and_index);
+
+    Err(SnapshotError::NoSnapshotArchives)
 }
 
 /// Perform the common tasks when unarchiving a snapshot.  Handles creating the temporary
@@ -1433,6 +1493,68 @@ pub fn purge_old_snapshot_archives(
     }
 }
 
+fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
+    reader: F,
+    ledger_dir: &Path,
+    account_paths: &[PathBuf],
+    parallel_archivers: usize,
+) -> Result<AccountsIndex<AccountInfo>> {
+    assert!(parallel_archivers > 0);
+    // a shared 'reader' that reads the decompressed stream once, keeps some history, and acts as a reader for multiple parallel archive readers
+    let shared_buffer = SharedBuffer::new(reader());
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+
+    let ledger_dir = ledger_dir.to_owned();
+    let account_paths = account_paths.to_owned();
+
+    let untar_thread_pool = ThreadPoolBuilder::default()
+        .num_threads(parallel_archivers)
+        .build()
+        .unwrap();
+    let readers = (0..parallel_archivers)
+        .into_iter()
+        .map(|_| SharedBufferReader::new(&shared_buffer))
+        .collect::<Vec<_>>();
+    untar_thread_pool.spawn(move || {
+        let ledger_dir = ledger_dir;
+        let account_paths = account_paths;
+
+        readers
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(index, reader)| {
+                let parallel_selector = Some(ParallelSelector {
+                    index,
+                    divisions: parallel_archivers,
+                });
+                let mut archive = Archive::new(reader);
+                streaming_unpack_snapshot(
+                    tx.clone(),
+                    &mut archive,
+                    &ledger_dir,
+                    &account_paths,
+                    parallel_selector,
+                );
+            });
+    });
+
+    let indexing_thread_pool = ThreadPoolBuilder::default()
+        .num_threads(num_cpus::get())
+        .build()
+        .unwrap();
+
+    while let Ok(append_vec_pathbuf) = rx.recv() {
+        indexing_thread_pool.spawn(move || {
+            error!("indexing thread received: {:?}", append_vec_pathbuf);
+        })
+    }
+
+    std::process::exit(1);
+
+    Err(SnapshotError::NoSnapshotArchives)
+}
+
 fn unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
     reader: F,
     ledger_dir: &Path,
@@ -1469,6 +1591,49 @@ fn unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
     }
 
     Ok(unpacked_append_vec_map)
+}
+
+fn streaming_untar_snapshot_file(
+    snapshot_tar: &Path,
+    unpack_dir: &Path,
+    account_paths: &[PathBuf],
+    archive_format: ArchiveFormat,
+    parallel_divisions: usize,
+) -> Result<AccountsIndex<AccountInfo>> {
+    let open_file = || File::open(&snapshot_tar).unwrap();
+    let accounts_index = match archive_format {
+        ArchiveFormat::TarBzip2 => streaming_unpack_snapshot_local(
+            || BzDecoder::new(BufReader::new(open_file())),
+            unpack_dir,
+            account_paths,
+            parallel_divisions,
+        )?,
+        ArchiveFormat::TarGzip => streaming_unpack_snapshot_local(
+            || GzDecoder::new(BufReader::new(open_file())),
+            unpack_dir,
+            account_paths,
+            parallel_divisions,
+        )?,
+        ArchiveFormat::TarZstd => streaming_unpack_snapshot_local(
+            || zstd::stream::read::Decoder::new(BufReader::new(open_file())).unwrap(),
+            unpack_dir,
+            account_paths,
+            parallel_divisions,
+        )?,
+        ArchiveFormat::TarLz4 => streaming_unpack_snapshot_local(
+            || lz4::Decoder::new(BufReader::new(open_file())).unwrap(),
+            unpack_dir,
+            account_paths,
+            parallel_divisions,
+        )?,
+        ArchiveFormat::Tar => streaming_unpack_snapshot_local(
+            || BufReader::new(open_file()),
+            unpack_dir,
+            account_paths,
+            parallel_divisions,
+        )?,
+    };
+    Ok(accounts_index)
 }
 
 fn untar_snapshot_file(
@@ -1512,6 +1677,22 @@ fn untar_snapshot_file(
         )?,
     };
     Ok(account_paths_map)
+}
+
+fn streaming_untar_snapshot_in<P: AsRef<Path>>(
+    snapshot_tar: P,
+    unpack_dir: &Path,
+    account_paths: &[PathBuf],
+    archive_format: ArchiveFormat,
+    parallel_divisions: usize,
+) -> Result<AccountsIndex<AccountInfo>> {
+    streaming_untar_snapshot_file(
+        snapshot_tar.as_ref(),
+        unpack_dir,
+        account_paths,
+        archive_format,
+        parallel_divisions,
+    )
 }
 
 fn untar_snapshot_in<P: AsRef<Path>>(

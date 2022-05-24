@@ -90,6 +90,132 @@ pub enum UnpackPath<'a> {
     Invalid,
 }
 
+fn streaming_unpack_archive<'a, A: Read, C>(
+    tx: crossbeam_channel::Sender<(String, PathBuf)>,
+    archive: &mut Archive<A>,
+    apparent_limit_size: u64,
+    actual_limit_size: u64,
+    limit_count: u64,
+    mut entry_checker: C,
+) -> Result<()>
+where
+    C: FnMut(&[&str], tar::EntryType) -> UnpackPath<'a>,
+{
+    let mut apparent_total_size: u64 = 0;
+    let mut actual_total_size: u64 = 0;
+    let mut total_count: u64 = 0;
+
+    let mut total_entries = 0;
+    let mut last_log_update = Instant::now();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        let path_str = path.display().to_string();
+
+        // Although the `tar` crate safely skips at the actual unpacking, fail
+        // first by ourselves when there are odd paths like including `..` or /
+        // for our clearer pattern matching reasoning:
+        //   https://docs.rs/tar/0.4.26/src/tar/entry.rs.html#371
+        let parts = path.components().map(|p| match p {
+            CurDir => Some("."),
+            Normal(c) => c.to_str(),
+            _ => None, // Prefix (for Windows) and RootDir are forbidden
+        });
+
+        // Reject old-style BSD directory entries that aren't explicitly tagged as directories
+        let legacy_dir_entry =
+            entry.header().as_ustar().is_none() && entry.path_bytes().ends_with(b"/");
+        let kind = entry.header().entry_type();
+        let reject_legacy_dir_entry = legacy_dir_entry && (kind != Directory);
+
+        if parts.clone().any(|p| p.is_none()) || reject_legacy_dir_entry {
+            return Err(UnpackError::Archive(format!(
+                "invalid path found: {:?}",
+                path_str
+            )));
+        }
+
+        let parts: Vec<_> = parts.map(|p| p.unwrap()).collect();
+        let (is_storage, storage_filename) = if let ["accounts", file] = parts.as_slice() {
+            let is_storage = like_storage(file);
+            (is_storage, is_storage.then(|| (*file).to_owned()))
+        } else {
+            (false, None)
+        };
+        let unpack_dir = match entry_checker(parts.as_slice(), kind) {
+            UnpackPath::Invalid => {
+                return Err(UnpackError::Archive(format!(
+                    "extra entry found: {:?} {:?}",
+                    path_str,
+                    entry.header().entry_type(),
+                )));
+            }
+            UnpackPath::Ignore => {
+                continue;
+            }
+            UnpackPath::Valid(unpack_dir) => unpack_dir,
+        };
+
+        apparent_total_size = checked_total_size_sum(
+            apparent_total_size,
+            entry.header().size()?,
+            apparent_limit_size,
+        )?;
+        actual_total_size = checked_total_size_sum(
+            actual_total_size,
+            entry.header().entry_size()?,
+            actual_limit_size,
+        )?;
+        total_count = checked_total_count_increment(total_count, limit_count)?;
+
+        let target = sanitize_path(&entry.path()?, unpack_dir)?; // ? handles file system errors
+        if target.is_none() {
+            continue; // skip it
+        }
+        let target = target.unwrap();
+
+        let unpack = entry.unpack(target);
+        check_unpack_result(unpack.map(|_unpack| true)?, path_str)?;
+
+        // Sanitize permissions.
+        let mode = match entry.header().entry_type() {
+            GNUSparse | Regular => 0o644,
+            _ => 0o755,
+        };
+        let entry_path_buf = unpack_dir.join(entry.path()?);
+        set_perms(&entry_path_buf, mode)?;
+
+        if is_storage {
+            tx.send((storage_filename.unwrap(), entry_path_buf));
+        }
+
+        total_entries += 1;
+        let now = Instant::now();
+        if now.duration_since(last_log_update).as_secs() >= 10 {
+            info!("unpacked {} entries so far...", total_entries);
+            last_log_update = now;
+        }
+    }
+    info!("unpacked {} entries total", total_entries);
+
+    return Ok(());
+
+    #[cfg(unix)]
+    fn set_perms(dst: &Path, mode: u32) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let perm = fs::Permissions::from_mode(mode as _);
+        fs::set_permissions(dst, perm)
+    }
+
+    #[cfg(windows)]
+    fn set_perms(dst: &Path, _mode: u32) -> std::io::Result<()> {
+        let mut perm = fs::metadata(dst)?.permissions();
+        perm.set_readonly(false);
+        fs::set_permissions(dst, perm)
+    }
+}
+
 fn unpack_archive<'a, A: Read, C>(
     archive: &mut Archive<A>,
     apparent_limit_size: u64,
@@ -291,6 +417,54 @@ impl ParallelSelector {
     pub fn select_index(&self, index: usize) -> bool {
         index % self.divisions == self.index
     }
+}
+
+pub fn streaming_unpack_snapshot<A: Read>(
+    tx: crossbeam_channel::Sender<(String, PathBuf)>,
+    archive: &mut Archive<A>,
+    ledger_dir: &Path,
+    account_paths: &[PathBuf],
+    parallel_selector: Option<ParallelSelector>,
+) -> Result<()> {
+    assert!(!account_paths.is_empty());
+    let mut unpacked_append_vec_map = UnpackedAppendVecMap::new();
+    let mut i = 0;
+
+    streaming_unpack_archive(
+        tx,
+        archive,
+        MAX_SNAPSHOT_ARCHIVE_UNPACKED_APPARENT_SIZE,
+        MAX_SNAPSHOT_ARCHIVE_UNPACKED_ACTUAL_SIZE,
+        MAX_SNAPSHOT_ARCHIVE_UNPACKED_COUNT,
+        |parts, kind| {
+            if is_valid_snapshot_archive_entry(parts, kind) {
+                i += 1;
+                match &parallel_selector {
+                    Some(parallel_selector) => {
+                        if !parallel_selector.select_index(i - 1) {
+                            return UnpackPath::Ignore;
+                        }
+                    }
+                    None => {}
+                };
+                if let ["accounts", file] = parts {
+                    // Randomly distribute the accounts files about the available `account_paths`,
+                    let path_index = thread_rng().gen_range(0, account_paths.len());
+                    match account_paths
+                        .get(path_index)
+                        .map(|path_buf| path_buf.as_path())
+                    {
+                        Some(path) => UnpackPath::Valid(path),
+                        None => UnpackPath::Invalid,
+                    }
+                } else {
+                    UnpackPath::Valid(ledger_dir)
+                }
+            } else {
+                UnpackPath::Invalid
+            }
+        },
+    )
 }
 
 pub fn unpack_snapshot<A: Read>(
