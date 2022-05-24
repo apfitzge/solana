@@ -555,6 +555,32 @@ struct ReconstructedAccountsDbInfo {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn reconstruct_accountsdb_from_fields2<E>(
+    account_paths: &[PathBuf],
+    genesis_config: &GenesisConfig,
+    account_secondary_indexes: AccountSecondaryIndexes,
+    caching_enabled: bool,
+    shrink_ratio: AccountShrinkThreshold,
+    accounts_db_config: Option<AccountsDbConfig>,
+    accounts_update_notifier: Option<AccountsUpdateNotifier>,
+) -> Result<(AccountsDb, ReconstructedAccountsDbInfo), Error>
+where
+    E: SerializableStorage + std::marker::Sync,
+{
+    let mut accounts_db = AccountsDb::new_with_config(
+        account_paths.to_vec(),
+        &genesis_config.cluster_type,
+        account_secondary_indexes,
+        caching_enabled,
+        shrink_ratio,
+        accounts_db_config,
+        accounts_update_notifier,
+    );
+
+    Ok((accounts_db, ReconstructedAccountsDbInfo::default()))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn reconstruct_accountsdb_from_fields<E>(
     snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
     account_paths: &[PathBuf],
