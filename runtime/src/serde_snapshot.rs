@@ -56,6 +56,8 @@ mod utils;
 #[cfg(test)]
 pub(crate) use tests::reconstruct_accounts_db_via_serialization;
 
+use crate::accounts_db::{AccountInfoAccountsIndex, StorageSizeAndCountMap};
+
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub(crate) enum SerdeStyle {
     Newer,
@@ -224,6 +226,79 @@ pub(crate) fn compare_two_serialized_banks(
     let fields1 = newer::Context::deserialize_bank_fields(&mut stream1)?;
     let fields2 = newer::Context::deserialize_bank_fields(&mut stream2)?;
     Ok(fields1 == fields2)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bank_from_streams2<R>(
+    serde_style: SerdeStyle,
+    snapshot_streams: &mut SnapshotStreams<R>,
+    account_paths: &[PathBuf],
+    storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
+    genesis_config: &GenesisConfig,
+    debug_keys: Option<Arc<HashSet<Pubkey>>>,
+    additional_builtins: Option<&Builtins>,
+    accounts_index: AccountInfoAccountsIndex,
+    account_secondary_indexes: AccountSecondaryIndexes,
+    caching_enabled: bool,
+    limit_load_slot_count_from_snapshot: Option<usize>,
+    shrink_ratio: AccountShrinkThreshold,
+    verify_index: bool,
+    accounts_db_config: Option<AccountsDbConfig>,
+    accounts_update_notifier: Option<AccountsUpdateNotifier>,
+) -> std::result::Result<Bank, Error>
+where
+    R: Read,
+{
+    macro_rules! INTO {
+        ($style:ident) => {{
+            let (full_snapshot_bank_fields, full_snapshot_accounts_db_fields) =
+                $style::Context::deserialize_bank_fields(snapshot_streams.full_snapshot_stream)?;
+            let (incremental_snapshot_bank_fields, incremental_snapshot_accounts_db_fields) =
+                if let Some(ref mut incremental_snapshot_stream) =
+                    snapshot_streams.incremental_snapshot_stream
+                {
+                    let (bank_fields, accounts_db_fields) =
+                        $style::Context::deserialize_bank_fields(incremental_snapshot_stream)?;
+                    (Some(bank_fields), Some(accounts_db_fields))
+                } else {
+                    (None, None)
+                };
+
+            let snapshot_accounts_db_fields = SnapshotAccountsDbFields {
+                full_snapshot_accounts_db_fields,
+                incremental_snapshot_accounts_db_fields,
+            };
+            let bank = reconstruct_bank_from_fields2(
+                incremental_snapshot_bank_fields.unwrap_or(full_snapshot_bank_fields),
+                snapshot_accounts_db_fields,
+                genesis_config,
+                account_paths,
+                storage,
+                uncleaned_pubkeys,
+                accounts_data_len,
+                debug_keys,
+                additional_builtins,
+                accounts_index,
+                account_secondary_indexes,
+                caching_enabled,
+                limit_load_slot_count_from_snapshot,
+                shrink_ratio,
+                verify_index,
+                accounts_db_config,
+                accounts_update_notifier,
+            )?;
+            Ok(bank)
+        }};
+    }
+    match serde_style {
+        SerdeStyle::Newer => INTO!(newer),
+    }
+    .map_err(|err| {
+        warn!("bankrc_from_stream error: {:?}", err);
+        err
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -475,6 +550,67 @@ impl<'a, C: TypeContext<'a>> Serialize for SerializableAccountsDb<'a, C> {
 impl<'a, C> solana_frozen_abi::abi_example::IgnoreAsHelper for SerializableAccountsDb<'a, C> {}
 
 #[allow(clippy::too_many_arguments)]
+fn reconstruct_bank_from_fields2<E>(
+    bank_fields: BankFieldsToDeserialize,
+    snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
+    genesis_config: &GenesisConfig,
+    account_paths: &[PathBuf],
+    storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
+    debug_keys: Option<Arc<HashSet<Pubkey>>>,
+    additional_builtins: Option<&Builtins>,
+    accounts_index: AccountInfoAccountsIndex,
+    account_secondary_indexes: AccountSecondaryIndexes,
+    caching_enabled: bool,
+    limit_load_slot_count_from_snapshot: Option<usize>,
+    shrink_ratio: AccountShrinkThreshold,
+    verify_index: bool,
+    accounts_db_config: Option<AccountsDbConfig>,
+    accounts_update_notifier: Option<AccountsUpdateNotifier>,
+) -> Result<Bank, Error>
+where
+    E: SerializableStorage + std::marker::Sync,
+{
+    let (accounts_db, reconstructed_accounts_db_info) = reconstruct_accountsdb_from_fields2(
+        snapshot_accounts_db_fields,
+        account_paths,
+        storage,
+        uncleaned_pubkeys,
+        accounts_data_len,
+        genesis_config,
+        accounts_index,
+        account_secondary_indexes,
+        caching_enabled,
+        limit_load_slot_count_from_snapshot,
+        shrink_ratio,
+        verify_index,
+        accounts_db_config,
+        accounts_update_notifier,
+    )?;
+
+    accounts_db.print_accounts_stats("test");
+
+    let bank_rc = BankRc::new(Accounts::new_empty(accounts_db), bank_fields.slot);
+
+    // if limit_load_slot_count_from_snapshot is set, then we need to side-step some correctness checks beneath this call
+    let debug_do_not_add_builtins = limit_load_slot_count_from_snapshot.is_some();
+    let bank = Bank::new_from_fields(
+        bank_rc,
+        genesis_config,
+        bank_fields,
+        debug_keys,
+        additional_builtins,
+        debug_do_not_add_builtins,
+        reconstructed_accounts_db_info.accounts_data_len,
+    );
+
+    info!("rent_collector: {:?}", bank.rent_collector());
+
+    Ok(bank)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn reconstruct_bank_from_fields<E>(
     bank_fields: BankFieldsToDeserialize,
     snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
@@ -556,20 +692,29 @@ struct ReconstructedAccountsDbInfo {
 
 #[allow(clippy::too_many_arguments)]
 fn reconstruct_accountsdb_from_fields2<E>(
+    snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
     account_paths: &[PathBuf],
+    storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
     genesis_config: &GenesisConfig,
+    accounts_index: AccountInfoAccountsIndex,
     account_secondary_indexes: AccountSecondaryIndexes,
     caching_enabled: bool,
+    limit_load_slot_count_from_snapshot: Option<usize>,
     shrink_ratio: AccountShrinkThreshold,
+    verify_index: bool,
     accounts_db_config: Option<AccountsDbConfig>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
 ) -> Result<(AccountsDb, ReconstructedAccountsDbInfo), Error>
 where
     E: SerializableStorage + std::marker::Sync,
 {
-    let mut accounts_db = AccountsDb::new_with_config(
+    let mut accounts_db = AccountsDb::new_with_config2(
         account_paths.to_vec(),
         &genesis_config.cluster_type,
+        storage,
+        accounts_index,
         account_secondary_indexes,
         caching_enabled,
         shrink_ratio,
@@ -577,7 +722,65 @@ where
         accounts_update_notifier,
     );
 
-    Ok((accounts_db, ReconstructedAccountsDbInfo::default()))
+    let AccountsDbFields(
+        snapshot_storages,
+        snapshot_version,
+        snapshot_slot,
+        snapshot_bank_hash_info,
+        snapshot_historical_roots,
+        snapshot_historical_roots_with_hash,
+    ) = snapshot_accounts_db_fields.collapse_into()?;
+
+    reconstruct_historical_roots(
+        &accounts_db,
+        snapshot_historical_roots,
+        snapshot_historical_roots_with_hash,
+    );
+
+    // Process deserialized data, set necessary fields in self
+    accounts_db
+        .bank_hashes
+        .write()
+        .unwrap()
+        .insert(snapshot_slot, snapshot_bank_hash_info);
+
+    // TODO: Fix this w/ actual next id
+    accounts_db.next_id.store(2, Ordering::Release);
+    accounts_db
+        .write_version
+        .fetch_add(snapshot_version, Ordering::Release);
+
+    let mut measure_notify = Measure::start("accounts_notify");
+
+    let accounts_db = Arc::new(accounts_db);
+    let accounts_db_clone = accounts_db.clone();
+    let handle = Builder::new()
+        .name("notify_account_restore_from_snapshot".to_string())
+        .spawn(move || {
+            accounts_db_clone.notify_account_restore_from_snapshot();
+        })
+        .unwrap();
+
+    let accounts_data_len = accounts_db.finalize_index(
+        verify_index,
+        genesis_config,
+        uncleaned_pubkeys,
+        accounts_data_len,
+    );
+
+    accounts_db.maybe_add_filler_accounts(
+        &genesis_config.epoch_schedule,
+        &genesis_config.rent,
+        snapshot_slot,
+    );
+
+    handle.join().unwrap();
+    measure_notify.stop();
+
+    Ok((
+        Arc::try_unwrap(accounts_db).unwrap(),
+        ReconstructedAccountsDbInfo { accounts_data_len },
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

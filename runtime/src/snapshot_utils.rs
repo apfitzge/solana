@@ -52,14 +52,16 @@ pub use archive_format::*;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
-    account_info::AccountInfo,
+    account_info::{AccountInfo, StorageLocation, StoredSize},
     accounts_db::{
-        AccountStorageEntry, AccountsDb, AppendVecId, GenerateIndexAccountsMap,
-        GenerateIndexTimings, IndexAccountMapEntry, StorageSizeAndCountMap,
+        AccountInfoAccountsIndex, AccountStorageEntry, AccountsDb, AppendVecId,
+        GenerateIndexAccountsMap, GenerateIndexTimings, IndexAccountMapEntry,
+        StorageSizeAndCountMap,
     },
-    accounts_index::AccountsIndex,
+    accounts_index::{AccountsIndex, ZeroLamport},
     append_vec::{AppendVec, AppendVecAccountsIter},
     hardened_unpack::streaming_unpack_snapshot,
+    serde_snapshot::bank_from_streams2,
 };
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
@@ -196,7 +198,10 @@ struct UnarchivedSnapshot {
 #[derive(Debug)]
 struct UnarchivedIndexedSnapshot {
     unpack_dir: TempDir,
-    accounts_index: AccountsIndex<AccountInfo>,
+    storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
+    unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion,
     measure_unarchive_and_index: Measure,
 }
 
@@ -854,7 +859,14 @@ pub fn bank_from_snapshot_archives(
         std::cmp::max(1, num_cpus::get() / 4),
     );
 
+    let accounts_index: Arc<AccountInfoAccountsIndex> = Arc::new(AccountsIndex::new(
+        accounts_db_config.as_ref().and_then(|x| x.index.clone()),
+    ));
+    let account_secondary_indexes = Arc::new(account_secondary_indexes);
+
     let unarchived_and_indexed_full_snapshot = unarchive_and_index_snapshot(
+        accounts_index.clone(),
+        account_secondary_indexes.clone(),
         &bank_snapshots_dir,
         TMP_SNAPSHOT_ARCHIVE_PREFIX,
         full_snapshot_archive_info.path(),
@@ -862,55 +874,58 @@ pub fn bank_from_snapshot_archives(
         account_paths,
         full_snapshot_archive_info.archive_format(),
         parallel_divisions,
-    );
-    std::process::exit(1);
-
-    let unarchived_full_snapshot = unarchive_snapshot(
-        &bank_snapshots_dir,
-        TMP_SNAPSHOT_ARCHIVE_PREFIX,
-        full_snapshot_archive_info.path(),
-        "snapshot untar",
-        account_paths,
-        full_snapshot_archive_info.archive_format(),
-        parallel_divisions,
     )?;
 
-    let mut unarchived_incremental_snapshot =
+    let mut unarchived_and_indexed_incremental_snapshot =
         if let Some(incremental_snapshot_archive_info) = incremental_snapshot_archive_info {
-            let unarchived_incremental_snapshot = unarchive_snapshot(
+            let unarchived_and_indexed_incremental_snapshot = unarchive_and_index_snapshot(
+                accounts_index.clone(),
+                account_secondary_indexes.clone(),
                 &bank_snapshots_dir,
                 TMP_SNAPSHOT_ARCHIVE_PREFIX,
-                incremental_snapshot_archive_info.path(),
-                "incremental snapshot untar",
+                full_snapshot_archive_info.path(),
+                "snapshot untar and index",
                 account_paths,
-                incremental_snapshot_archive_info.archive_format(),
+                full_snapshot_archive_info.archive_format(),
                 parallel_divisions,
             )?;
-            Some(unarchived_incremental_snapshot)
+            Some(unarchived_and_indexed_incremental_snapshot)
         } else {
             None
         };
 
-    let mut unpacked_append_vec_map = unarchived_full_snapshot.unpacked_append_vec_map;
-    if let Some(ref mut unarchive_preparation_result) = unarchived_incremental_snapshot {
-        let incremental_snapshot_unpacked_append_vec_map =
-            std::mem::take(&mut unarchive_preparation_result.unpacked_append_vec_map);
-        unpacked_append_vec_map.extend(incremental_snapshot_unpacked_append_vec_map.into_iter());
+    let mut storage = unarchived_and_indexed_full_snapshot.storage;
+    let mut uncleaned_pubkeys = unarchived_and_indexed_full_snapshot.uncleaned_pubkeys;
+    let mut accounts_data_len = unarchived_and_indexed_full_snapshot.accounts_data_len;
+    if let Some(ref mut unarchive_preparation_result) = unarchived_and_indexed_incremental_snapshot
+    {
+        let incremental_storage = std::mem::take(&mut unarchive_preparation_result.storage);
+        let incremental_uncleaned_pubkeys =
+            std::mem::take(&mut unarchive_preparation_result.uncleaned_pubkeys);
+        storage.extend(incremental_storage.into_iter());
+        uncleaned_pubkeys.extend(incremental_uncleaned_pubkeys);
+        accounts_data_len += unarchive_preparation_result.accounts_data_len;
     }
 
+    let accounts_index = Arc::try_unwrap(accounts_index).unwrap();
+    let account_secondary_indexes = Arc::try_unwrap(account_secondary_indexes).unwrap();
+
     let mut measure_rebuild = Measure::start("rebuild bank from snapshots");
-    let bank = rebuild_bank_from_snapshots(
-        &unarchived_full_snapshot.unpacked_snapshots_dir_and_version,
-        unarchived_incremental_snapshot
+    let bank = rebuild_bank_from_snapshots2(
+        &unarchived_and_indexed_full_snapshot.unpacked_snapshots_dir_and_version,
+        unarchived_and_indexed_incremental_snapshot
             .as_ref()
             .map(|unarchive_preparation_result| {
                 &unarchive_preparation_result.unpacked_snapshots_dir_and_version
             }),
         account_paths,
-        unpacked_append_vec_map,
+        storage,
+        uncleaned_pubkeys,
+        accounts_data_len,
         genesis_config,
         debug_keys,
         additional_builtins,
+        accounts_index,
         account_secondary_indexes,
         accounts_db_caching_enabled,
         limit_load_slot_count_from_snapshot,
@@ -920,8 +935,6 @@ pub fn bank_from_snapshot_archives(
         accounts_update_notifier,
         accounts_db_skip_shrink,
     )?;
-    measure_rebuild.stop();
-    info!("{}", measure_rebuild);
 
     let mut measure_verify = Measure::start("verify");
     if !bank.verify_snapshot_bank(
@@ -936,14 +949,66 @@ pub fn bank_from_snapshot_archives(
 
     let timings = BankFromArchiveTimings {
         rebuild_bank_from_snapshots_us: measure_rebuild.as_us(),
-        full_snapshot_untar_us: unarchived_full_snapshot.measure_untar.as_us(),
-        incremental_snapshot_untar_us: unarchived_incremental_snapshot
-            .map_or(0, |unarchive_preparation_result| {
-                unarchive_preparation_result.measure_untar.as_us()
-            }),
+        full_snapshot_untar_us: unarchived_and_indexed_full_snapshot
+            .measure_unarchive_and_index
+            .as_us(),
+        incremental_snapshot_untar_us: unarchived_and_indexed_incremental_snapshot.map_or(
+            0,
+            |unarchive_preparation_result| {
+                unarchive_preparation_result
+                    .measure_unarchive_and_index
+                    .as_us()
+            },
+        ),
         verify_snapshot_bank_us: measure_verify.as_us(),
     };
     Ok((bank, timings))
+
+    // let mut measure_rebuild = Measure::start("rebuild bank from snapshots");
+    // let bank = rebuild_bank_from_snapshots(
+    //     &unarchived_full_snapshot.unpacked_snapshots_dir_and_version,
+    //     unarchived_incremental_snapshot
+    //         .as_ref()
+    //         .map(|unarchive_preparation_result| {
+    //             &unarchive_preparation_result.unpacked_snapshots_dir_and_version
+    //         }),
+    //     account_paths,
+    //     unpacked_append_vec_map,
+    //     genesis_config,
+    //     debug_keys,
+    //     additional_builtins,
+    //     account_secondary_indexes,
+    //     accounts_db_caching_enabled,
+    //     limit_load_slot_count_from_snapshot,
+    //     shrink_ratio,
+    //     verify_index,
+    //     accounts_db_config,
+    //     accounts_update_notifier,
+    // )?;
+    // measure_rebuild.stop();
+    // info!("{}", measure_rebuild);
+
+    // let mut measure_verify = Measure::start("verify");
+    // if !bank.verify_snapshot_bank(
+    //     test_hash_calculation,
+    //     accounts_db_skip_shrink || !full_snapshot_archive_info.is_remote(),
+    //     Some(full_snapshot_archive_info.slot()),
+    // ) && limit_load_slot_count_from_snapshot.is_none()
+    // {
+    //     panic!("Snapshot bank for slot {} failed to verify", bank.slot());
+    // }
+    // measure_verify.stop();
+
+    // let timings = BankFromArchiveTimings {
+    //     rebuild_bank_from_snapshots_us: measure_rebuild.as_us(),
+    //     full_snapshot_untar_us: unarchived_full_snapshot.measure_untar.as_us(),
+    //     incremental_snapshot_untar_us: unarchived_incremental_snapshot
+    //         .map_or(0, |unarchive_preparation_result| {
+    //             unarchive_preparation_result.measure_untar.as_us()
+    //         }),
+    //     verify_snapshot_bank_us: measure_verify.as_us(),
+    // };
+    // Ok((bank, timings))
 }
 
 /// Rebuild bank from snapshot archives.  This function searches `full_snapshot_archives_dir` and `incremental_snapshot_archives_dir` for the
@@ -1078,6 +1143,8 @@ fn verify_bank_against_expected_slot_hash(
 /// the temporary directories, untaring, indexing, reading the version file, and returning
 /// those fields plus the accounts index.
 fn unarchive_and_index_snapshot<P, Q>(
+    accounts_index: Arc<AccountInfoAccountsIndex>,
+    account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     bank_snapshots_dir: P,
     unpacked_snapshots_dir_prefix: &'static str,
     snapshot_archive_path: Q,
@@ -1096,7 +1163,9 @@ where
     let unpacked_snapshots_dir = unpack_dir.path().join("snapshots");
 
     let mut measure_untar_and_index = Measure::start(measure_name);
-    let (storage, storage_info) = streaming_untar_snapshot_in(
+    let (storage, uncleaned_pubkeys, accounts_data_len) = streaming_untar_snapshot_in(
+        accounts_index,
+        account_secondary_indexes,
         snapshot_archive_path,
         unpack_dir.path(),
         account_paths,
@@ -1104,9 +1173,22 @@ where
         parallel_divisions,
     )?;
     measure_untar_and_index.stop();
-    info!("{}", measure_untar_and_index);
+    info!("{measure_untar_and_index}");
 
-    Err(SnapshotError::NoSnapshotArchives)
+    let unpacked_version_file = unpack_dir.path().join("version");
+    let snapshot_version = snapshot_version_from_file(&unpacked_version_file)?;
+
+    Ok(UnarchivedIndexedSnapshot {
+        unpack_dir,
+        storage,
+        uncleaned_pubkeys,
+        accounts_data_len,
+        unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion {
+            unpacked_snapshots_dir,
+            snapshot_version,
+        },
+        measure_unarchive_and_index: measure_untar_and_index,
+    })
 }
 
 /// Perform the common tasks when unarchiving a snapshot.  Handles creating the temporary
@@ -1509,13 +1591,16 @@ pub fn purge_old_snapshot_archives(
 }
 
 fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
+    accounts_index: Arc<AccountInfoAccountsIndex>,
+    account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     reader: F,
     ledger_dir: &Path,
     account_paths: &[PathBuf],
     parallel_archivers: usize,
 ) -> Result<(
     HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
-    StorageSizeAndCountMap,
+    HashMap<Slot, HashSet<Pubkey>>,
+    u64,
 )> {
     assert!(parallel_archivers > 0);
     // a shared 'reader' that reads the decompressed stream once, keeps some history, and acts as a reader for multiple parallel archive readers
@@ -1573,19 +1658,19 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
 
     let (es_tx, es_rx) = crossbeam_channel::unbounded();
 
+    // TODO: This is screwed up by incremental storage since it'd be reset
     let next_append_vec_id = Arc::new(AtomicU32::new(0));
+    let uncleaned_pubkeys = Arc::new(Mutex::new(HashMap::new()));
     let storage: Arc<Mutex<HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    let storage_info = Arc::new(StorageSizeAndCountMap::default());
-    let storage_info_timings = Arc::new(Mutex::new(GenerateIndexTimings::default()));
-
     while let Ok(append_vec_pathbuf) = rx.recv() {
-        let storage_info = storage_info.clone();
-        let storage_info_timings = storage_info_timings.clone();
+        let accounts_index = accounts_index.clone();
+        let account_secondary_indexes = account_secondary_indexes.clone();
         let es_tx = es_tx.clone();
         let storage = storage.clone();
         let next_append_vec_id = next_append_vec_id.clone();
+        let uncleaned_pubkeys = uncleaned_pubkeys.clone();
         indexing_thread_pool.spawn(move || {
             let new_append_vec_id =
                 next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -1600,7 +1685,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 std::fs::rename(path_buf, &remapped_append_vec_path);
             }
 
-            let filesize = std::fs::metadata(&remapped_append_vec_path).unwrap().len() as usize;
             let (accounts, num_accounts) =
                 AppendVec::new_from_file_without_size(&remapped_append_vec_path).unwrap();
             let u_storage_entry = Arc::new(AccountStorageEntry::new_existing(
@@ -1610,39 +1694,106 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 num_accounts,
             ));
 
-            let pubkey_to_index_entry = temporary_process_storage_entry(&u_storage_entry);
-            AccountsDb::update_storage_info(
-                &storage_info.clone(),
-                &pubkey_to_index_entry,
-                &storage_info_timings,
-            );
-
-            if !storage.lock().unwrap().contains_key(&slot) {
-                storage.lock().unwrap().insert(slot, HashMap::new());
+            for account in u_storage_entry.all_accounts() {
+                error!(
+                    "{} account from loaded storage entry: {} {} {}",
+                    u_storage_entry.slot(),
+                    account.meta.pubkey,
+                    account.account_meta.lamports,
+                    account.hash,
+                );
             }
+
+            let pubkey_to_index_entry = temporary_process_storage_entry(&u_storage_entry);
+            AccountsDb::update_storage_entry_info(&u_storage_entry, &pubkey_to_index_entry);
+            let (storage_dirty_pubkeys, storage_accounts_data_len) = generate_index_for_storage(
+                &accounts_index,
+                &account_secondary_indexes,
+                pubkey_to_index_entry,
+                slot,
+            );
+            uncleaned_pubkeys
+                .lock()
+                .unwrap()
+                .entry(slot)
+                .or_insert(HashSet::<Pubkey>::default())
+                .extend(storage_dirty_pubkeys);
+
             storage
                 .lock()
                 .unwrap()
-                .get_mut(&slot)
-                .unwrap()
-                .insert(append_vec_id, u_storage_entry);
+                .entry(slot)
+                .or_insert(HashMap::default())
+                .insert(new_append_vec_id, u_storage_entry);
 
-            es_tx.send(());
+            es_tx.send(storage_accounts_data_len);
         });
     }
 
     drop(es_tx); // drop the local copy so that when the other clones get dropped we get an Err. After redoing this we just pass to a function
-    while let Ok(()) = es_rx.recv() {}
+    let mut accounts_data_len = 0;
+    while let Ok(storage_accounts_data_len) = es_rx.recv() {
+        accounts_data_len += storage_accounts_data_len;
+    }
 
     let storage = Arc::try_unwrap(storage).unwrap().into_inner().unwrap();
+    let uncleaned_pubkeys = Arc::try_unwrap(uncleaned_pubkeys)
+        .unwrap()
+        .into_inner()
+        .unwrap();
     error!(
         "I have created the storage map w/ keys: {:?}",
         storage.keys()
     );
 
-    let storage_info = Arc::try_unwrap(storage_info).unwrap();
+    Ok((storage, uncleaned_pubkeys, accounts_data_len))
+}
 
-    Ok((storage, storage_info))
+fn generate_index_for_storage<'a>(
+    accounts_index: &AccountInfoAccountsIndex,
+    account_secondary_indexes: &AccountSecondaryIndexes,
+    accounts_map: GenerateIndexAccountsMap<'a>,
+    slot: Slot,
+) -> (Vec<Pubkey>, u64) {
+    let secondary = !account_secondary_indexes.is_empty();
+    let num_accounts = accounts_map.len();
+    let mut accounts_data_len = 0;
+    let items = accounts_map.into_iter().map(
+        |(
+            pubkey,
+            IndexAccountMapEntry {
+                write_version: _write_version,
+                store_id,
+                stored_account,
+            },
+        )| {
+            if secondary {
+                accounts_index.update_secondary_indexes(
+                    &pubkey,
+                    &stored_account,
+                    &account_secondary_indexes,
+                );
+            }
+
+            if !stored_account.is_zero_lamport() {
+                accounts_data_len += stored_account.data.len() as u64;
+            }
+
+            (
+                pubkey,
+                AccountInfo::new(
+                    StorageLocation::AppendVec(store_id, stored_account.offset),
+                    stored_account.stored_size as StoredSize,
+                    stored_account.account_meta.lamports,
+                ),
+            )
+        },
+    );
+
+    let (dirty_pubkeys, insert_time_us) =
+        accounts_index.insert_new_if_missing_into_primary_index(slot, num_accounts, items);
+
+    (dirty_pubkeys, accounts_data_len)
 }
 
 fn temporary_process_storage_entry(
@@ -1715,6 +1866,8 @@ fn unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
 }
 
 fn streaming_untar_snapshot_file(
+    accounts_index: Arc<AccountInfoAccountsIndex>,
+    account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     snapshot_tar: &Path,
     unpack_dir: &Path,
     account_paths: &[PathBuf],
@@ -1722,35 +1875,46 @@ fn streaming_untar_snapshot_file(
     parallel_divisions: usize,
 ) -> Result<(
     HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
-    StorageSizeAndCountMap,
+    HashMap<Slot, HashSet<Pubkey>>,
+    u64,
 )> {
     let open_file = || File::open(&snapshot_tar).unwrap();
     match archive_format {
         ArchiveFormat::TarBzip2 => streaming_unpack_snapshot_local(
+            accounts_index,
+            account_secondary_indexes,
             || BzDecoder::new(BufReader::new(open_file())),
             unpack_dir,
             account_paths,
             parallel_divisions,
         ),
         ArchiveFormat::TarGzip => streaming_unpack_snapshot_local(
+            accounts_index,
+            account_secondary_indexes,
             || GzDecoder::new(BufReader::new(open_file())),
             unpack_dir,
             account_paths,
             parallel_divisions,
         ),
         ArchiveFormat::TarZstd => streaming_unpack_snapshot_local(
+            accounts_index,
+            account_secondary_indexes,
             || zstd::stream::read::Decoder::new(BufReader::new(open_file())).unwrap(),
             unpack_dir,
             account_paths,
             parallel_divisions,
         ),
         ArchiveFormat::TarLz4 => streaming_unpack_snapshot_local(
+            accounts_index,
+            account_secondary_indexes,
             || lz4::Decoder::new(BufReader::new(open_file())).unwrap(),
             unpack_dir,
             account_paths,
             parallel_divisions,
         ),
         ArchiveFormat::Tar => streaming_unpack_snapshot_local(
+            accounts_index,
+            account_secondary_indexes,
             || BufReader::new(open_file()),
             unpack_dir,
             account_paths,
@@ -1803,6 +1967,8 @@ fn untar_snapshot_file(
 }
 
 fn streaming_untar_snapshot_in<P: AsRef<Path>>(
+    accounts_index: Arc<AccountInfoAccountsIndex>,
+    account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     snapshot_tar: P,
     unpack_dir: &Path,
     account_paths: &[PathBuf],
@@ -1810,9 +1976,12 @@ fn streaming_untar_snapshot_in<P: AsRef<Path>>(
     parallel_divisions: usize,
 ) -> Result<(
     HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
-    StorageSizeAndCountMap,
+    HashMap<Slot, HashSet<Pubkey>>,
+    u64,
 )> {
     streaming_untar_snapshot_file(
+        accounts_index,
+        account_secondary_indexes,
         snapshot_tar.as_ref(),
         unpack_dir,
         account_paths,
@@ -1862,6 +2031,120 @@ fn verify_unpacked_snapshots_dir_and_version(
         .pop()
         .ok_or_else(|| get_io_error("No snapshots found in snapshots directory"))?;
     Ok((snapshot_version, root_paths))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rebuild_bank_from_snapshots2(
+    full_snapshot_unpacked_snapshots_dir_and_version: &UnpackedSnapshotsDirAndVersion,
+    incremental_snapshot_unpacked_snapshots_dir_and_version: Option<
+        &UnpackedSnapshotsDirAndVersion,
+    >,
+    account_paths: &[PathBuf],
+    storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
+    genesis_config: &GenesisConfig,
+    debug_keys: Option<Arc<HashSet<Pubkey>>>,
+    additional_builtins: Option<&Builtins>,
+    accounts_index: AccountInfoAccountsIndex,
+    account_secondary_indexes: AccountSecondaryIndexes,
+    accounts_db_caching_enabled: bool,
+    limit_load_slot_count_from_snapshot: Option<usize>,
+    shrink_ratio: AccountShrinkThreshold,
+    verify_index: bool,
+    accounts_db_config: Option<AccountsDbConfig>,
+    accounts_update_notifier: Option<AccountsUpdateNotifier>,
+) -> Result<Bank> {
+    let (full_snapshot_version, full_snapshot_root_paths) =
+        verify_unpacked_snapshots_dir_and_version(
+            full_snapshot_unpacked_snapshots_dir_and_version,
+        )?;
+    let (incremental_snapshot_version, incremental_snapshot_root_paths) =
+        if let Some(snapshot_unpacked_snapshots_dir_and_version) =
+            incremental_snapshot_unpacked_snapshots_dir_and_version
+        {
+            let (snapshot_version, bank_snapshot_info) = verify_unpacked_snapshots_dir_and_version(
+                snapshot_unpacked_snapshots_dir_and_version,
+            )?;
+            (Some(snapshot_version), Some(bank_snapshot_info))
+        } else {
+            (None, None)
+        };
+    info!(
+        "Loading bank from full snapshot {} and incremental snapshot {:?}",
+        full_snapshot_root_paths.snapshot_path.display(),
+        incremental_snapshot_root_paths
+            .as_ref()
+            .map(|paths| paths.snapshot_path.display()),
+    );
+
+    let snapshot_root_paths = SnapshotRootPaths {
+        full_snapshot_root_file_path: full_snapshot_root_paths.snapshot_path,
+        incremental_snapshot_root_file_path: incremental_snapshot_root_paths
+            .map(|root_paths| root_paths.snapshot_path),
+    };
+
+    let bank = deserialize_snapshot_data_files(&snapshot_root_paths, |snapshot_streams| {
+        Ok(
+            match incremental_snapshot_version.unwrap_or(full_snapshot_version) {
+                SnapshotVersion::V1_2_0 => bank_from_streams2(
+                    SerdeStyle::Newer,
+                    snapshot_streams,
+                    account_paths,
+                    storage,
+                    uncleaned_pubkeys,
+                    accounts_data_len,
+                    genesis_config,
+                    debug_keys,
+                    additional_builtins,
+                    accounts_index,
+                    account_secondary_indexes,
+                    accounts_db_caching_enabled,
+                    limit_load_slot_count_from_snapshot,
+                    shrink_ratio,
+                    verify_index,
+                    accounts_db_config,
+                    accounts_update_notifier,
+                ),
+            }?,
+        )
+    })?;
+
+    // The status cache is rebuilt from the latest snapshot.  So, if there's an incremental
+    // snapshot, use that.  Otherwise use the full snapshot.
+    let status_cache_path = incremental_snapshot_unpacked_snapshots_dir_and_version
+        .map_or_else(
+            || {
+                full_snapshot_unpacked_snapshots_dir_and_version
+                    .unpacked_snapshots_dir
+                    .as_path()
+            },
+            |unpacked_snapshots_dir_and_version| {
+                unpacked_snapshots_dir_and_version
+                    .unpacked_snapshots_dir
+                    .as_path()
+            },
+        )
+        .join(SNAPSHOT_STATUS_CACHE_FILENAME);
+    let slot_deltas = deserialize_snapshot_data_file(&status_cache_path, |stream| {
+        info!(
+            "Rebuilding status cache from {}",
+            status_cache_path.display()
+        );
+        let slot_deltas: Vec<BankSlotDelta> = bincode::options()
+            .with_limit(MAX_SNAPSHOT_DATA_FILE_SIZE)
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .deserialize_from(stream)?;
+        Ok(slot_deltas)
+    })?;
+
+    bank.src.append(&slot_deltas);
+
+    bank.prepare_rewrites_for_hash();
+
+    info!("Loaded bank for slot: {}", bank.slot());
+    Ok(bank)
 }
 
 #[allow(clippy::too_many_arguments)]
