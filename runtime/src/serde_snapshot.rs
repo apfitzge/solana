@@ -727,6 +727,24 @@ where
         snapshot_historical_roots_with_hash,
     ) = snapshot_accounts_db_fields.collapse_into()?;
 
+    snapshot_storages.into_iter().for_each(|(slot, stores)| {
+        stores.into_iter().for_each(|store| {
+            let real_store = accounts_db
+                .storage
+                .get_account_storage_entry(slot, store.id() as u32)
+                .unwrap();
+            if real_store.alive_bytes() != store.current_len() {
+                error!(
+                    "size mismatch for {}.{} => {} != {}",
+                    slot,
+                    store.id(),
+                    real_store.alive_bytes(),
+                    store.current_len()
+                );
+            }
+        });
+    });
+
     reconstruct_historical_roots(
         &accounts_db,
         snapshot_historical_roots,

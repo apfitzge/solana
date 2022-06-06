@@ -611,7 +611,7 @@ pub struct AccountStorage {
 }
 
 impl AccountStorage {
-    fn get_account_storage_entry(
+    pub fn get_account_storage_entry(
         &self,
         slot: Slot,
         store_id: AppendVecId,

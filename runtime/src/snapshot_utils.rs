@@ -1668,9 +1668,10 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         let next_append_vec_id = next_append_vec_id.clone();
         let uncleaned_pubkeys = uncleaned_pubkeys.clone();
         indexing_thread_pool.spawn(move || {
-            let new_append_vec_id =
-                next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            // let new_append_vec_id =
+            //     next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             let (slot, append_vec_id) = get_slot_and_append_vec_id(&append_vec_pathbuf.0);
+            let new_append_vec_id = append_vec_id;
 
             let path_buf = append_vec_pathbuf.1;
             let remapped_file_name = AppendVec::file_name(slot, new_append_vec_id);
