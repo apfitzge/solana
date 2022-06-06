@@ -2148,13 +2148,18 @@ impl Bank {
         // accounts-db. Note that it is crucial that these accounts are loaded
         // at the right slot and match precisely with serialized Delegations.
         let stakes = Stakes::new(&fields.stakes, |pubkey| {
-            let (account, _slot) = bank_rc.accounts.load_with_fixed_root(&ancestors, pubkey)?;
+            let x = bank_rc.accounts.load_with_fixed_root(&ancestors, pubkey);
+            if x.is_none() {
+                error!("stakes could not find {pubkey}");
+            }
+            let (account, _slot) = x?;
             Some(account)
         })
         .expect(
             "Stakes cache is inconsistent with accounts-db. This can indicate \
             a corrupted snapshot or bugs in cached accounts or accounts-db.",
         );
+
         let stakes_accounts_load_duration = now.elapsed();
         fn new<T: Default>() -> T {
             T::default()
@@ -3554,12 +3559,13 @@ impl Bank {
                     if native_loader::check_id(account.owner()) {
                         Some(account)
                     } else {
+                        error!("malicious account is pre-occupying at program_id");
                         // malicious account is pre-occupying at program_id
                         self.burn_and_purge_account(program_id, account);
                         None
                     }
                 });
-
+        error!("existing_genuine_program: {existing_genuine_program:?}");
         if must_replace {
             // updating builtin program
             match &existing_genuine_program {

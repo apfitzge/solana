@@ -416,6 +416,9 @@ impl AppendVec {
             // some measurable amount of memory needlessly.
             let mut num_accounts = 0;
             while let Some((account, next_offset)) = new.get_account(offset) {
+                if *account.hash == Hash::default() {
+                    break;
+                }
                 assert!(account.sanitize());
                 offset = next_offset;
                 num_accounts += 1;
