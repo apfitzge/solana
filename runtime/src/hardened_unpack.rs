@@ -186,10 +186,7 @@ where
         set_perms(&entry_path_buf, mode)?;
 
         if is_storage {
-            error!("storage entry_path_buf: {:?}", entry_path_buf);
             tx.send((storage_filename.unwrap(), entry_path_buf));
-        } else {
-            error!("entry_path_buf: {:?}", entry_path_buf);
         }
 
         total_entries += 1;

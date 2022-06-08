@@ -1732,10 +1732,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         .unwrap()
         .into_inner()
         .unwrap();
-    error!(
-        "I have created the storage map w/ keys: {:?}",
-        storage.keys()
-    );
 
     Ok((storage, uncleaned_pubkeys, accounts_data_len))
 }
