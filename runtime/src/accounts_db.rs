@@ -4673,11 +4673,9 @@ impl AccountsDb {
         #[cfg(not(test))]
         assert!(max_root.is_none());
 
-        error!("looking for pubkey1: {pubkey}");
         let (slot, storage_location, _maybe_account_accesor) =
             self.read_index_for_accessor_or_load_slow(ancestors, pubkey, max_root, false)?;
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
-        error!("looking for pubkey2: {pubkey}");
 
         if self.caching_enabled {
             let in_write_cache = storage_location.is_cached();
@@ -4700,7 +4698,6 @@ impl AccountsDb {
                 }
             }
         }
-        error!("looking for pubkey3: {pubkey}");
 
         let (mut account_accessor, slot) = self.retry_to_get_account_accessor(
             slot,
@@ -4710,7 +4707,6 @@ impl AccountsDb {
             max_root,
             load_hint,
         )?;
-        error!("looking for pubkey4: {pubkey}");
 
         let loaded_account = account_accessor.check_and_get_loaded_account();
         let is_cached = loaded_account.is_cached();

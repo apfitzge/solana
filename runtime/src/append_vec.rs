@@ -388,6 +388,7 @@ impl AppendVec {
 
         let (sanitized, num_accounts) = {
             let mut offset = 0;
+            let mut current_len = 0;
 
             // This discards allocated accounts immediately after check at each loop iteration.
             //
@@ -396,16 +397,19 @@ impl AppendVec {
             // some measurable amount of memory needlessly.
             let mut num_accounts = 0;
             while let Some((account, next_offset)) = new.get_account(offset) {
-                if *account.hash == Hash::default() {
+                if account.meta.pubkey == Pubkey::default()
+                    && *account.hash == Hash::default()
+                    && next_offset == u64_align!(next_offset)
+                {
                     break;
                 }
                 assert!(account.sanitize());
+                current_len = offset + account.stored_size;
                 offset = next_offset;
                 num_accounts += 1;
             }
-            let aligned_current_len = u64_align!(new.current_len.load(Ordering::Acquire));
 
-            new.current_len.store(offset, Ordering::Relaxed);
+            new.current_len.store(current_len, Ordering::Relaxed);
 
             (true, num_accounts)
         };
