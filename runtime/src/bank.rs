@@ -3565,7 +3565,6 @@ impl Bank {
                         None
                     }
                 });
-        error!("existing_genuine_program: {existing_genuine_program:?}");
         if must_replace {
             // updating builtin program
             match &existing_genuine_program {

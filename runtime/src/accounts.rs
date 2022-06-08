@@ -645,9 +645,7 @@ impl Accounts {
         pubkey: &Pubkey,
         load_hint: LoadHint,
     ) -> Option<(AccountSharedData, Slot)> {
-        error!("load_slow looking for: {pubkey}");
         let (account, slot) = self.accounts_db.load(ancestors, pubkey, load_hint)?;
-        error!("load_slow found account: {pubkey} {account:?}");
         Self::filter_zero_lamport_account(account, slot)
     }
 

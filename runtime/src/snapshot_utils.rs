@@ -880,10 +880,10 @@ pub fn bank_from_snapshot_archives(
                 account_secondary_indexes.clone(),
                 &bank_snapshots_dir,
                 TMP_SNAPSHOT_ARCHIVE_PREFIX,
-                full_snapshot_archive_info.path(),
+                incremental_snapshot_archive_info.path(),
                 "snapshot untar and index",
                 account_paths,
-                full_snapshot_archive_info.archive_format(),
+                incremental_snapshot_archive_info.archive_format(),
                 parallel_divisions,
             )?;
             Some(unarchived_and_indexed_incremental_snapshot)
@@ -1690,16 +1690,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 accounts,
                 num_accounts,
             ));
-
-            for account in u_storage_entry.all_accounts() {
-                error!(
-                    "{} account from loaded storage entry: {} {} {}",
-                    u_storage_entry.slot(),
-                    account.meta.pubkey,
-                    account.account_meta.lamports,
-                    account.hash,
-                );
-            }
 
             let pubkey_to_index_entry = temporary_process_storage_entry(&u_storage_entry);
             AccountsDb::update_storage_entry_info(&u_storage_entry, &pubkey_to_index_entry);

@@ -587,8 +587,6 @@ where
         accounts_update_notifier,
     )?;
 
-    accounts_db.print_accounts_stats("test");
-
     let bank_rc = BankRc::new(Accounts::new_empty(accounts_db), bank_fields.slot);
 
     // if limit_load_slot_count_from_snapshot is set, then we need to side-step some correctness checks beneath this call
@@ -738,7 +736,7 @@ where
                     "size mismatch for {}.{} => {} != {}",
                     slot,
                     store.id(),
-                    real_store.alive_bytes(),
+                    real_store.accounts.len(),
                     store.current_len()
                 );
             }
