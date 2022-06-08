@@ -45,7 +45,10 @@ use {
 mod archive_format;
 use std::{
     collections::hash_map::Entry,
-    sync::{atomic::AtomicU32, Mutex},
+    sync::{
+        atomic::{AtomicU32, AtomicUsize},
+        Mutex,
+    },
 };
 
 pub use archive_format::*;
@@ -863,6 +866,7 @@ pub fn bank_from_snapshot_archives(
         accounts_db_config.as_ref().and_then(|x| x.index.clone()),
     ));
     let account_secondary_indexes = Arc::new(account_secondary_indexes);
+    let next_append_vec_id = Arc::new(AtomicU32::new(0));
 
     let unarchived_and_indexed_full_snapshot = unarchive_and_index_snapshot(
         accounts_index.clone(),
@@ -874,6 +878,7 @@ pub fn bank_from_snapshot_archives(
         account_paths,
         full_snapshot_archive_info.archive_format(),
         parallel_divisions,
+        next_append_vec_id.clone(),
     )?;
 
     let mut unarchived_and_indexed_incremental_snapshot =
@@ -888,6 +893,7 @@ pub fn bank_from_snapshot_archives(
                 account_paths,
                 incremental_snapshot_archive_info.archive_format(),
                 parallel_divisions,
+                next_append_vec_id.clone(),
             )?;
             Some(unarchived_and_indexed_incremental_snapshot)
         } else {
@@ -909,6 +915,7 @@ pub fn bank_from_snapshot_archives(
 
     let accounts_index = Arc::try_unwrap(accounts_index).unwrap();
     let account_secondary_indexes = Arc::try_unwrap(account_secondary_indexes).unwrap();
+    let next_append_vec_id = Arc::try_unwrap(next_append_vec_id).unwrap();
 
     let mut measure_rebuild = Measure::start("rebuild bank from snapshots");
     let bank = rebuild_bank_from_snapshots2(
@@ -922,6 +929,7 @@ pub fn bank_from_snapshot_archives(
         storage,
         uncleaned_pubkeys,
         accounts_data_len,
+        next_append_vec_id,
         genesis_config,
         debug_keys,
         additional_builtins,
@@ -1152,6 +1160,7 @@ fn unarchive_and_index_snapshot<P, Q>(
     account_paths: &[PathBuf],
     archive_format: ArchiveFormat,
     parallel_divisions: usize,
+    next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<UnarchivedIndexedSnapshot>
 where
     P: AsRef<Path>,
@@ -1171,6 +1180,7 @@ where
         account_paths,
         archive_format,
         parallel_divisions,
+        next_append_vec_id,
     )?;
     measure_untar_and_index.stop();
     info!("{measure_untar_and_index}");
@@ -1597,6 +1607,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     ledger_dir: &Path,
     account_paths: &[PathBuf],
     parallel_archivers: usize,
+    next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<(
     HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
     HashMap<Slot, HashSet<Pubkey>>,
@@ -1659,7 +1670,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     let (es_tx, es_rx) = crossbeam_channel::unbounded();
 
     // TODO: This is screwed up by incremental storage since it'd be reset
-    let next_append_vec_id = Arc::new(AtomicU32::new(0));
     let uncleaned_pubkeys = Arc::new(Mutex::new(HashMap::new()));
     let storage: Arc<Mutex<HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -1672,10 +1682,9 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         let next_append_vec_id = next_append_vec_id.clone();
         let uncleaned_pubkeys = uncleaned_pubkeys.clone();
         indexing_thread_pool.spawn(move || {
-            // let new_append_vec_id =
-            //     next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let new_append_vec_id =
+                next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             let (slot, append_vec_id) = get_slot_and_append_vec_id(&append_vec_pathbuf.0);
-            let new_append_vec_id = append_vec_id;
 
             let path_buf = append_vec_pathbuf.1;
             let remapped_file_name = AppendVec::file_name(slot, new_append_vec_id);
@@ -1860,6 +1869,7 @@ fn streaming_untar_snapshot_file(
     account_paths: &[PathBuf],
     archive_format: ArchiveFormat,
     parallel_divisions: usize,
+    next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<(
     HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
     HashMap<Slot, HashSet<Pubkey>>,
@@ -1874,6 +1884,7 @@ fn streaming_untar_snapshot_file(
             unpack_dir,
             account_paths,
             parallel_divisions,
+            next_append_vec_id,
         ),
         ArchiveFormat::TarGzip => streaming_unpack_snapshot_local(
             accounts_index,
@@ -1882,6 +1893,7 @@ fn streaming_untar_snapshot_file(
             unpack_dir,
             account_paths,
             parallel_divisions,
+            next_append_vec_id,
         ),
         ArchiveFormat::TarZstd => streaming_unpack_snapshot_local(
             accounts_index,
@@ -1890,6 +1902,7 @@ fn streaming_untar_snapshot_file(
             unpack_dir,
             account_paths,
             parallel_divisions,
+            next_append_vec_id,
         ),
         ArchiveFormat::TarLz4 => streaming_unpack_snapshot_local(
             accounts_index,
@@ -1898,6 +1911,7 @@ fn streaming_untar_snapshot_file(
             unpack_dir,
             account_paths,
             parallel_divisions,
+            next_append_vec_id,
         ),
         ArchiveFormat::Tar => streaming_unpack_snapshot_local(
             accounts_index,
@@ -1906,6 +1920,7 @@ fn streaming_untar_snapshot_file(
             unpack_dir,
             account_paths,
             parallel_divisions,
+            next_append_vec_id,
         ),
     }
 }
@@ -1961,6 +1976,7 @@ fn streaming_untar_snapshot_in<P: AsRef<Path>>(
     account_paths: &[PathBuf],
     archive_format: ArchiveFormat,
     parallel_divisions: usize,
+    next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<(
     HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
     HashMap<Slot, HashSet<Pubkey>>,
@@ -1974,6 +1990,7 @@ fn streaming_untar_snapshot_in<P: AsRef<Path>>(
         account_paths,
         archive_format,
         parallel_divisions,
+        next_append_vec_id,
     )
 }
 
@@ -2030,6 +2047,7 @@ fn rebuild_bank_from_snapshots2(
     storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
     uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
     accounts_data_len: u64,
+    next_append_vec_id: AtomicU32,
     genesis_config: &GenesisConfig,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     additional_builtins: Option<&Builtins>,
@@ -2081,6 +2099,7 @@ fn rebuild_bank_from_snapshots2(
                     storage,
                     uncleaned_pubkeys,
                     accounts_data_len,
+                    next_append_vec_id,
                     genesis_config,
                     debug_keys,
                     additional_builtins,
