@@ -52,6 +52,7 @@ use std::{
 };
 
 pub use archive_format::*;
+use dashmap::DashMap;
 use rayon::ThreadPoolBuilder;
 
 use crate::{
@@ -62,7 +63,7 @@ use crate::{
         StorageSizeAndCountMap,
     },
     accounts_index::{AccountsIndex, ZeroLamport},
-    append_vec::{AppendVec, AppendVecAccountsIter},
+    append_vec::{AppendVec, AppendVecAccountsIter, StoredMetaWriteVersion},
     hardened_unpack::streaming_unpack_snapshot,
     serde_snapshot::bank_from_streams2,
 };
@@ -1669,12 +1670,13 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
 
     let (es_tx, es_rx) = crossbeam_channel::unbounded();
 
-    // TODO: This is screwed up by incremental storage since it'd be reset
     let uncleaned_pubkeys = Arc::new(Mutex::new(HashMap::new()));
     let storage: Arc<Mutex<HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let write_version_tracker = Arc::new(DashMap::new());
 
     while let Ok(append_vec_pathbuf) = rx.recv() {
+        let write_version_tracker = write_version_tracker.clone();
         let accounts_index = accounts_index.clone();
         let account_secondary_indexes = account_secondary_indexes.clone();
         let es_tx = es_tx.clone();
@@ -1691,7 +1693,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
             let remapped_append_vec_path = path_buf.parent().unwrap().join(&remapped_file_name);
 
             if append_vec_id != new_append_vec_id {
-                error!("renaming: {:?} -> {:?}", path_buf, remapped_append_vec_path);
                 std::fs::rename(path_buf, &remapped_append_vec_path);
             }
 
@@ -1707,6 +1708,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
             let pubkey_to_index_entry = temporary_process_storage_entry(&u_storage_entry);
             AccountsDb::update_storage_entry_info(&u_storage_entry, &pubkey_to_index_entry);
             let (storage_dirty_pubkeys, storage_accounts_data_len) = generate_index_for_storage(
+                &write_version_tracker,
                 &accounts_index,
                 &account_secondary_indexes,
                 pubkey_to_index_entry,
@@ -1726,7 +1728,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 .or_insert(HashMap::default())
                 .insert(new_append_vec_id, u_storage_entry);
 
-            es_tx.send(storage_accounts_data_len);
+            es_tx.send(storage_accounts_data_len).unwrap();
         });
     }
 
@@ -1746,6 +1748,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
 }
 
 fn generate_index_for_storage<'a>(
+    write_version_tracker: &Arc<DashMap<Pubkey, HashMap<Slot, StoredMetaWriteVersion>>>,
     accounts_index: &AccountInfoAccountsIndex,
     account_secondary_indexes: &AccountSecondaryIndexes,
     accounts_map: GenerateIndexAccountsMap<'a>,
@@ -1754,35 +1757,51 @@ fn generate_index_for_storage<'a>(
     let secondary = !account_secondary_indexes.is_empty();
     let num_accounts = accounts_map.len();
     let mut accounts_data_len = 0;
-    let items = accounts_map.into_iter().map(
+
+    let items = accounts_map.into_iter().filter_map(
         |(
             pubkey,
             IndexAccountMapEntry {
-                write_version: _write_version,
+                write_version: write_version,
                 store_id,
                 stored_account,
             },
         )| {
-            if secondary {
-                accounts_index.update_secondary_indexes(
-                    &pubkey,
-                    &stored_account,
-                    &account_secondary_indexes,
-                );
-            }
+            let mut pubkey_entry = write_version_tracker
+                .entry(pubkey)
+                .or_insert(HashMap::new());
 
-            if !stored_account.is_zero_lamport() {
-                accounts_data_len += stored_account.data.len() as u64;
-            }
+            let update = if let Some(existing_write_version) = pubkey_entry.get(&slot) {
+                write_version > *existing_write_version
+            } else {
+                true
+            };
 
-            (
-                pubkey,
-                AccountInfo::new(
-                    StorageLocation::AppendVec(store_id, stored_account.offset),
-                    stored_account.stored_size as StoredSize,
-                    stored_account.account_meta.lamports,
-                ),
-            )
+            if update {
+                pubkey_entry.insert(slot, write_version);
+                if secondary {
+                    accounts_index.update_secondary_indexes(
+                        &pubkey,
+                        &stored_account,
+                        &account_secondary_indexes,
+                    );
+                }
+
+                if !stored_account.is_zero_lamport() {
+                    accounts_data_len += stored_account.data.len() as u64;
+                }
+
+                Some((
+                    pubkey,
+                    AccountInfo::new(
+                        StorageLocation::AppendVec(store_id, stored_account.offset),
+                        stored_account.stored_size as StoredSize,
+                        stored_account.account_meta.lamports,
+                    ),
+                ))
+            } else {
+                None
+            }
         },
     );
 
