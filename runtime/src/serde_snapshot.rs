@@ -52,6 +52,8 @@ mod storage;
 mod tests;
 mod utils;
 
+use std::sync::atomic::AtomicU32;
+
 // a number of test cases in accounts_db use this
 #[cfg(test)]
 pub(crate) use tests::reconstruct_accounts_db_via_serialization;
@@ -236,6 +238,7 @@ pub(crate) fn bank_from_streams2<R>(
     storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
     uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
     accounts_data_len: u64,
+    next_append_vec_id: AtomicU32,
     genesis_config: &GenesisConfig,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     additional_builtins: Option<&Builtins>,
@@ -278,6 +281,7 @@ where
                 storage,
                 uncleaned_pubkeys,
                 accounts_data_len,
+                next_append_vec_id,
                 debug_keys,
                 additional_builtins,
                 accounts_index,
@@ -556,6 +560,7 @@ fn reconstruct_bank_from_fields2<E>(
     storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
     uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
     accounts_data_len: u64,
+    next_append_vec_id: AtomicU32,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     additional_builtins: Option<&Builtins>,
     accounts_index: AccountInfoAccountsIndex,
@@ -576,6 +581,7 @@ where
         storage,
         uncleaned_pubkeys,
         accounts_data_len,
+        next_append_vec_id,
         genesis_config,
         accounts_index,
         account_secondary_indexes,
@@ -691,6 +697,7 @@ fn reconstruct_accountsdb_from_fields2<E>(
     storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
     uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
     accounts_data_len: u64,
+    next_append_vec_id: AtomicU32,
     genesis_config: &GenesisConfig,
     accounts_index: AccountInfoAccountsIndex,
     account_secondary_indexes: AccountSecondaryIndexes,
@@ -725,24 +732,6 @@ where
         snapshot_historical_roots_with_hash,
     ) = snapshot_accounts_db_fields.collapse_into()?;
 
-    snapshot_storages.into_iter().for_each(|(slot, stores)| {
-        stores.into_iter().for_each(|store| {
-            let real_store = accounts_db
-                .storage
-                .get_account_storage_entry(slot, store.id() as u32)
-                .unwrap();
-            if real_store.alive_bytes() != store.current_len() {
-                error!(
-                    "size mismatch for {}.{} => {} != {}",
-                    slot,
-                    store.id(),
-                    real_store.accounts.len(),
-                    store.current_len()
-                );
-            }
-        });
-    });
-
     reconstruct_historical_roots(
         &accounts_db,
         snapshot_historical_roots,
@@ -756,8 +745,7 @@ where
         .unwrap()
         .insert(snapshot_slot, snapshot_bank_hash_info);
 
-    // TODO: Fix this w/ actual next id
-    accounts_db.next_id.store(2, Ordering::Release);
+    accounts_db.next_id = next_append_vec_id;
     accounts_db
         .write_version
         .fetch_add(snapshot_version, Ordering::Release);
