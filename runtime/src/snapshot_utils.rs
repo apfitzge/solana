@@ -52,6 +52,8 @@ use {
 
 mod archive_format;
 
+use std::sync::RwLock;
+
 pub use archive_format::*;
 use dashmap::DashMap;
 use rayon::ThreadPoolBuilder;
@@ -1696,11 +1698,29 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
             )));
         }
     }?;
-    let snapshot_storage_lengths = Arc::new(snapshot_storage_lengths);
+
     let (es_tx, es_rx) = crossbeam_channel::unbounded();
     let uncleaned_pubkeys = Arc::new(DashMap::new());
     let storage: Arc<DashMap<Slot, SlotStores>> = Arc::new(DashMap::new());
     let write_version_tracker = Arc::new(DashMap::new());
+
+    // Pre-allocate storage so there's no resizing as we add to storage
+    let (_, pre_allocation_measure) = measure!(
+        {
+            let mut account_count = 0;
+            snapshot_storage_lengths.iter().for_each(|(slot, map)| {
+                storage.insert(
+                    *slot,
+                    Arc::new(RwLock::new(HashMap::with_capacity(map.capacity()))),
+                );
+                write_version_tracker.insert(*slot, HashMap::new());
+            });
+        },
+        "pre-allocate storage"
+    );
+    info!("{pre_allocation_measure}");
+
+    let snapshot_storage_lengths = Arc::new(snapshot_storage_lengths);
 
     // resend so these get processed
     for r in to_process {
@@ -1788,7 +1808,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
 }
 
 fn generate_index_for_storage<'a>(
-    write_version_tracker: &Arc<DashMap<Pubkey, HashMap<Slot, StoredMetaWriteVersion>>>,
+    write_version_tracker: &Arc<DashMap<Slot, HashMap<Pubkey, StoredMetaWriteVersion>>>,
     accounts_index: &AccountInfoAccountsIndex,
     account_secondary_indexes: &AccountSecondaryIndexes,
     accounts_map: GenerateIndexAccountsMap<'a>,
@@ -1807,18 +1827,16 @@ fn generate_index_for_storage<'a>(
                 stored_account,
             },
         )| {
-            let mut pubkey_entry = write_version_tracker
-                .entry(pubkey)
-                .or_insert(HashMap::new());
+            let mut slot_entry = write_version_tracker.get_mut(&slot).unwrap();
 
-            let update = if let Some(existing_write_version) = pubkey_entry.get(&slot) {
+            let update = if let Some(existing_write_version) = slot_entry.get(&pubkey) {
                 write_version > *existing_write_version
             } else {
                 true
             };
 
             if update {
-                pubkey_entry.insert(slot, write_version);
+                slot_entry.insert(pubkey, write_version);
                 if secondary {
                     accounts_index.update_secondary_indexes(
                         &pubkey,
