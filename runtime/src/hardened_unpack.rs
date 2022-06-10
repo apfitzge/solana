@@ -136,12 +136,10 @@ where
         }
 
         let parts: Vec<_> = parts.map(|p| p.unwrap()).collect();
-        let (is_storage, storage_filename) = if let ["accounts", file] = parts.as_slice() {
-            let is_storage = like_storage(file);
-            (is_storage, is_storage.then(|| (*file).to_owned()))
-        } else {
-            (false, None)
-        };
+        let filename = parts
+            .as_slice()
+            .get(1)
+            .map(|filename| (*filename).to_owned());
         let unpack_dir = match entry_checker(parts.as_slice(), kind) {
             UnpackPath::Invalid => {
                 return Err(UnpackError::Archive(format!(
@@ -185,8 +183,8 @@ where
         let entry_path_buf = unpack_dir.join(entry.path()?);
         set_perms(&entry_path_buf, mode)?;
 
-        if is_storage {
-            tx.send((storage_filename.unwrap(), entry_path_buf));
+        if entry_path_buf.is_file() && filename.is_some() {
+            tx.send((filename.unwrap(), entry_path_buf)).unwrap();
         }
 
         total_entries += 1;

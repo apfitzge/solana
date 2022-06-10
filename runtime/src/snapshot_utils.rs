@@ -64,8 +64,9 @@ use crate::{
     },
     accounts_index::{AccountsIndex, ZeroLamport},
     append_vec::{AppendVec, AppendVecAccountsIter, StoredMetaWriteVersion},
+    bank::BankFieldsToDeserialize,
     hardened_unpack::streaming_unpack_snapshot,
-    serde_snapshot::bank_from_streams2,
+    serde_snapshot::{bank_from_streams2, snapshot_stream_to, AccountsDbFields},
 };
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
@@ -1668,68 +1669,161 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         (slot, append_vec_id)
     }
 
-    let (es_tx, es_rx) = crossbeam_channel::unbounded();
+    /// Move these later
+    fn like_snapshot(v: &str) -> bool {
+        let mut periods = 0;
+        let mut saw_numbers = false;
+        for x in v.chars() {
+            if !x.is_ascii_digit() {
+                if x == '.' {
+                    if periods > 0 || !saw_numbers {
+                        return false;
+                    }
+                    saw_numbers = false;
+                    periods += 1;
+                } else {
+                    return false;
+                }
+            } else {
+                saw_numbers = true;
+            }
+        }
+        saw_numbers && periods == 0
+    }
 
+    fn like_storage(v: &str) -> bool {
+        let mut periods = 0;
+        let mut saw_numbers = false;
+        for x in v.chars() {
+            if !x.is_ascii_digit() {
+                if x == '.' {
+                    if periods > 0 || !saw_numbers {
+                        return false;
+                    }
+                    saw_numbers = false;
+                    periods += 1;
+                } else {
+                    return false;
+                }
+            } else {
+                saw_numbers = true;
+            }
+        }
+        saw_numbers && periods == 1
+    }
+
+    let mut to_process = Vec::with_capacity(1024);
+
+    fn process_snapshot_file(
+        filename: String,
+        path_buf: PathBuf,
+    ) -> Result<HashMap<Slot, HashMap<usize, usize>>> {
+        let (file_size, mut stream) =
+            create_snapshot_data_file_stream(&path_buf.as_path(), MAX_SNAPSHOT_DATA_FILE_SIZE)?;
+        snapshot_stream_to(SerdeStyle::Newer, &mut stream).map_err(|e| {
+            SnapshotError::UnpackError(UnpackError::Archive(
+                "Error in snapshot_stream_to".to_string(),
+            ))
+        })
+    }
+
+    let snapshot_storage_lengths = loop {
+        if let Ok((filename, path_buf)) = rx.recv() {
+            if like_snapshot(&filename) {
+                error!("snapshot {filename}");
+                break process_snapshot_file(filename, path_buf);
+            } else if like_storage(&filename) {
+                error!("pushing {filename}");
+                to_process.push((filename, path_buf));
+            }
+        } else {
+            break Err(SnapshotError::UnpackError(UnpackError::Archive(
+                "Error waiting for snapshot file".to_string(),
+            )));
+        }
+    }?;
+    let snapshot_storage_lengths = Arc::new(snapshot_storage_lengths);
+    let (es_tx, es_rx) = crossbeam_channel::unbounded();
     let uncleaned_pubkeys = Arc::new(Mutex::new(HashMap::new()));
     let storage: Arc<Mutex<HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let write_version_tracker = Arc::new(DashMap::new());
 
-    while let Ok(append_vec_pathbuf) = rx.recv() {
-        let write_version_tracker = write_version_tracker.clone();
-        let accounts_index = accounts_index.clone();
-        let account_secondary_indexes = account_secondary_indexes.clone();
-        let es_tx = es_tx.clone();
-        let storage = storage.clone();
-        let next_append_vec_id = next_append_vec_id.clone();
-        let uncleaned_pubkeys = uncleaned_pubkeys.clone();
-        indexing_thread_pool.spawn(move || {
-            let new_append_vec_id =
-                next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let (slot, append_vec_id) = get_slot_and_append_vec_id(&append_vec_pathbuf.0);
-
-            let path_buf = append_vec_pathbuf.1;
-            let remapped_file_name = AppendVec::file_name(slot, new_append_vec_id);
-            let remapped_append_vec_path = path_buf.parent().unwrap().join(&remapped_file_name);
-
-            if append_vec_id != new_append_vec_id {
-                std::fs::rename(path_buf, &remapped_append_vec_path);
+    let storage_processor = {
+        |(filename, path_buf): (String, PathBuf)| {
+            if !like_storage(&filename) {
+                return;
             }
+            let write_version_tracker = write_version_tracker.clone();
+            let accounts_index = accounts_index.clone();
+            let account_secondary_indexes = account_secondary_indexes.clone();
+            let es_tx = es_tx.clone();
+            let storage = storage.clone();
+            let snapshot_storage_lengths = snapshot_storage_lengths.clone();
+            let next_append_vec_id = next_append_vec_id.clone();
+            let uncleaned_pubkeys = uncleaned_pubkeys.clone();
 
-            let (accounts, num_accounts) =
-                AppendVec::new_from_file_without_size(&remapped_append_vec_path).unwrap();
-            let u_storage_entry = Arc::new(AccountStorageEntry::new_existing(
-                slot,
-                new_append_vec_id,
-                accounts,
-                num_accounts,
-            ));
+            indexing_thread_pool.spawn(move || {
+                let new_append_vec_id =
+                    next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                let (slot, append_vec_id) = get_slot_and_append_vec_id(&filename);
 
-            let pubkey_to_index_entry = temporary_process_storage_entry(&u_storage_entry);
-            AccountsDb::update_storage_entry_info(&u_storage_entry, &pubkey_to_index_entry);
-            let (storage_dirty_pubkeys, storage_accounts_data_len) = generate_index_for_storage(
-                &write_version_tracker,
-                &accounts_index,
-                &account_secondary_indexes,
-                pubkey_to_index_entry,
-                slot,
-            );
-            uncleaned_pubkeys
-                .lock()
-                .unwrap()
-                .entry(slot)
-                .or_insert(HashSet::<Pubkey>::default())
-                .extend(storage_dirty_pubkeys);
+                let remapped_file_name = AppendVec::file_name(slot, new_append_vec_id);
+                let remapped_append_vec_path = path_buf.parent().unwrap().join(&remapped_file_name);
 
-            storage
-                .lock()
-                .unwrap()
-                .entry(slot)
-                .or_insert(HashMap::default())
-                .insert(new_append_vec_id, u_storage_entry);
+                if append_vec_id != new_append_vec_id {
+                    std::fs::rename(path_buf, &remapped_append_vec_path);
+                }
 
-            es_tx.send(storage_accounts_data_len).unwrap();
-        });
+                let current_len = *snapshot_storage_lengths
+                    .get(&slot)
+                    .unwrap()
+                    .get(&(append_vec_id as usize))
+                    .unwrap();
+
+                let (accounts, num_accounts) =
+                    AppendVec::new_from_file(&remapped_append_vec_path, current_len).unwrap();
+                let u_storage_entry = Arc::new(AccountStorageEntry::new_existing(
+                    slot,
+                    new_append_vec_id,
+                    accounts,
+                    num_accounts,
+                ));
+
+                let pubkey_to_index_entry = temporary_process_storage_entry(&u_storage_entry);
+                AccountsDb::update_storage_entry_info(&u_storage_entry, &pubkey_to_index_entry);
+                let (storage_dirty_pubkeys, storage_accounts_data_len) = generate_index_for_storage(
+                    &write_version_tracker,
+                    &accounts_index,
+                    &account_secondary_indexes,
+                    pubkey_to_index_entry,
+                    slot,
+                );
+                uncleaned_pubkeys
+                    .lock()
+                    .unwrap()
+                    .entry(slot)
+                    .or_insert(HashSet::<Pubkey>::default())
+                    .extend(storage_dirty_pubkeys);
+
+                storage
+                    .lock()
+                    .unwrap()
+                    .entry(slot)
+                    .or_insert(HashMap::default())
+                    .insert(new_append_vec_id, u_storage_entry);
+
+                es_tx.send(storage_accounts_data_len).unwrap();
+            });
+        }
+    };
+
+    for (filename, path_buf) in to_process {
+        storage_processor((filename, path_buf));
+    }
+
+    while let Ok(r) = rx.recv() {
+        storage_processor(r);
     }
 
     drop(es_tx); // drop the local copy so that when the other clones get dropped we get an Err. After redoing this we just pass to a function
