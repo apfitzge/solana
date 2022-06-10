@@ -57,6 +57,8 @@ use dashmap::DashMap;
 use rayon::ThreadPoolBuilder;
 use solana_measure::measure;
 
+use crate::accounts_db::SlotStores;
+
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
 pub const DEFAULT_FULL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS: Slot = 25_000;
@@ -191,7 +193,7 @@ struct UnarchivedSnapshot {
 #[derive(Debug)]
 struct UnarchivedIndexedSnapshot {
     unpack_dir: TempDir,
-    storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    storage: DashMap<Slot, SlotStores>,
     uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
     accounts_data_len: u64,
     unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion,
@@ -1551,7 +1553,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     parallel_archivers: usize,
     next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<(
-    HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    DashMap<Slot, SlotStores>,
     DashMap<Slot, HashSet<Pubkey>>,
     u64,
 )> {
@@ -1693,8 +1695,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     let snapshot_storage_lengths = Arc::new(snapshot_storage_lengths);
     let (es_tx, es_rx) = crossbeam_channel::unbounded();
     let uncleaned_pubkeys = Arc::new(DashMap::new());
-    let storage: Arc<Mutex<HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let storage: Arc<DashMap<Slot, SlotStores>> = Arc::new(DashMap::new());
     let write_version_tracker = Arc::new(DashMap::new());
 
     let storage_processor = {
@@ -1753,10 +1754,10 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                     .extend(storage_dirty_pubkeys);
 
                 storage
-                    .lock()
-                    .unwrap()
                     .entry(slot)
-                    .or_insert(HashMap::default())
+                    .or_insert(SlotStores::default())
+                    .write()
+                    .unwrap()
                     .insert(new_append_vec_id, u_storage_entry);
 
                 es_tx.send(storage_accounts_data_len).unwrap();
@@ -1778,7 +1779,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         accounts_data_len += storage_accounts_data_len;
     }
 
-    let storage = Arc::try_unwrap(storage).unwrap().into_inner().unwrap();
+    let storage = Arc::try_unwrap(storage).unwrap();
     let uncleaned_pubkeys = Arc::try_unwrap(uncleaned_pubkeys).unwrap();
     Ok((storage, uncleaned_pubkeys, accounts_data_len))
 }
@@ -1926,7 +1927,7 @@ fn streaming_untar_snapshot_file(
     parallel_divisions: usize,
     next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<(
-    HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    DashMap<Slot, SlotStores>,
     DashMap<Slot, HashSet<Pubkey>>,
     u64,
 )> {
@@ -2033,7 +2034,7 @@ fn streaming_untar_snapshot_in<P: AsRef<Path>>(
     parallel_divisions: usize,
     next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<(
-    HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    DashMap<Slot, SlotStores>,
     DashMap<Slot, HashSet<Pubkey>>,
     u64,
 )> {
@@ -2100,7 +2101,7 @@ fn rebuild_bank_from_snapshots2(
         &UnpackedSnapshotsDirAndVersion,
     >,
     account_paths: &[PathBuf],
-    storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+    storage: DashMap<Slot, SlotStores>,
     uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
     accounts_data_len: u64,
     next_append_vec_id: AtomicU32,

@@ -1864,7 +1864,7 @@ impl AccountsDb {
     }
 
     fn default_with_accounts_index2(
-        storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+        storage: DashMap<Slot, SlotStores>,
         accounts_index: AccountInfoAccountsIndex,
         accounts_hash_cache_path: Option<PathBuf>,
         num_hash_scan_passes: Option<usize>,
@@ -1888,12 +1888,7 @@ impl AccountsDb {
         // validate inside here
         Self::bins_per_pass(num_hash_scan_passes);
 
-        let storage = AccountStorage {
-            map: storage
-                .into_iter()
-                .map(|(slot, slot_stores)| (slot, Arc::new(RwLock::new(slot_stores))))
-                .collect(),
-        };
+        let storage = AccountStorage { map: storage };
 
         AccountsDb {
             filler_accounts_per_slot: AtomicU64::default(),
@@ -2067,7 +2062,7 @@ impl AccountsDb {
     pub fn new_with_config2(
         paths: Vec<PathBuf>,
         cluster_type: &ClusterType,
-        storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
+        storage: DashMap<Slot, SlotStores>,
         accounts_index: AccountInfoAccountsIndex,
         account_indexes: AccountSecondaryIndexes,
         caching_enabled: bool,
