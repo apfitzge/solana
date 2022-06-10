@@ -192,7 +192,7 @@ struct UnarchivedSnapshot {
 struct UnarchivedIndexedSnapshot {
     unpack_dir: TempDir,
     storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
-    uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
+    uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
     accounts_data_len: u64,
     unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion,
     measure_unarchive_and_index: Measure,
@@ -1552,7 +1552,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<(
     HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
-    HashMap<Slot, HashSet<Pubkey>>,
+    DashMap<Slot, HashSet<Pubkey>>,
     u64,
 )> {
     assert!(parallel_archivers > 0);
@@ -1692,7 +1692,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     }?;
     let snapshot_storage_lengths = Arc::new(snapshot_storage_lengths);
     let (es_tx, es_rx) = crossbeam_channel::unbounded();
-    let uncleaned_pubkeys = Arc::new(Mutex::new(HashMap::new()));
+    let uncleaned_pubkeys = Arc::new(DashMap::new());
     let storage: Arc<Mutex<HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let write_version_tracker = Arc::new(DashMap::new());
@@ -1748,8 +1748,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                     slot,
                 );
                 uncleaned_pubkeys
-                    .lock()
-                    .unwrap()
                     .entry(slot)
                     .or_insert(HashSet::<Pubkey>::default())
                     .extend(storage_dirty_pubkeys);
@@ -1766,12 +1764,10 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         }
     };
 
-    // Parallelize?
     for (filename, path_buf) in to_process {
         storage_processor((filename, path_buf));
     }
 
-    // Parallelize?
     while let Ok(r) = rx.recv() {
         storage_processor(r);
     }
@@ -1783,11 +1779,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     }
 
     let storage = Arc::try_unwrap(storage).unwrap().into_inner().unwrap();
-    let uncleaned_pubkeys = Arc::try_unwrap(uncleaned_pubkeys)
-        .unwrap()
-        .into_inner()
-        .unwrap();
-
+    let uncleaned_pubkeys = Arc::try_unwrap(uncleaned_pubkeys).unwrap();
     Ok((storage, uncleaned_pubkeys, accounts_data_len))
 }
 
@@ -1935,7 +1927,7 @@ fn streaming_untar_snapshot_file(
     next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<(
     HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
-    HashMap<Slot, HashSet<Pubkey>>,
+    DashMap<Slot, HashSet<Pubkey>>,
     u64,
 )> {
     let open_file = || File::open(&snapshot_tar).unwrap();
@@ -2042,7 +2034,7 @@ fn streaming_untar_snapshot_in<P: AsRef<Path>>(
     next_append_vec_id: Arc<AtomicU32>,
 ) -> Result<(
     HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
-    HashMap<Slot, HashSet<Pubkey>>,
+    DashMap<Slot, HashSet<Pubkey>>,
     u64,
 )> {
     streaming_untar_snapshot_file(
@@ -2109,7 +2101,7 @@ fn rebuild_bank_from_snapshots2(
     >,
     account_paths: &[PathBuf],
     storage: HashMap<Slot, HashMap<AppendVecId, Arc<AccountStorageEntry>>>,
-    uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
+    uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
     accounts_data_len: u64,
     next_append_vec_id: AtomicU32,
     genesis_config: &GenesisConfig,
