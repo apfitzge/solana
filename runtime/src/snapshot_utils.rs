@@ -55,6 +55,7 @@ mod archive_format;
 pub use archive_format::*;
 use dashmap::DashMap;
 use rayon::ThreadPoolBuilder;
+use solana_measure::measure;
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
@@ -1652,21 +1653,28 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         saw_numbers && periods == 1
     }
 
+    // Due to parallel untar, we may receive some accounts files before we get the snapshot file.
+    // Create a vector here to store them, with an initial capacity we don't expect to exceed.
     let mut to_process = Vec::with_capacity(1024);
 
     fn process_snapshot_file(
         filename: String,
         path_buf: PathBuf,
     ) -> Result<HashMap<Slot, HashMap<usize, usize>>> {
-        let (file_size, mut stream) =
-            create_snapshot_data_file_stream(&path_buf.as_path(), MAX_SNAPSHOT_DATA_FILE_SIZE)?;
-        snapshot_stream_to(SerdeStyle::Newer, &mut stream).map_err(|e| {
-            SnapshotError::UnpackError(UnpackError::Archive(
-                "Error in snapshot_stream_to".to_string(),
-            ))
-        })
+        let (result, measure) = measure!({
+            let (file_size, mut stream) =
+                create_snapshot_data_file_stream(&path_buf.as_path(), MAX_SNAPSHOT_DATA_FILE_SIZE)?;
+            snapshot_stream_to(SerdeStyle::Newer, &mut stream).map_err(|e| {
+                SnapshotError::UnpackError(UnpackError::Archive(
+                    "Error in snapshot_stream_to".to_string(),
+                ))
+            })
+        });
+        info!("processing snapshot file took {} us", measure.as_us());
+        result
     }
 
+    // Parallelize?
     let snapshot_storage_lengths = loop {
         if let Ok((filename, path_buf)) = rx.recv() {
             if like_snapshot(&filename) {
@@ -1758,10 +1766,12 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         }
     };
 
+    // Parallelize?
     for (filename, path_buf) in to_process {
         storage_processor((filename, path_buf));
     }
 
+    // Parallelize?
     while let Ok(r) = rx.recv() {
         storage_processor(r);
     }
