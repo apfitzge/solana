@@ -1603,7 +1603,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     });
 
     let indexing_thread_pool = ThreadPoolBuilder::default()
-        .num_threads(num_cpus::get())
+        .num_threads(num_cpus::get() - parallel_archivers)
         .build()
         .unwrap();
 
@@ -1769,8 +1769,8 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         }
     };
 
-    for (filename, path_buf) in to_process {
-        storage_processor((filename, path_buf));
+    for r in to_process {
+        storage_processor(r);
     }
 
     while let Ok(r) = rx.recv() {
