@@ -8253,7 +8253,7 @@ impl AccountsDb {
         &self,
         verify: bool,
         genesis_config: &GenesisConfig,
-        uncleaned_pubkeys: HashMap<Slot, HashSet<Pubkey>>,
+        uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
         mut accounts_data_len: u64,
     ) -> u64 {
         let mut slots = self.storage.all_slots();
