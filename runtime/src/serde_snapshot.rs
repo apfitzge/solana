@@ -68,7 +68,7 @@ pub(crate) enum SerdeStyle {
 const MAX_STREAM_SIZE: u64 = 32 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, AbiExample, PartialEq)]
-struct AccountsDbFields<T>(
+pub(crate) struct AccountsDbFields<T>(
     HashMap<Slot, Vec<T>>,
     StoredMetaWriteVersion,
     Slot,
@@ -228,6 +228,52 @@ pub(crate) fn compare_two_serialized_banks(
     let fields1 = newer::Context::deserialize_bank_fields(&mut stream1)?;
     let fields2 = newer::Context::deserialize_bank_fields(&mut stream2)?;
     Ok(fields1 == fields2)
+}
+
+pub(crate) fn snapshot_stream_to<'a, R>(
+    serde_style: SerdeStyle,
+    snapshot_stream: &'a mut BufReader<R>,
+) -> std::result::Result<HashMap<Slot, HashMap<usize, usize>>, Error>
+where
+    R: Read,
+{
+    macro_rules! INTO {
+        ($style:ident) => {{
+            let (_, accounts_db_fields) =
+                $style::Context::deserialize_bank_fields(snapshot_stream)?;
+
+            let AccountsDbFields(
+                snapshot_storages,
+                snapshot_version,
+                snapshot_slot,
+                snapshot_bank_hash_info,
+                snapshot_historical_roots,
+                snapshot_historical_roots_with_hash,
+            ) = accounts_db_fields;
+
+            let snapshot_storages = snapshot_storages
+                .into_iter()
+                .map(|(slot, entries)| {
+                    (
+                        slot,
+                        entries
+                            .into_iter()
+                            .map(|entry| (entry.id(), entry.current_len()))
+                            .collect::<HashMap<_, _>>(),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+
+            Ok(snapshot_storages)
+        }};
+    }
+    match serde_style {
+        SerdeStyle::Newer => INTO!(newer),
+    }
+    .map_err(|err| {
+        warn!("snapshot_stream_to error: {:?}", err);
+        err
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
