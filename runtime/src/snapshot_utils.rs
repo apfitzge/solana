@@ -1748,6 +1748,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     let process_storage_entry_us = Arc::new(AtomicU64::new(0));
     let update_storage_entry_info_us = Arc::new(AtomicU64::new(0));
     let generate_index_us = Arc::new(AtomicU64::new(0));
+    let generate_index_insert_us = Arc::new(AtomicU64::new(0));
     let extend_uncleaned_pubkeys_us = Arc::new(AtomicU64::new(0));
     let insert_storage_us = Arc::new(AtomicU64::new(0));
 
@@ -1767,6 +1768,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         let process_storage_entry_us = process_storage_entry_us.clone();
         let update_storage_entry_info_us = update_storage_entry_info_us.clone();
         let generate_index_us = generate_index_us.clone();
+        let generate_index_insert_us = generate_index_insert_us.clone();
         let extend_uncleaned_pubkeys_us = extend_uncleaned_pubkeys_us.clone();
         let insert_storage_us = insert_storage_us.clone();
 
@@ -1782,8 +1784,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 let (slot, append_vec_id) = get_slot_and_append_vec_id(&filename);
 
                 let remapped_file_name = AppendVec::file_name(slot, new_append_vec_id);
-                let remapped_append_vec_path =
-                    path_buf.parent().unwrap().join(&remapped_file_name);
+                let remapped_append_vec_path = path_buf.parent().unwrap().join(&remapped_file_name);
 
                 if append_vec_id != new_append_vec_id {
                     std::fs::rename(path_buf, &remapped_append_vec_path).unwrap();
@@ -1826,29 +1827,45 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 update_storage_entry_info_us
                     .fetch_add(update_storage_entry_measure.as_us(), Relaxed);
 
-
-                let ((storage_dirty_pubkeys, storage_accounts_data_len), generate_index_measure) = measure!(generate_index_for_storage(
-                    &write_version_tracker,
-                    &accounts_index,
-                    &account_secondary_indexes,
-                    pubkey_to_index_entry,
-                    slot,
-                ), generate_index_measure_name);
+                let (
+                    (
+                        storage_dirty_pubkeys,
+                        storage_accounts_data_len,
+                        generate_index_insert_time_us,
+                    ),
+                    generate_index_measure,
+                ) = measure!(
+                    generate_index_for_storage(
+                        &write_version_tracker,
+                        &accounts_index,
+                        &account_secondary_indexes,
+                        pubkey_to_index_entry,
+                        slot,
+                    ),
+                    generate_index_measure_name
+                );
                 generate_index_us.fetch_add(generate_index_measure.as_us(), Relaxed);
+                generate_index_insert_us.fetch_add(generate_index_insert_time_us, Relaxed);
 
-                let (_, extend_uncleaned_pubkeys_measure) = measure!(uncleaned_pubkeys
-                    .entry(slot)
-                    .or_insert(HashSet::<Pubkey>::default())
-                    .extend(storage_dirty_pubkeys), extend_uncleaned_pubkeys_measure_name);
-                extend_uncleaned_pubkeys_us.fetch_add(extend_uncleaned_pubkeys_measure.as_us(), Relaxed);
+                let (_, extend_uncleaned_pubkeys_measure) = measure!(
+                    uncleaned_pubkeys
+                        .entry(slot)
+                        .or_insert(HashSet::<Pubkey>::default())
+                        .extend(storage_dirty_pubkeys),
+                    extend_uncleaned_pubkeys_measure_name
+                );
+                extend_uncleaned_pubkeys_us
+                    .fetch_add(extend_uncleaned_pubkeys_measure.as_us(), Relaxed);
 
                 let (_, storage_insert_measure) = measure!(
-                storage
-                    .entry(slot)
-                    .or_insert(SlotStores::default())
-                    .write()
-                    .unwrap()
-                    .insert(new_append_vec_id, u_storage_entry), insert_storage_measure_name);
+                    storage
+                        .entry(slot)
+                        .or_insert(SlotStores::default())
+                        .write()
+                        .unwrap()
+                        .insert(new_append_vec_id, u_storage_entry),
+                    insert_storage_measure_name
+                );
                 insert_storage_us.fetch_add(storage_insert_measure.as_us(), Relaxed);
 
                 es_tx.send(storage_accounts_data_len).unwrap();
@@ -1886,6 +1903,10 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         generate_index_us.load(Relaxed)
     );
     info!(
+        "generate_index_primary_insert took {} us",
+        generate_index_insert_us.load(Relaxed)
+    );
+    info!(
         "{extend_uncleaned_pubkeys_measure_name} took {} us",
         extend_uncleaned_pubkeys_us.load(Relaxed)
     );
@@ -1903,7 +1924,7 @@ fn generate_index_for_storage<'a>(
     account_secondary_indexes: &AccountSecondaryIndexes,
     accounts_map: GenerateIndexAccountsMap<'a>,
     slot: Slot,
-) -> (Vec<Pubkey>, u64) {
+) -> (Vec<Pubkey>, u64, u64) {
     let secondary = !account_secondary_indexes.is_empty();
     let num_accounts = accounts_map.len();
     let mut accounts_data_len = 0;
@@ -1956,7 +1977,7 @@ fn generate_index_for_storage<'a>(
     let (dirty_pubkeys, insert_time_us) =
         accounts_index.insert_new_if_missing_into_primary_index(slot, num_accounts, items);
 
-    (dirty_pubkeys, accounts_data_len)
+    (dirty_pubkeys, accounts_data_len, insert_time_us)
 }
 
 fn temporary_process_storage_entry(
