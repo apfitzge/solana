@@ -1,14 +1,22 @@
 use {
     crate::{
+        account_info::{AccountInfo, StorageLocation, StoredSize},
         accounts_db::{
-            AccountShrinkThreshold, AccountsDbConfig, SnapshotStorage, SnapshotStorages,
+            AccountInfoAccountsIndex, AccountShrinkThreshold, AccountStorageEntry, AccountsDb,
+            AccountsDbConfig, AppendVecId, GenerateIndexAccountsMap, GenerateIndexTimings,
+            IndexAccountMapEntry, SnapshotStorage, SnapshotStorages, StorageSizeAndCountMap,
         },
-        accounts_index::AccountSecondaryIndexes,
+        accounts_index::{AccountSecondaryIndexes, AccountsIndex, ZeroLamport},
         accounts_update_notifier_interface::AccountsUpdateNotifier,
-        bank::{Bank, BankSlotDelta},
+        append_vec::{AppendVec, AppendVecAccountsIter, StoredMetaWriteVersion},
+        bank::{Bank, BankFieldsToDeserialize, BankSlotDelta},
         builtins::Builtins,
-        hardened_unpack::{unpack_snapshot, ParallelSelector, UnpackError, UnpackedAppendVecMap},
+        hardened_unpack::{
+            streaming_unpack_snapshot, unpack_snapshot, ParallelSelector, UnpackError,
+            UnpackedAppendVecMap,
+        },
         serde_snapshot::{bank_from_streams, bank_to_stream, SerdeStyle, SnapshotStreams},
+        serde_snapshot::{bank_from_streams2, snapshot_stream_to, AccountsDbFields},
         shared_buffer_reader::{SharedBuffer, SharedBufferReader},
         snapshot_archive_info::{
             FullSnapshotArchiveInfo, IncrementalSnapshotArchiveInfo, SnapshotArchiveInfoGetter,
@@ -28,14 +36,14 @@ use {
     solana_sdk::{clock::Slot, genesis_config::GenesisConfig, hash::Hash, pubkey::Pubkey},
     std::{
         cmp::Ordering,
-        collections::{HashMap, HashSet},
+        collections::{hash_map::Entry, HashMap, HashSet},
         fmt,
         fs::{self, File},
         io::{BufReader, BufWriter, Error as IoError, ErrorKind, Read, Seek, Write},
         path::{Path, PathBuf},
         process::ExitStatus,
         str::FromStr,
-        sync::Arc,
+        sync::{atomic::AtomicU32, Arc, Mutex},
     },
     tar::{self, Archive},
     tempfile::TempDir,
@@ -43,31 +51,10 @@ use {
 };
 
 mod archive_format;
-use std::{
-    collections::hash_map::Entry,
-    sync::{
-        atomic::{AtomicU32, AtomicUsize},
-        Mutex,
-    },
-};
 
 pub use archive_format::*;
 use dashmap::DashMap;
 use rayon::ThreadPoolBuilder;
-
-use crate::{
-    account_info::{AccountInfo, StorageLocation, StoredSize},
-    accounts_db::{
-        AccountInfoAccountsIndex, AccountStorageEntry, AccountsDb, AppendVecId,
-        GenerateIndexAccountsMap, GenerateIndexTimings, IndexAccountMapEntry,
-        StorageSizeAndCountMap,
-    },
-    accounts_index::{AccountsIndex, ZeroLamport},
-    append_vec::{AppendVec, AppendVecAccountsIter, StoredMetaWriteVersion},
-    bank::BankFieldsToDeserialize,
-    hardened_unpack::streaming_unpack_snapshot,
-    serde_snapshot::{bank_from_streams2, snapshot_stream_to, AccountsDbFields},
-};
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
@@ -1647,7 +1634,8 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                     &ledger_dir,
                     &account_paths,
                     parallel_selector,
-                );
+                )
+                .unwrap();
             });
     });
 
@@ -1768,7 +1756,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 let remapped_append_vec_path = path_buf.parent().unwrap().join(&remapped_file_name);
 
                 if append_vec_id != new_append_vec_id {
-                    std::fs::rename(path_buf, &remapped_append_vec_path);
+                    std::fs::rename(path_buf, &remapped_append_vec_path).unwrap();
                 }
 
                 let current_len = *snapshot_storage_lengths
@@ -1852,7 +1840,7 @@ fn generate_index_for_storage<'a>(
         |(
             pubkey,
             IndexAccountMapEntry {
-                write_version: write_version,
+                write_version,
                 store_id,
                 stored_account,
             },

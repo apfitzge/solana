@@ -2,8 +2,9 @@ use {
     crate::{
         accounts::Accounts,
         accounts_db::{
-            AccountShrinkThreshold, AccountStorageEntry, AccountsDb, AccountsDbConfig, AppendVecId,
-            AtomicAppendVecId, BankHashInfo, IndexGenerationInfo, SnapshotStorage,
+            AccountInfoAccountsIndex, AccountShrinkThreshold, AccountStorageEntry, AccountsDb,
+            AccountsDbConfig, AppendVecId, AtomicAppendVecId, BankHashInfo, IndexGenerationInfo,
+            SnapshotStorage,
         },
         accounts_index::AccountSecondaryIndexes,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
@@ -57,8 +58,6 @@ use std::sync::atomic::AtomicU32;
 // a number of test cases in accounts_db use this
 #[cfg(test)]
 pub(crate) use tests::reconstruct_accounts_db_via_serialization;
-
-use crate::accounts_db::{AccountInfoAccountsIndex, StorageSizeAndCountMap};
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub(crate) enum SerdeStyle {
