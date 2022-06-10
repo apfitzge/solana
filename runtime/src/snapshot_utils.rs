@@ -52,7 +52,10 @@ use {
 
 mod archive_format;
 
-use std::sync::RwLock;
+use std::sync::{
+    atomic::{AtomicI64, AtomicU64, Ordering::Relaxed},
+    RwLock,
+};
 
 pub use archive_format::*;
 use dashmap::DashMap;
@@ -1732,6 +1735,22 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     }
     drop(tx);
 
+    let remapping_measure_name = "remapping";
+    let appendvec_read_measure_name = "appendvec read";
+    let process_storage_entry_measure_name = "process storage entry";
+    let update_storage_entry_info_measure_name = "update storage entry info";
+    let generate_index_measure_name = "generate index";
+    let extend_uncleaned_pubkeys_measure_name = "extend uncleaned pubkeys";
+    let insert_storage_measure_name = "insert storage";
+
+    let remapping_us = Arc::new(AtomicU64::new(0));
+    let appendvec_read_us = Arc::new(AtomicU64::new(0));
+    let process_storage_entry_us = Arc::new(AtomicU64::new(0));
+    let update_storage_entry_info_us = Arc::new(AtomicU64::new(0));
+    let generate_index_us = Arc::new(AtomicU64::new(0));
+    let extend_uncleaned_pubkeys_us = Arc::new(AtomicU64::new(0));
+    let insert_storage_us = Arc::new(AtomicU64::new(0));
+
     for _ in 0..num_indexing_threads {
         let rx = rx.clone();
         let write_version_tracker = write_version_tracker.clone();
@@ -1742,58 +1761,95 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         let snapshot_storage_lengths = snapshot_storage_lengths.clone();
         let next_append_vec_id = next_append_vec_id.clone();
         let uncleaned_pubkeys = uncleaned_pubkeys.clone();
+
+        let remapping_us = remapping_us.clone();
+        let appendvec_read_us = appendvec_read_us.clone();
+        let process_storage_entry_us = process_storage_entry_us.clone();
+        let update_storage_entry_info_us = update_storage_entry_info_us.clone();
+        let generate_index_us = generate_index_us.clone();
+        let extend_uncleaned_pubkeys_us = extend_uncleaned_pubkeys_us.clone();
+        let insert_storage_us = insert_storage_us.clone();
+
         indexing_thread_pool.spawn(move || {
             for (filename, path_buf) in rx.iter() {
                 if !like_storage(&filename) {
                     continue; // do nothing, wait for next file
                 }
 
+                let mut remapping_measure = Measure::start(remapping_measure_name);
                 let new_append_vec_id =
                     next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 let (slot, append_vec_id) = get_slot_and_append_vec_id(&filename);
 
                 let remapped_file_name = AppendVec::file_name(slot, new_append_vec_id);
-                let remapped_append_vec_path = path_buf.parent().unwrap().join(&remapped_file_name);
+                let remapped_append_vec_path =
+                    path_buf.parent().unwrap().join(&remapped_file_name);
 
                 if append_vec_id != new_append_vec_id {
                     std::fs::rename(path_buf, &remapped_append_vec_path).unwrap();
                 }
+                remapping_measure.stop();
+                remapping_us.fetch_add(remapping_measure.as_us(), Relaxed);
 
-                let current_len = *snapshot_storage_lengths
-                    .get(&slot)
-                    .unwrap()
-                    .get(&(append_vec_id as usize))
-                    .unwrap();
+                let (u_storage_entry, appendvec_read_measure) = measure!(
+                    {
+                        let current_len = *snapshot_storage_lengths
+                            .get(&slot)
+                            .unwrap()
+                            .get(&(append_vec_id as usize))
+                            .unwrap();
 
-                let (accounts, num_accounts) =
-                    AppendVec::new_from_file(&remapped_append_vec_path, current_len).unwrap();
-                let u_storage_entry = Arc::new(AccountStorageEntry::new_existing(
-                    slot,
-                    new_append_vec_id,
-                    accounts,
-                    num_accounts,
-                ));
+                        let (accounts, num_accounts) =
+                            AppendVec::new_from_file(&remapped_append_vec_path, current_len)
+                                .unwrap();
+                        Arc::new(AccountStorageEntry::new_existing(
+                            slot,
+                            new_append_vec_id,
+                            accounts,
+                            num_accounts,
+                        ))
+                    },
+                    appendvec_read_measure_name
+                );
+                appendvec_read_us.fetch_add(appendvec_read_measure.as_us(), Relaxed);
 
-                let pubkey_to_index_entry = temporary_process_storage_entry(&u_storage_entry);
-                AccountsDb::update_storage_entry_info(&u_storage_entry, &pubkey_to_index_entry);
-                let (storage_dirty_pubkeys, storage_accounts_data_len) = generate_index_for_storage(
+                let (pubkey_to_index_entry, process_storage_entry_measure) = measure!(
+                    temporary_process_storage_entry(&u_storage_entry),
+                    process_storage_entry_measure_name
+                );
+                process_storage_entry_us.fetch_add(process_storage_entry_measure.as_us(), Relaxed);
+
+                let (_, update_storage_entry_measure) = measure!(
+                    AccountsDb::update_storage_entry_info(&u_storage_entry, &pubkey_to_index_entry),
+                    update_storage_entry_info_measure_name
+                );
+                update_storage_entry_info_us
+                    .fetch_add(update_storage_entry_measure.as_us(), Relaxed);
+
+
+                let ((storage_dirty_pubkeys, storage_accounts_data_len), generate_index_measure) = measure!(generate_index_for_storage(
                     &write_version_tracker,
                     &accounts_index,
                     &account_secondary_indexes,
                     pubkey_to_index_entry,
                     slot,
-                );
-                uncleaned_pubkeys
+                ), generate_index_measure_name);
+                generate_index_us.fetch_add(generate_index_measure.as_us(), Relaxed);
+
+                let (_, extend_uncleaned_pubkeys_measure) = measure!(uncleaned_pubkeys
                     .entry(slot)
                     .or_insert(HashSet::<Pubkey>::default())
-                    .extend(storage_dirty_pubkeys);
+                    .extend(storage_dirty_pubkeys), extend_uncleaned_pubkeys_measure_name);
+                extend_uncleaned_pubkeys_us.fetch_add(extend_uncleaned_pubkeys_measure.as_us(), Relaxed);
 
+                let (_, storage_insert_measure) = measure!(
                 storage
                     .entry(slot)
                     .or_insert(SlotStores::default())
                     .write()
                     .unwrap()
-                    .insert(new_append_vec_id, u_storage_entry);
+                    .insert(new_append_vec_id, u_storage_entry), insert_storage_measure_name);
+                insert_storage_us.fetch_add(storage_insert_measure.as_us(), Relaxed);
 
                 es_tx.send(storage_accounts_data_len).unwrap();
             }
@@ -1808,6 +1864,36 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
 
     let storage = Arc::try_unwrap(storage).unwrap();
     let uncleaned_pubkeys = Arc::try_unwrap(uncleaned_pubkeys).unwrap();
+
+    info!(
+        "{remapping_measure_name} took {} us",
+        remapping_us.load(Relaxed)
+    );
+    info!(
+        "{appendvec_read_measure_name} took {} us",
+        appendvec_read_us.load(Relaxed)
+    );
+    info!(
+        "{process_storage_entry_measure_name} took {} us",
+        process_storage_entry_us.load(Relaxed)
+    );
+    info!(
+        "{update_storage_entry_info_measure_name} took {} us",
+        update_storage_entry_info_us.load(Relaxed)
+    );
+    info!(
+        "{generate_index_measure_name} took {} us",
+        generate_index_us.load(Relaxed)
+    );
+    info!(
+        "{extend_uncleaned_pubkeys_measure_name} took {} us",
+        extend_uncleaned_pubkeys_us.load(Relaxed)
+    );
+    info!(
+        "{insert_storage_measure_name} took {} us",
+        insert_storage_us.load(Relaxed)
+    );
+
     Ok((storage, uncleaned_pubkeys, accounts_data_len))
 }
 
