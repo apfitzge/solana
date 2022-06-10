@@ -932,6 +932,7 @@ pub fn bank_from_snapshot_archives(
         accounts_update_notifier,
         accounts_db_skip_shrink,
     )?;
+    measure_rebuild.stop();
 
     let mut measure_verify = Measure::start("verify");
     if !bank.verify_snapshot_bank(
@@ -943,6 +944,7 @@ pub fn bank_from_snapshot_archives(
         panic!("Snapshot bank for slot {} failed to verify", bank.slot());
     }
     measure_verify.stop();
+    info!("{}", measure_rebuild);
 
     let timings = BankFromArchiveTimings {
         rebuild_bank_from_snapshots_us: measure_rebuild.as_us(),
@@ -960,52 +962,6 @@ pub fn bank_from_snapshot_archives(
         verify_snapshot_bank_us: measure_verify.as_us(),
     };
     Ok((bank, timings))
-
-    // let mut measure_rebuild = Measure::start("rebuild bank from snapshots");
-    // let bank = rebuild_bank_from_snapshots(
-    //     &unarchived_full_snapshot.unpacked_snapshots_dir_and_version,
-    //     unarchived_incremental_snapshot
-    //         .as_ref()
-    //         .map(|unarchive_preparation_result| {
-    //             &unarchive_preparation_result.unpacked_snapshots_dir_and_version
-    //         }),
-    //     account_paths,
-    //     unpacked_append_vec_map,
-    //     genesis_config,
-    //     debug_keys,
-    //     additional_builtins,
-    //     account_secondary_indexes,
-    //     accounts_db_caching_enabled,
-    //     limit_load_slot_count_from_snapshot,
-    //     shrink_ratio,
-    //     verify_index,
-    //     accounts_db_config,
-    //     accounts_update_notifier,
-    // )?;
-    // measure_rebuild.stop();
-    // info!("{}", measure_rebuild);
-
-    // let mut measure_verify = Measure::start("verify");
-    // if !bank.verify_snapshot_bank(
-    //     test_hash_calculation,
-    //     accounts_db_skip_shrink || !full_snapshot_archive_info.is_remote(),
-    //     Some(full_snapshot_archive_info.slot()),
-    // ) && limit_load_slot_count_from_snapshot.is_none()
-    // {
-    //     panic!("Snapshot bank for slot {} failed to verify", bank.slot());
-    // }
-    // measure_verify.stop();
-
-    // let timings = BankFromArchiveTimings {
-    //     rebuild_bank_from_snapshots_us: measure_rebuild.as_us(),
-    //     full_snapshot_untar_us: unarchived_full_snapshot.measure_untar.as_us(),
-    //     incremental_snapshot_untar_us: unarchived_incremental_snapshot
-    //         .map_or(0, |unarchive_preparation_result| {
-    //             unarchive_preparation_result.measure_untar.as_us()
-    //         }),
-    //     verify_snapshot_bank_us: measure_verify.as_us(),
-    // };
-    // Ok((bank, timings))
 }
 
 /// Rebuild bank from snapshot archives.  This function searches `full_snapshot_archives_dir` and `incremental_snapshot_archives_dir` for the
