@@ -1578,32 +1578,36 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         .into_iter()
         .map(|_| SharedBufferReader::new(&shared_buffer))
         .collect::<Vec<_>>();
-    untar_thread_pool.spawn(move || {
-        let ledger_dir = ledger_dir;
-        let account_paths = account_paths;
+    untar_thread_pool.spawn({
+        let tx = tx.clone();
+        move || {
+            let ledger_dir = ledger_dir;
+            let account_paths = account_paths;
 
-        readers
-            .into_par_iter()
-            .enumerate()
-            .for_each(|(index, reader)| {
-                let parallel_selector = Some(ParallelSelector {
-                    index,
-                    divisions: parallel_archivers,
+            readers
+                .into_par_iter()
+                .enumerate()
+                .for_each(|(index, reader)| {
+                    let parallel_selector = Some(ParallelSelector {
+                        index,
+                        divisions: parallel_archivers,
+                    });
+                    let mut archive = Archive::new(reader);
+                    streaming_unpack_snapshot(
+                        tx.clone(),
+                        &mut archive,
+                        &ledger_dir,
+                        &account_paths,
+                        parallel_selector,
+                    )
+                    .unwrap();
                 });
-                let mut archive = Archive::new(reader);
-                streaming_unpack_snapshot(
-                    tx.clone(),
-                    &mut archive,
-                    &ledger_dir,
-                    &account_paths,
-                    parallel_selector,
-                )
-                .unwrap();
-            });
+        }
     });
 
+    let num_indexing_threads = num_cpus::get() - parallel_archivers;
     let indexing_thread_pool = ThreadPoolBuilder::default()
-        .num_threads(num_cpus::get() - parallel_archivers)
+        .num_threads(num_indexing_threads)
         .build()
         .unwrap();
 
@@ -1702,21 +1706,28 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     let storage: Arc<DashMap<Slot, SlotStores>> = Arc::new(DashMap::new());
     let write_version_tracker = Arc::new(DashMap::new());
 
-    let storage_processor = {
-        |(filename, path_buf): (String, PathBuf)| {
-            if !like_storage(&filename) {
-                return;
-            }
-            let write_version_tracker = write_version_tracker.clone();
-            let accounts_index = accounts_index.clone();
-            let account_secondary_indexes = account_secondary_indexes.clone();
-            let es_tx = es_tx.clone();
-            let storage = storage.clone();
-            let snapshot_storage_lengths = snapshot_storage_lengths.clone();
-            let next_append_vec_id = next_append_vec_id.clone();
-            let uncleaned_pubkeys = uncleaned_pubkeys.clone();
+    // resend so these get processed
+    for r in to_process {
+        tx.send(r).unwrap();
+    }
+    drop(tx);
 
-            indexing_thread_pool.spawn(move || {
+    for _ in 0..num_indexing_threads {
+        let rx = rx.clone();
+        let write_version_tracker = write_version_tracker.clone();
+        let accounts_index = accounts_index.clone();
+        let account_secondary_indexes = account_secondary_indexes.clone();
+        let es_tx = es_tx.clone();
+        let storage = storage.clone();
+        let snapshot_storage_lengths = snapshot_storage_lengths.clone();
+        let next_append_vec_id = next_append_vec_id.clone();
+        let uncleaned_pubkeys = uncleaned_pubkeys.clone();
+        indexing_thread_pool.spawn(move || {
+            for (filename, path_buf) in rx.iter() {
+                if !like_storage(&filename) {
+                    continue; // do nothing, wait for next file
+                }
+
                 let new_append_vec_id =
                     next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 let (slot, append_vec_id) = get_slot_and_append_vec_id(&filename);
@@ -1765,16 +1776,8 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                     .insert(new_append_vec_id, u_storage_entry);
 
                 es_tx.send(storage_accounts_data_len).unwrap();
-            });
-        }
-    };
-
-    for r in to_process {
-        storage_processor(r);
-    }
-
-    while let Ok(r) = rx.recv() {
-        storage_processor(r);
+            }
+        });
     }
 
     drop(es_tx); // drop the local copy so that when the other clones get dropped we get an Err. After redoing this we just pass to a function
