@@ -1549,6 +1549,43 @@ pub fn purge_old_snapshot_archives(
     }
 }
 
+/// Keeps track of account info and write versions during start up
+/// This way we can build up our index in memory, without actually inserting (slow) while streaming
+struct WriteVersionTracker {
+    map: DashMap<Slot, DashMap<Pubkey, (StoredMetaWriteVersion, AccountInfo)>>,
+    duplicate_keys: RwLock<Vec<(Slot, Pubkey)>>,
+}
+
+impl WriteVersionTracker {
+    pub fn new(slots: &[Slot]) -> Self {
+        Self {
+            map: slots
+                .into_iter()
+                .map(|slot| (*slot, DashMap::new()))
+                .collect(),
+            duplicate_keys: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn insert_if_newer(
+        &self,
+        slot: Slot,
+        pubkey: Pubkey,
+        write_version: StoredMetaWriteVersion,
+        account_info: AccountInfo,
+    ) -> bool {
+        let slot_map = self.map.get(&slot).unwrap(); // all slots should exist
+        let should_insert = slot_map
+            .get(&pubkey)
+            .filter(|entry| entry.0 < write_version)
+            .is_none();
+        if should_insert {
+            slot_map.insert(pubkey, (write_version, account_info));
+        }
+        should_insert
+    }
+}
+
 fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
     accounts_index: Arc<AccountInfoAccountsIndex>,
     account_secondary_indexes: Arc<AccountSecondaryIndexes>,
@@ -1705,18 +1742,22 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     let (es_tx, es_rx) = crossbeam_channel::unbounded();
     let uncleaned_pubkeys = Arc::new(DashMap::new());
     let storage: Arc<DashMap<Slot, SlotStores>> = Arc::new(DashMap::new());
-    let write_version_tracker = Arc::new(DashMap::new());
+
+    let slots = snapshot_storage_lengths
+        .iter()
+        .map(|(slot, _)| *slot)
+        .collect::<Vec<_>>();
+    let write_version_tracker = Arc::new(WriteVersionTracker::new(&slots[..]));
 
     // Pre-allocate storage so there's no resizing as we add to storage
     let (_, pre_allocation_measure) = measure!(
         {
-            let mut account_count = 0;
             snapshot_storage_lengths.iter().for_each(|(slot, map)| {
                 storage.insert(
                     *slot,
                     Arc::new(RwLock::new(HashMap::with_capacity(map.capacity()))),
                 );
-                write_version_tracker.insert(*slot, HashMap::new());
+                // write_version_tracker.insert(*slot, HashMap::new());
             });
         },
         "pre-allocate storage"
@@ -1823,35 +1864,26 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 update_storage_entry_info_us
                     .fetch_add(update_storage_entry_measure.as_us(), Relaxed);
 
-                let (
-                    (
-                        storage_dirty_pubkeys,
-                        storage_accounts_data_len,
-                        generate_index_insert_time_us,
-                    ),
-                    generate_index_measure,
-                ) = measure!(
-                    generate_index_for_storage(
+                let (storage_accounts_data_len, generate_index_measure) = measure!(
+                    update_write_version_tracker(
                         &write_version_tracker,
-                        &accounts_index,
-                        &account_secondary_indexes,
                         pubkey_to_index_entry,
-                        slot,
+                        slot
                     ),
                     generate_index_measure_name
                 );
                 generate_index_us.fetch_add(generate_index_measure.as_us(), Relaxed);
-                generate_index_insert_us.fetch_add(generate_index_insert_time_us, Relaxed);
+                // generate_index_insert_us.fetch_add(generate_index_insert_time_us, Relaxed);
 
-                let (_, extend_uncleaned_pubkeys_measure) = measure!(
-                    uncleaned_pubkeys
-                        .entry(slot)
-                        .or_insert(HashSet::<Pubkey>::default())
-                        .extend(storage_dirty_pubkeys),
-                    extend_uncleaned_pubkeys_measure_name
-                );
-                extend_uncleaned_pubkeys_us
-                    .fetch_add(extend_uncleaned_pubkeys_measure.as_us(), Relaxed);
+                // let (_, extend_uncleaned_pubkeys_measure) = measure!(
+                //     uncleaned_pubkeys
+                //         .entry(slot)
+                //         .or_insert(HashSet::<Pubkey>::default())
+                //         .extend(storage_dirty_pubkeys),
+                //     extend_uncleaned_pubkeys_measure_name
+                // );
+                // extend_uncleaned_pubkeys_us
+                //     .fetch_add(extend_uncleaned_pubkeys_measure.as_us(), Relaxed);
 
                 let (_, storage_insert_measure) = measure!(
                     storage
@@ -1911,7 +1943,40 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         insert_storage_us.load(Relaxed)
     );
 
+    std::process::exit(1);
     Ok((storage, uncleaned_pubkeys, accounts_data_len))
+}
+
+fn update_write_version_tracker<'a>(
+    write_version_tracker: &Arc<WriteVersionTracker>,
+    accounts_map: GenerateIndexAccountsMap<'a>,
+    slot: Slot,
+) -> u64 {
+    let mut accounts_data_len = 0;
+    accounts_map.into_iter().for_each(
+        |(
+            pubkey,
+            IndexAccountMapEntry {
+                write_version,
+                store_id,
+                stored_account,
+            },
+        )| {
+            let account_info = AccountInfo::new(
+                StorageLocation::AppendVec(store_id, stored_account.offset),
+                stored_account.stored_size as StoredSize,
+                stored_account.account_meta.lamports,
+            );
+
+            if !account_info.is_zero_lamport() {
+                accounts_data_len += stored_account.data.len() as u64;
+            }
+
+            write_version_tracker.insert_if_newer(slot, pubkey, write_version, account_info);
+        },
+    );
+
+    accounts_data_len
 }
 
 fn generate_index_for_storage<'a>(
