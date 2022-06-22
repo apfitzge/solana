@@ -296,6 +296,7 @@ pub(crate) fn bank_from_streams2<R>(
     verify_index: bool,
     accounts_db_config: Option<AccountsDbConfig>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
+    accounts_db_skip_shrink: bool,
 ) -> std::result::Result<Bank, Error>
 where
     R: Read,
@@ -338,6 +339,7 @@ where
                 verify_index,
                 accounts_db_config,
                 accounts_update_notifier,
+                accounts_db_skip_shrink,
             )?;
             Ok(bank)
         }};
@@ -619,6 +621,7 @@ fn reconstruct_bank_from_fields2<E>(
     verify_index: bool,
     accounts_db_config: Option<AccountsDbConfig>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
+    accounts_db_skip_shrink: bool,
 ) -> Result<Bank, Error>
 where
     E: SerializableStorage + std::marker::Sync,
@@ -639,6 +642,7 @@ where
         verify_index,
         accounts_db_config,
         accounts_update_notifier,
+        accounts_db_skip_shrink,
     )?;
 
     let bank_rc = BankRc::new(Accounts::new_empty(accounts_db), bank_fields.slot);
@@ -757,6 +761,7 @@ fn reconstruct_accountsdb_from_fields2<E>(
     verify_index: bool,
     accounts_db_config: Option<AccountsDbConfig>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
+    accounts_db_skip_shrink: bool,
 ) -> Result<(AccountsDb, ReconstructedAccountsDbInfo), Error>
 where
     E: SerializableStorage + std::marker::Sync,
@@ -813,6 +818,7 @@ where
 
     let accounts_data_len = accounts_db.finalize_index(
         verify_index,
+        accounts_db_skip_shrink,
         genesis_config,
         uncleaned_pubkeys,
         accounts_data_len,

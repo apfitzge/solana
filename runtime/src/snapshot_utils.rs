@@ -62,7 +62,7 @@ use dashmap::DashMap;
 use rayon::ThreadPoolBuilder;
 use solana_measure::measure;
 
-use crate::accounts_db::SlotStores;
+use crate::{accounts_db::SlotStores, accounts_index_storage::Startup};
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
@@ -1706,6 +1706,8 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
         }
     }?;
 
+    accounts_index.set_startup(Startup::Startup);
+
     let (es_tx, es_rx) = crossbeam_channel::unbounded();
     let uncleaned_pubkeys = Arc::new(DashMap::new());
     let storage: Arc<DashMap<Slot, SlotStores>> = Arc::new(DashMap::new());
@@ -2300,6 +2302,7 @@ fn rebuild_bank_from_snapshots2(
                     verify_index,
                     accounts_db_config,
                     accounts_update_notifier,
+                    accounts_db_skip_shrink,
                 ),
             }?,
         )

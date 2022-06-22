@@ -8247,10 +8247,30 @@ impl AccountsDb {
     pub fn finalize_index(
         &self,
         verify: bool,
+        accounts_db_skip_shrink: bool,
         genesis_config: &GenesisConfig,
         uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
         mut accounts_data_len: u64,
     ) -> u64 {
+        // tell accounts index we are done adding the initial accounts at startup
+        self.accounts_index.set_startup(Startup::Normal);
+
+        // this has to happen before pubkeys_to_duplicate_accounts_data_len below
+        // get duplicate keys from acct idx. We have to wait until we've finished flushing.
+        for (slot, key) in self
+            .accounts_index
+            .retrieve_duplicate_keys_from_startup()
+            .into_iter()
+            .flatten()
+        {
+            match self.uncleaned_pubkeys.entry(slot) {
+                Occupied(mut occupied) => occupied.get_mut().push(key),
+                Vacant(vacant) => {
+                    vacant.insert(vec![key]);
+                }
+            }
+        }
+
         let mut slots = self.storage.all_slots();
         slots.sort();
 
@@ -8270,7 +8290,7 @@ impl AccountsDb {
 
         // Need to add these last, otherwise older updates will be cleaned
         for slot in &slots {
-            self.accounts_index.add_root(*slot, false);
+            self.accounts_index.add_root(*slot, accounts_db_skip_shrink);
         }
 
         accounts_data_len
