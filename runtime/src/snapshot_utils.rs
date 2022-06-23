@@ -1711,7 +1711,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     let (es_tx, es_rx) = crossbeam_channel::unbounded();
     let uncleaned_pubkeys = Arc::new(DashMap::new());
     let storage: Arc<DashMap<Slot, SlotStores>> = Arc::new(DashMap::new());
-    let write_version_tracker = Arc::new(DashMap::new());
 
     // Pre-allocate storage so there's no resizing as we add to storage
     let (_, pre_allocation_measure) = measure!(
@@ -1722,7 +1721,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                     *slot,
                     Arc::new(RwLock::new(HashMap::with_capacity(map.capacity()))),
                 );
-                write_version_tracker.insert(*slot, HashMap::new());
             });
         },
         "pre-allocate storage"
@@ -1756,7 +1754,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
 
     for _ in 0..num_indexing_threads {
         let rx = rx.clone();
-        let write_version_tracker = write_version_tracker.clone();
         let accounts_index = accounts_index.clone();
         let account_secondary_indexes = account_secondary_indexes.clone();
         let es_tx = es_tx.clone();
@@ -1816,49 +1813,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 );
                 appendvec_read_us.fetch_add(appendvec_read_measure.as_us(), Relaxed);
 
-                let (pubkey_to_index_entry, process_storage_entry_measure) = measure!(
-                    temporary_process_storage_entry(&u_storage_entry),
-                    process_storage_entry_measure_name
-                );
-                process_storage_entry_us.fetch_add(process_storage_entry_measure.as_us(), Relaxed);
-
-                let (_, update_storage_entry_measure) = measure!(
-                    AccountsDb::update_storage_entry_info(&u_storage_entry, &pubkey_to_index_entry),
-                    update_storage_entry_info_measure_name
-                );
-                update_storage_entry_info_us
-                    .fetch_add(update_storage_entry_measure.as_us(), Relaxed);
-
-                let (
-                    (
-                        storage_dirty_pubkeys,
-                        storage_accounts_data_len,
-                        generate_index_insert_time_us,
-                    ),
-                    generate_index_measure,
-                ) = measure!(
-                    generate_index_for_storage(
-                        &write_version_tracker,
-                        &accounts_index,
-                        &account_secondary_indexes,
-                        pubkey_to_index_entry,
-                        slot,
-                    ),
-                    generate_index_measure_name
-                );
-                generate_index_us.fetch_add(generate_index_measure.as_us(), Relaxed);
-                generate_index_insert_us.fetch_add(generate_index_insert_time_us, Relaxed);
-
-                let (_, extend_uncleaned_pubkeys_measure) = measure!(
-                    uncleaned_pubkeys
-                        .entry(slot)
-                        .or_insert(HashSet::<Pubkey>::default())
-                        .extend(storage_dirty_pubkeys),
-                    extend_uncleaned_pubkeys_measure_name
-                );
-                extend_uncleaned_pubkeys_us
-                    .fetch_add(extend_uncleaned_pubkeys_measure.as_us(), Relaxed);
-
                 let (_, storage_insert_measure) = measure!(
                     storage
                         .entry(slot)
@@ -1870,7 +1824,65 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 );
                 insert_storage_us.fetch_add(storage_insert_measure.as_us(), Relaxed);
 
-                es_tx.send(storage_accounts_data_len).unwrap();
+                // let (_, update_storage_entry_measure) = measure!(
+                //     AccountsDb::update_storage_entry_info(&u_storage_entry, &pubkey_to_index_entry),
+                //     update_storage_entry_info_measure_name
+                // );
+                // update_storage_entry_info_us
+                //     .fetch_add(update_storage_entry_measure.as_us(), Relaxed);
+
+                let slot_entry = storage.get(&slot).unwrap();
+                let slot_stores_lock = slot_entry.read().unwrap();
+                if slot_stores_lock.len() == snapshot_storage_lengths.get(&slot).unwrap().len() {
+                    let slot_storages: Vec<_> =
+                        slot_stores_lock.iter().map(|(_, v)| v).cloned().collect();
+
+                    let (pubkey_to_index_entry, process_storage_entry_measure) = measure!(
+                        temporary_process_storage_entry(&slot_storages),
+                        process_storage_entry_measure_name
+                    );
+                    process_storage_entry_us
+                        .fetch_add(process_storage_entry_measure.as_us(), Relaxed);
+
+                    let (_, update_slot_storages_info_measure) = measure!(
+                        AccountsDb::update_storage_entries_info(
+                            &slot_stores_lock,
+                            &pubkey_to_index_entry,
+                        ),
+                        "update slot storage info"
+                    );
+
+                    let (
+                        (
+                            storage_dirty_pubkeys,
+                            storage_accounts_data_len,
+                            generate_index_insert_time_us,
+                        ),
+                        generate_index_measure,
+                    ) = measure!(
+                        generate_index_for_storage(
+                            &accounts_index,
+                            &account_secondary_indexes,
+                            pubkey_to_index_entry,
+                            slot,
+                        ),
+                        generate_index_measure_name
+                    );
+                    generate_index_us.fetch_add(generate_index_measure.as_us(), Relaxed);
+                    generate_index_insert_us.fetch_add(generate_index_insert_time_us, Relaxed);
+
+                    let (_, extend_uncleaned_pubkeys_measure) = measure!(
+                        uncleaned_pubkeys
+                            .entry(slot)
+                            .or_insert(HashSet::<Pubkey>::default())
+                            .extend(storage_dirty_pubkeys),
+                        extend_uncleaned_pubkeys_measure_name
+                    );
+                    extend_uncleaned_pubkeys_us
+                        .fetch_add(extend_uncleaned_pubkeys_measure.as_us(), Relaxed);
+
+                    es_tx.send(storage_accounts_data_len).unwrap();
+                }
             }
         });
     }
@@ -1921,7 +1933,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
 }
 
 fn generate_index_for_storage<'a>(
-    write_version_tracker: &Arc<DashMap<Slot, HashMap<Pubkey, StoredMetaWriteVersion>>>,
     accounts_index: &AccountInfoAccountsIndex,
     account_secondary_indexes: &AccountSecondaryIndexes,
     accounts_map: GenerateIndexAccountsMap<'a>,
@@ -1931,7 +1942,7 @@ fn generate_index_for_storage<'a>(
     let num_accounts = accounts_map.len();
     let mut accounts_data_len = 0;
 
-    let items = accounts_map.into_iter().filter_map(
+    let items = accounts_map.into_iter().map(
         |(
             pubkey,
             IndexAccountMapEntry {
@@ -1940,39 +1951,26 @@ fn generate_index_for_storage<'a>(
                 stored_account,
             },
         )| {
-            let mut slot_entry = write_version_tracker.get_mut(&slot).unwrap();
-
-            let update = if let Some(existing_write_version) = slot_entry.get(&pubkey) {
-                write_version > *existing_write_version
-            } else {
-                true
-            };
-
-            if update {
-                slot_entry.insert(pubkey, write_version);
-                if secondary {
-                    accounts_index.update_secondary_indexes(
-                        &pubkey,
-                        &stored_account,
-                        &account_secondary_indexes,
-                    );
-                }
-
-                if !stored_account.is_zero_lamport() {
-                    accounts_data_len += stored_account.data.len() as u64;
-                }
-
-                Some((
-                    pubkey,
-                    AccountInfo::new(
-                        StorageLocation::AppendVec(store_id, stored_account.offset),
-                        stored_account.stored_size as StoredSize,
-                        stored_account.account_meta.lamports,
-                    ),
-                ))
-            } else {
-                None
+            if secondary {
+                accounts_index.update_secondary_indexes(
+                    &pubkey,
+                    &stored_account,
+                    &account_secondary_indexes,
+                );
             }
+
+            if !stored_account.is_zero_lamport() {
+                accounts_data_len += stored_account.data.len() as u64;
+            }
+
+            (
+                pubkey,
+                AccountInfo::new(
+                    StorageLocation::AppendVec(store_id, stored_account.offset),
+                    stored_account.stored_size as StoredSize,
+                    stored_account.account_meta.lamports,
+                ),
+            )
         },
     );
 
@@ -1982,33 +1980,38 @@ fn generate_index_for_storage<'a>(
     (dirty_pubkeys, accounts_data_len, insert_time_us)
 }
 
-fn temporary_process_storage_entry(
-    storage_entry: &Arc<AccountStorageEntry>,
-) -> GenerateIndexAccountsMap {
-    let num_accounts = storage_entry.approx_stored_count();
+fn temporary_process_storage_entry<'a>(
+    storages: &'a Vec<Arc<AccountStorageEntry>>,
+) -> GenerateIndexAccountsMap<'a> {
+    let num_accounts = storages
+        .iter()
+        .map(|storage_entry| storage_entry.approx_stored_count())
+        .sum();
     let mut accounts_map = GenerateIndexAccountsMap::with_capacity(num_accounts);
-    AppendVecAccountsIter::new(&storage_entry.accounts).for_each(|stored_account| {
-        let this_version = stored_account.meta.write_version;
-        let pubkey = stored_account.meta.pubkey;
-        match accounts_map.entry(pubkey) {
-            Entry::Vacant(entry) => {
-                entry.insert(IndexAccountMapEntry {
-                    write_version: this_version,
-                    store_id: storage_entry.append_vec_id(),
-                    stored_account,
-                });
-            }
-            Entry::Occupied(mut entry) => {
-                let occupied_version = entry.get().write_version;
-                if occupied_version < this_version {
+    storages.iter().for_each(|storage_entry| {
+        AppendVecAccountsIter::new(&storage_entry.accounts).for_each(|stored_account| {
+            let this_version = stored_account.meta.write_version;
+            let pubkey = stored_account.meta.pubkey;
+            match accounts_map.entry(pubkey) {
+                Entry::Vacant(entry) => {
                     entry.insert(IndexAccountMapEntry {
                         write_version: this_version,
                         store_id: storage_entry.append_vec_id(),
                         stored_account,
                     });
                 }
+                Entry::Occupied(mut entry) => {
+                    let occupied_version = entry.get().write_version;
+                    if occupied_version < this_version {
+                        entry.insert(IndexAccountMapEntry {
+                            write_version: this_version,
+                            store_id: storage_entry.append_vec_id(),
+                            stored_account,
+                        });
+                    }
+                }
             }
-        }
+        });
     });
     accounts_map
 }

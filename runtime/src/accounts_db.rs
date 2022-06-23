@@ -8580,6 +8580,30 @@ impl AccountsDb {
         accounts_data_len_from_duplicates as u64
     }
 
+    pub fn update_storage_entries_info(
+        storages: &HashMap<u32, Arc<AccountStorageEntry>>,
+        accounts_map: &GenerateIndexAccountsMap<'_>,
+    ) {
+        let mut count_map: HashMap<_, _> = storages
+            .iter()
+            .map(|(store_id, _)| (*store_id, StorageSizeAndCount::default()))
+            .collect();
+        for (_, v) in accounts_map.iter() {
+            let storage_size_and_count = count_map.get_mut(&v.store_id).unwrap();
+            storage_size_and_count.stored_size += v.stored_account.stored_size;
+            storage_size_and_count.count += 1;
+        }
+
+        for (store_id, storage_size_and_count) in count_map {
+            let storage = storages.get(&store_id).unwrap();
+
+            storage.count_and_status.write().unwrap().0 = storage_size_and_count.count;
+            storage
+                .alive_bytes
+                .store(storage_size_and_count.stored_size, Ordering::SeqCst);
+        }
+    }
+
     pub fn update_storage_entry_info(
         storage: &Arc<AccountStorageEntry>,
         accounts_map: &GenerateIndexAccountsMap<'_>,
