@@ -1696,7 +1696,6 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
                 error!("snapshot {filename}");
                 break process_snapshot_file(filename, path_buf);
             } else if like_storage(&filename) {
-                error!("pushing {filename}");
                 to_process.push((filename, path_buf));
             }
         } else {
