@@ -1139,6 +1139,7 @@ where
         ),
         measure_name
     );
+    info!("{measure_unarchive_and_index}");
 
     let unpacked_version_file = unpack_dir.path().join("version");
     let snapshot_version = snapshot_version_from_file(&unpacked_version_file).unwrap();
@@ -1292,7 +1293,6 @@ fn index_snapshot(
     // wait for all indexing threads to finish
     let mut accounts_data_len = 0;
     while let Ok(thread_accounts_data_len) = exit_receiver.recv() {
-        info!("indexing thead completed with {thread_accounts_data_len}");
         accounts_data_len += thread_accounts_data_len;
     }
 
