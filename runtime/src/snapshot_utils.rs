@@ -1122,7 +1122,7 @@ where
         snapshot_archive_path,
         archive_format,
         untar_parallel_divisions,
-        file_sender,
+        file_sender.clone(),
     );
 
     // create and spawn threadpool for indexing snapshot
@@ -1132,6 +1132,7 @@ where
             accounts_index,
             account_secondary_indexes,
             next_append_vec_id,
+            file_sender,
             file_receiver,
             num_cpus::get() - untar_parallel_divisions,
         ),
@@ -1220,6 +1221,7 @@ fn index_snapshot(
     accounts_index: Arc<AccountInfoAccountsIndex>,
     account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     next_append_vec_id: Arc<AtomicU32>,
+    file_sender: Sender<(PathBuf, String)>,
     file_receiver: Receiver<(PathBuf, String)>,
     num_threads: usize,
 ) -> (
@@ -1279,6 +1281,11 @@ fn index_snapshot(
         );
     }
     drop(exit_sender); // manually drop otherwise the below loop is infinite
+
+    // re-send snapshot storages unpacked before the snapshot file
+    snapshot_storages_to_process
+        .into_iter()
+        .for_each(|x| file_sender.send(x).unwrap());
 
     // wait for all indexing threads to finish
     let mut accounts_data_len = 0;
