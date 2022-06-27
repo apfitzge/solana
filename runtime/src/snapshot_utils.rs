@@ -43,6 +43,7 @@ use {
         process::ExitStatus,
         str::FromStr,
         sync::{atomic::AtomicU32, Arc, RwLock},
+        time::Instant,
     },
     tar::{self, Archive},
     tempfile::TempDir,
@@ -1312,6 +1313,8 @@ fn index_snapshot_worker(
 ) {
     thread_pool.spawn(move || {
         let mut accounts_data_len = 0;
+        let mut last_log_time = Instant::now();
+        let mut count = 0;
         for (path_buf, filename) in file_receiver.iter() {
             if let Some(SnapshotFileKind::StorageFile) = get_snapshot_file_kind(&filename) {
                 accounts_data_len += index_snapshot_process_storage_file(
@@ -1324,6 +1327,13 @@ fn index_snapshot_worker(
                     &storage,
                     &uncleaned_pubkeys,
                 );
+            }
+
+            count += 1;
+            let now = Instant::now();
+            if now.duration_since(last_log_time).as_millis() >= 2000 {
+                info!("indexed {count} entries so far...");
+                last_log_time = now;
             }
         }
 
