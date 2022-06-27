@@ -1012,7 +1012,7 @@ struct RemoveUnrootedSlotsSynchronization {
     signal: Condvar,
 }
 
-type AccountInfoAccountsIndex = AccountsIndex<AccountInfo>;
+pub(crate) type AccountInfoAccountsIndex = AccountsIndex<AccountInfo>;
 
 // This structure handles the load/store of the accounts
 #[derive(Debug)]
@@ -1728,13 +1728,13 @@ impl<'a> ReadableAccount for StoredAccountMeta<'a> {
     }
 }
 
-struct IndexAccountMapEntry<'a> {
+pub(crate) struct IndexAccountMapEntry<'a> {
     pub write_version: StoredMetaWriteVersion,
     pub store_id: AppendVecId,
     pub stored_account: StoredAccountMeta<'a>,
 }
 
-type GenerateIndexAccountsMap<'a> = HashMap<Pubkey, IndexAccountMapEntry<'a>>;
+pub(crate) type GenerateIndexAccountsMap<'a> = HashMap<Pubkey, IndexAccountMapEntry<'a>>;
 
 /// called on a struct while scanning append vecs
 trait AppendVecScan: Send + Sync + Clone {
@@ -1874,7 +1874,8 @@ impl AccountsDb {
         (num_hash_scan_passes, bins_per_pass)
     }
 
-    fn default_with_accounts_index(
+    fn default_with_storage_and_accounts_index(
+        storage: AccountStorage,
         accounts_index: AccountInfoAccountsIndex,
         accounts_hash_cache_path: Option<PathBuf>,
         num_hash_scan_passes: Option<usize>,
@@ -1911,7 +1912,7 @@ impl AccountsDb {
             skip_initial_hash_calc: false,
             ancient_append_vecs: false,
             accounts_index,
-            storage: AccountStorage::default(),
+            storage,
             accounts_cache: AccountsCache::default(),
             sender_bg_hasher: None,
             read_only_accounts_cache: ReadOnlyAccountsCache::new(MAX_READ_ONLY_CACHE_DATA_SIZE),
@@ -1962,6 +1963,19 @@ impl AccountsDb {
         }
     }
 
+    fn default_with_accounts_index(
+        accounts_index: AccountInfoAccountsIndex,
+        accounts_hash_cache_path: Option<PathBuf>,
+        num_hash_scan_passes: Option<usize>,
+    ) -> Self {
+        Self::default_with_storage_and_accounts_index(
+            AccountStorage::default(),
+            accounts_index,
+            accounts_hash_cache_path,
+            num_hash_scan_passes,
+        )
+    }
+
     pub fn new_for_tests(paths: Vec<PathBuf>, cluster_type: &ClusterType) -> Self {
         AccountsDb::new_with_config(
             paths,
@@ -1984,6 +1998,88 @@ impl AccountsDb {
             Some(ACCOUNTS_DB_CONFIG_FOR_TESTING),
             None,
         )
+    }
+
+    pub fn new_with_config_preindexed(
+        paths: Vec<PathBuf>,
+        cluster_type: &ClusterType,
+        storage: DashMap<Slot, SlotStores>,
+        accounts_index: AccountInfoAccountsIndex,
+        account_indexes: AccountSecondaryIndexes,
+        caching_enabled: bool,
+        shrink_ratio: AccountShrinkThreshold,
+        accounts_db_config: Option<AccountsDbConfig>,
+        accounts_update_notifier: Option<AccountsUpdateNotifier>,
+    ) -> Self {
+        let accounts_hash_cache_path = accounts_db_config
+            .as_ref()
+            .and_then(|x| x.accounts_hash_cache_path.clone());
+
+        let filler_accounts_config = accounts_db_config
+            .as_ref()
+            .map(|config| config.filler_accounts_config)
+            .unwrap_or_default();
+        let skip_rewrites = accounts_db_config
+            .as_ref()
+            .map(|config| config.skip_rewrites)
+            .unwrap_or_default();
+        let skip_initial_hash_calc = accounts_db_config
+            .as_ref()
+            .map(|config| config.skip_initial_hash_calc)
+            .unwrap_or_default();
+
+        let ancient_append_vecs = accounts_db_config
+            .as_ref()
+            .map(|config| config.ancient_append_vecs)
+            .unwrap_or_default();
+
+        let filler_account_suffix = if filler_accounts_config.count > 0 {
+            Some(solana_sdk::pubkey::new_rand())
+        } else {
+            None
+        };
+        let paths_is_empty = paths.is_empty();
+        let storage = AccountStorage { map: storage };
+        let mut new = Self {
+            paths,
+            skip_rewrites,
+            skip_initial_hash_calc,
+            ancient_append_vecs,
+            cluster_type: Some(*cluster_type),
+            account_indexes,
+            caching_enabled,
+            shrink_ratio,
+            accounts_update_notifier,
+            filler_accounts_config,
+            filler_account_suffix,
+            write_cache_limit_bytes: accounts_db_config
+                .as_ref()
+                .and_then(|x| x.write_cache_limit_bytes),
+            ..Self::default_with_storage_and_accounts_index(
+                storage,
+                accounts_index,
+                accounts_hash_cache_path,
+                accounts_db_config
+                    .as_ref()
+                    .and_then(|cfg| cfg.hash_calc_num_passes),
+            )
+        };
+        if paths_is_empty {
+            // Create a temporary set of accounts directories, used primarily
+            // for testing
+            let (temp_dirs, paths) = get_temp_accounts_paths(DEFAULT_NUM_DIRS).unwrap();
+            new.accounts_update_notifier = None;
+            new.paths = paths;
+            new.temp_paths = Some(temp_dirs);
+        };
+
+        new.start_background_hasher();
+        {
+            for path in new.paths.iter() {
+                std::fs::create_dir_all(path).expect("Create directory failed.");
+            }
+        }
+        new
     }
 
     pub fn new_with_config(
@@ -7919,6 +8015,54 @@ impl AccountsDb {
         }
     }
 
+    pub(crate) fn generate_index_for_slot_storages(
+        accounts_index: &AccountInfoAccountsIndex,
+        account_secondary_indexes: &AccountSecondaryIndexes,
+        slot: Slot,
+        accounts_map: GenerateIndexAccountsMap<'_>,
+    ) -> (Vec<Pubkey>, u64) {
+        let secondary = !account_secondary_indexes.is_empty();
+        let num_accounts = accounts_map.len();
+        let mut accounts_data_len = 0;
+
+        let items = accounts_map.into_iter().map(
+            |(
+                pubkey,
+                IndexAccountMapEntry {
+                    write_version: _write_version,
+                    store_id,
+                    stored_account,
+                },
+            )| {
+                if secondary {
+                    accounts_index.update_secondary_indexes(
+                        &pubkey,
+                        &stored_account,
+                        &account_secondary_indexes,
+                    );
+                }
+
+                if !stored_account.is_zero_lamport() {
+                    accounts_data_len += stored_account.data.len() as u64;
+                }
+
+                (
+                    pubkey,
+                    AccountInfo::new(
+                        StorageLocation::AppendVec(store_id, stored_account.offset),
+                        stored_account.stored_size as StoredSize,
+                        stored_account.account_meta.lamports,
+                    ),
+                )
+            },
+        );
+
+        let (dirty_pubkeys, _insert_time_us) =
+            accounts_index.insert_new_if_missing_into_primary_index(slot, num_accounts, items);
+
+        (dirty_pubkeys, accounts_data_len)
+    }
+
     fn filler_unique_id_bytes() -> usize {
         std::mem::size_of::<u32>()
     }
@@ -8088,6 +8232,56 @@ impl AccountsDb {
             self.accounts_index.set_startup(Startup::Normal);
         }
         info!("added {} filler accounts", added.load(Ordering::Relaxed));
+    }
+
+    pub(crate) fn finalize_index(
+        &self,
+        accounts_db_skip_shrink: bool,
+        uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
+        mut accounts_data_len: u64,
+    ) -> u64 {
+        // tell accounts index we are done adding the initial accounts at startup
+        self.accounts_index.set_startup(Startup::Normal);
+
+        // this has to happen before pubkeys_to_duplicate_accounts_data_len below
+        // get duplicate keys from acct idx. We have to wait until we've finished flushing.
+        for (slot, key) in self
+            .accounts_index
+            .retrieve_duplicate_keys_from_startup()
+            .into_iter()
+            .flatten()
+        {
+            match self.uncleaned_pubkeys.entry(slot) {
+                Occupied(mut occupied) => occupied.get_mut().push(key),
+                Vacant(vacant) => {
+                    vacant.insert(vec![key]);
+                }
+            }
+        }
+
+        let mut slots = self.storage.all_slots();
+        slots.sort();
+
+        let unique_pubkeys: HashSet<_> = uncleaned_pubkeys
+            .into_iter()
+            .flat_map(|(_, pubkeys)| pubkeys)
+            .collect();
+        let accounts_data_len_from_duplicates: u64 = unique_pubkeys
+            .into_iter()
+            .collect::<Vec<_>>()
+            .par_chunks(4096)
+            .map(|pubkeys| self.pubkeys_to_duplicate_accounts_data_len(pubkeys))
+            .sum();
+        accounts_data_len -= accounts_data_len_from_duplicates;
+        info!("accounts_data_len_from_duplicates: {accounts_data_len_from_duplicates}");
+        info!("accounts data len: {accounts_data_len}");
+
+        // Need to add these last, otherwise older updates will be cleaned
+        for slot in &slots {
+            self.accounts_index.add_root(*slot, accounts_db_skip_shrink);
+        }
+
+        accounts_data_len
     }
 
     #[allow(clippy::needless_collect)]
@@ -8408,6 +8602,68 @@ impl AccountsDb {
         timings.storage_size_accounts_map_flatten_us +=
             storage_size_accounts_map_flatten_time.as_us();
     }
+
+    // generate index entries for slot storages
+    pub(crate) fn process_slot_storage_entries<'a>(
+        storages: &'a HashMap<AppendVecId, Arc<AccountStorageEntry>>,
+    ) -> GenerateIndexAccountsMap<'a> {
+        let num_accounts = storages
+            .iter()
+            .map(|(_, storage_entry)| storage_entry.approx_stored_count())
+            .sum();
+        let mut accounts_map = GenerateIndexAccountsMap::with_capacity(num_accounts);
+        storages.iter().for_each(|(_, storage_entry)| {
+            AppendVecAccountsIter::new(&storage_entry.accounts).for_each(|stored_account| {
+                let this_version = stored_account.meta.write_version;
+                let pubkey = stored_account.meta.pubkey;
+                match accounts_map.entry(pubkey) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(IndexAccountMapEntry {
+                            write_version: this_version,
+                            store_id: storage_entry.append_vec_id(),
+                            stored_account,
+                        });
+                    }
+                    Entry::Occupied(mut entry) => {
+                        let occupied_version = entry.get().write_version;
+                        if occupied_version < this_version {
+                            entry.insert(IndexAccountMapEntry {
+                                write_version: this_version,
+                                store_id: storage_entry.append_vec_id(),
+                                stored_account,
+                            });
+                        }
+                    }
+                }
+            });
+        });
+        accounts_map
+    }
+
+    pub(crate) fn update_storage_entries_info(
+        storages: &HashMap<AppendVecId, Arc<AccountStorageEntry>>,
+        accounts_map: &GenerateIndexAccountsMap<'_>,
+    ) {
+        let mut count_map: HashMap<_, _> = storages
+            .iter()
+            .map(|(store_id, _)| (*store_id, StorageSizeAndCount::default()))
+            .collect();
+        for (_, v) in accounts_map.iter() {
+            let storage_size_and_count = count_map.get_mut(&v.store_id).unwrap();
+            storage_size_and_count.stored_size += v.stored_account.stored_size;
+            storage_size_and_count.count += 1;
+        }
+
+        for (store_id, storage_size_and_count) in count_map {
+            let storage = storages.get(&store_id).unwrap();
+
+            storage.count_and_status.write().unwrap().0 = storage_size_and_count.count;
+            storage
+                .alive_bytes
+                .store(storage_size_and_count.stored_size, Ordering::SeqCst);
+        }
+    }
+
     fn set_storage_count_and_alive_bytes(
         &self,
         stored_sizes_and_counts: StorageSizeAndCountMap,

@@ -90,15 +90,17 @@ pub enum UnpackPath<'a> {
     Invalid,
 }
 
-fn unpack_archive<'a, A: Read, C>(
+fn unpack_archive<'a, A: Read, C, D>(
     archive: &mut Archive<A>,
     apparent_limit_size: u64,
     actual_limit_size: u64,
     limit_count: u64,
     mut entry_checker: C,
+    mut entry_processor: D,
 ) -> Result<()>
 where
     C: FnMut(&[&str], tar::EntryType) -> UnpackPath<'a>,
+    D: FnMut(PathBuf, Option<String>),
 {
     let mut apparent_total_size: u64 = 0;
     let mut actual_total_size: u64 = 0;
@@ -135,6 +137,10 @@ where
         }
 
         let parts: Vec<_> = parts.map(|p| p.unwrap()).collect();
+        let filename = parts
+            .as_slice()
+            .get(1)
+            .map(|filename| (*filename).to_owned());
         let unpack_dir = match entry_checker(parts.as_slice(), kind) {
             UnpackPath::Invalid => {
                 return Err(UnpackError::Archive(format!(
@@ -175,7 +181,11 @@ where
             GNUSparse | Regular => 0o644,
             _ => 0o755,
         };
-        set_perms(&unpack_dir.join(entry.path()?), mode)?;
+        let entry_path_buf = unpack_dir.join(entry.path()?);
+        set_perms(&entry_path_buf, mode)?;
+
+        // Process entry after setting permissions
+        entry_processor(entry_path_buf, filename);
 
         total_entries += 1;
         let now = Instant::now();
@@ -293,6 +303,58 @@ impl ParallelSelector {
     }
 }
 
+pub(crate) fn streaming_unpack_snapshot<A: Read>(
+    archive: &mut Archive<A>,
+    ledger_dir: &Path,
+    account_paths: &[PathBuf],
+    parallel_selector: Option<ParallelSelector>,
+    sender: crossbeam_channel::Sender<(PathBuf, String)>,
+) {
+    assert!(!account_paths.is_empty());
+    let mut i = 0;
+
+    unpack_archive(
+        archive,
+        MAX_SNAPSHOT_ARCHIVE_UNPACKED_APPARENT_SIZE,
+        MAX_SNAPSHOT_ARCHIVE_UNPACKED_ACTUAL_SIZE,
+        MAX_SNAPSHOT_ARCHIVE_UNPACKED_COUNT,
+        |parts, kind| {
+            if is_valid_snapshot_archive_entry(parts, kind) {
+                i += 1;
+                match &parallel_selector {
+                    Some(parallel_selector) => {
+                        if !parallel_selector.select_index(i - 1) {
+                            return UnpackPath::Ignore;
+                        }
+                    }
+                    None => {}
+                };
+                if let ["accounts", _] = parts {
+                    // Randomly distribute the accounts files about the available `account_paths`,
+                    let path_index = thread_rng().gen_range(0, account_paths.len());
+                    match account_paths
+                        .get(path_index)
+                        .map(|path_buf| path_buf.as_path())
+                    {
+                        Some(path) => UnpackPath::Valid(path),
+                        None => UnpackPath::Invalid,
+                    }
+                } else {
+                    UnpackPath::Valid(ledger_dir)
+                }
+            } else {
+                UnpackPath::Invalid
+            }
+        },
+        |entry_path_buf, filename| {
+            if entry_path_buf.is_file() && filename.is_some() {
+                sender.send((entry_path_buf, filename.unwrap())).unwrap();
+            }
+        },
+    )
+    .unwrap();
+}
+
 pub fn unpack_snapshot<A: Read>(
     archive: &mut Archive<A>,
     ledger_dir: &Path,
@@ -337,6 +399,7 @@ pub fn unpack_snapshot<A: Read>(
                 UnpackPath::Invalid
             }
         },
+        |_, _| {},
     )
     .map(|_| unpacked_append_vec_map)
 }
@@ -450,6 +513,7 @@ fn unpack_genesis<A: Read>(
         max_genesis_archive_unpacked_size,
         MAX_GENESIS_ARCHIVE_UNPACKED_COUNT,
         |p, k| is_valid_genesis_archive_entry(unpack_dir, p, k),
+        |_, _| {},
     )
 }
 

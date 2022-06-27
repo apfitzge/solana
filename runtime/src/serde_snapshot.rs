@@ -2,8 +2,8 @@ use {
     crate::{
         accounts::Accounts,
         accounts_db::{
-            AccountShrinkThreshold, AccountStorageEntry, AccountsDb, AccountsDbConfig, AppendVecId,
-            AtomicAppendVecId, BankHashInfo, IndexGenerationInfo, SnapshotStorage,
+            AccountInfoAccountsIndex, AccountShrinkThreshold, AccountStorageEntry, AccountsDb,
+            AccountsDbConfig, AppendVecId, BankHashInfo, SlotStores, SnapshotStorage,
         },
         accounts_index::AccountSecondaryIndexes,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
@@ -12,14 +12,13 @@ use {
         blockhash_queue::BlockhashQueue,
         builtins::Builtins,
         epoch_stakes::EpochStakes,
-        hardened_unpack::UnpackedAppendVecMap,
         rent_collector::RentCollector,
         snapshot_utils::{self, BANK_SNAPSHOT_PRE_FILENAME_EXTENSION},
         stakes::Stakes,
     },
     bincode::{self, config::Options, Error},
+    dashmap::DashMap,
     log::*,
-    rayon::prelude::*,
     serde::{de::DeserializeOwned, Deserialize, Serialize},
     solana_measure::measure::Measure,
     solana_sdk::{
@@ -39,12 +38,12 @@ use {
         path::{Path, PathBuf},
         result::Result,
         sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc, RwLock,
+            atomic::{AtomicU32, Ordering},
+            Arc,
         },
         thread::Builder,
     },
-    storage::{SerializableStorage, SerializedAppendVecId},
+    storage::SerializableStorage,
 };
 
 mod newer;
@@ -226,15 +225,58 @@ pub(crate) fn compare_two_serialized_banks(
     Ok(fields1 == fields2)
 }
 
+pub(crate) fn snapshot_stream_to_snapshot_storages<'a, R>(
+    serde_style: SerdeStyle,
+    snapshot_stream: &'a mut BufReader<R>,
+) -> std::result::Result<HashMap<Slot, HashMap<usize, usize>>, Error>
+where
+    R: Read,
+{
+    macro_rules! INTO {
+        ($style:ident) => {{
+            let (_, accounts_db_fields) =
+                $style::Context::deserialize_bank_fields(snapshot_stream)?;
+
+            let AccountsDbFields(snapshot_storages, ..) = accounts_db_fields;
+
+            let snapshot_storages = snapshot_storages
+                .into_iter()
+                .map(|(slot, entries)| {
+                    (
+                        slot,
+                        entries
+                            .into_iter()
+                            .map(|entry| (entry.id(), entry.current_len()))
+                            .collect::<HashMap<_, _>>(),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+
+            Ok(snapshot_storages)
+        }};
+    }
+    match serde_style {
+        SerdeStyle::Newer => INTO!(newer),
+    }
+    .map_err(|err| {
+        warn!("snapshot_stream_to error: {:?}", err);
+        err
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn bank_from_streams<R>(
     serde_style: SerdeStyle,
     snapshot_streams: &mut SnapshotStreams<R>,
     account_paths: &[PathBuf],
-    unpacked_append_vec_map: UnpackedAppendVecMap,
+    storage: DashMap<Slot, SlotStores>,
+    uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
+    next_append_vec_id: AtomicU32,
     genesis_config: &GenesisConfig,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     additional_builtins: Option<&Builtins>,
+    accounts_index: AccountInfoAccountsIndex,
     account_secondary_indexes: AccountSecondaryIndexes,
     caching_enabled: bool,
     limit_load_slot_count_from_snapshot: Option<usize>,
@@ -271,9 +313,13 @@ where
                 snapshot_accounts_db_fields,
                 genesis_config,
                 account_paths,
-                unpacked_append_vec_map,
+                storage,
+                uncleaned_pubkeys,
+                accounts_data_len,
+                next_append_vec_id,
                 debug_keys,
                 additional_builtins,
+                accounts_index,
                 account_secondary_indexes,
                 caching_enabled,
                 limit_load_slot_count_from_snapshot,
@@ -480,9 +526,13 @@ fn reconstruct_bank_from_fields<E>(
     snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
     genesis_config: &GenesisConfig,
     account_paths: &[PathBuf],
-    unpacked_append_vec_map: UnpackedAppendVecMap,
+    storage: DashMap<Slot, SlotStores>,
+    uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
+    next_append_vec_id: AtomicU32,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     additional_builtins: Option<&Builtins>,
+    accounts_index: AccountInfoAccountsIndex,
     account_secondary_indexes: AccountSecondaryIndexes,
     caching_enabled: bool,
     limit_load_slot_count_from_snapshot: Option<usize>,
@@ -498,11 +548,14 @@ where
     let (accounts_db, reconstructed_accounts_db_info) = reconstruct_accountsdb_from_fields(
         snapshot_accounts_db_fields,
         account_paths,
-        unpacked_append_vec_map,
+        storage,
+        uncleaned_pubkeys,
+        accounts_data_len,
+        next_append_vec_id,
         genesis_config,
+        accounts_index,
         account_secondary_indexes,
         caching_enabled,
-        limit_load_slot_count_from_snapshot,
         shrink_ratio,
         verify_index,
         accounts_db_config,
@@ -554,15 +607,17 @@ struct ReconstructedAccountsDbInfo {
     accounts_data_len: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reconstruct_accountsdb_from_fields<E>(
     snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
     account_paths: &[PathBuf],
-    unpacked_append_vec_map: UnpackedAppendVecMap,
+    storage: DashMap<Slot, SlotStores>,
+    uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
+    next_append_vec_id: AtomicU32,
     genesis_config: &GenesisConfig,
+    accounts_index: AccountInfoAccountsIndex,
     account_secondary_indexes: AccountSecondaryIndexes,
     caching_enabled: bool,
-    limit_load_slot_count_from_snapshot: Option<usize>,
     shrink_ratio: AccountShrinkThreshold,
     verify_index: bool,
     accounts_db_config: Option<AccountsDbConfig>,
@@ -572,9 +627,11 @@ fn reconstruct_accountsdb_from_fields<E>(
 where
     E: SerializableStorage + std::marker::Sync,
 {
-    let mut accounts_db = AccountsDb::new_with_config(
+    let mut accounts_db = AccountsDb::new_with_config_preindexed(
         account_paths.to_vec(),
         &genesis_config.cluster_type,
+        storage,
+        accounts_index,
         account_secondary_indexes,
         caching_enabled,
         shrink_ratio,
@@ -583,7 +640,7 @@ where
     );
 
     let AccountsDbFields(
-        snapshot_storages,
+        ..,
         snapshot_version,
         snapshot_slot,
         snapshot_bank_hash_info,
@@ -591,97 +648,10 @@ where
         snapshot_historical_roots_with_hash,
     ) = snapshot_accounts_db_fields.collapse_into()?;
 
-    let snapshot_storages = snapshot_storages.into_iter().collect::<Vec<_>>();
-
-    // Ensure all account paths exist
-    for path in &accounts_db.paths {
-        std::fs::create_dir_all(path)
-            .unwrap_or_else(|err| panic!("Failed to create directory {}: {}", path.display(), err));
-    }
-
     reconstruct_historical_roots(
         &accounts_db,
         snapshot_historical_roots,
         snapshot_historical_roots_with_hash,
-    );
-
-    // Remap the deserialized AppendVec paths to point to correct local paths
-    let num_collisions = AtomicUsize::new(0);
-    let next_append_vec_id = AtomicAppendVecId::new(0);
-    let mut measure_remap = Measure::start("remap");
-    let mut storage = (0..snapshot_storages.len())
-        .into_par_iter()
-        .map(|i| {
-            let (slot, slot_storage) = &snapshot_storages[i];
-            let mut new_slot_storage = HashMap::new();
-            for storage_entry in slot_storage {
-                let file_name = AppendVec::file_name(*slot, storage_entry.id());
-
-                let append_vec_path = unpacked_append_vec_map.get(&file_name).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("{} not found in unpacked append vecs", file_name),
-                    )
-                })?;
-
-                // Remap the AppendVec ID to handle any duplicate IDs that may previously existed
-                // due to full snapshots and incremental snapshots generated from different nodes
-                let (remapped_append_vec_id, remapped_append_vec_path) = loop {
-                    let remapped_append_vec_id = next_append_vec_id.fetch_add(1, Ordering::AcqRel);
-                    let remapped_file_name = AppendVec::file_name(*slot, remapped_append_vec_id);
-                    let remapped_append_vec_path =
-                        append_vec_path.parent().unwrap().join(&remapped_file_name);
-
-                    // Break out of the loop in the following situations:
-                    // 1. The new ID is the same as the original ID.  This means we do not need to
-                    //    rename the file, since the ID is the "correct" one already.
-                    // 2. There is not a file already at the new path.  This means it is safe to
-                    //    rename the file to this new path.
-                    //    **DEVELOPER NOTE:**  Keep this check last so that it can short-circuit if
-                    //    possible.
-                    if storage_entry.id() == remapped_append_vec_id as SerializedAppendVecId
-                        || std::fs::metadata(&remapped_append_vec_path).is_err()
-                    {
-                        break (remapped_append_vec_id, remapped_append_vec_path);
-                    }
-
-                    // If we made it this far, a file exists at the new path.  Record the collision
-                    // and try again.
-                    num_collisions.fetch_add(1, Ordering::Relaxed);
-                };
-                // Only rename the file if the new ID is actually different from the original.
-                if storage_entry.id() != remapped_append_vec_id as SerializedAppendVecId {
-                    std::fs::rename(append_vec_path, &remapped_append_vec_path)?;
-                }
-
-                reconstruct_single_storage(
-                    slot,
-                    &remapped_append_vec_path,
-                    storage_entry,
-                    remapped_append_vec_id,
-                    &mut new_slot_storage,
-                )?;
-            }
-            Ok((*slot, new_slot_storage))
-        })
-        .collect::<Result<HashMap<Slot, _>, Error>>()?;
-    measure_remap.stop();
-
-    // discard any slots with no storage entries
-    // this can happen if a non-root slot was serialized
-    // but non-root stores should not be included in the snapshot
-    storage.retain(|_slot, stores| !stores.is_empty());
-    assert!(
-        !storage.is_empty(),
-        "At least one storage entry must exist from deserializing stream"
-    );
-
-    let next_append_vec_id = next_append_vec_id.load(Ordering::Acquire);
-    let max_append_vec_id = next_append_vec_id - 1;
-    assert!(
-        max_append_vec_id <= AppendVecId::MAX / 2,
-        "Storage id {} larger than allowed max",
-        max_append_vec_id
     );
 
     // Process deserialized data, set necessary fields in self
@@ -690,14 +660,8 @@ where
         .write()
         .unwrap()
         .insert(snapshot_slot, snapshot_bank_hash_info);
-    accounts_db.storage.map.extend(
-        storage
-            .into_iter()
-            .map(|(slot, slot_storage_entry)| (slot, Arc::new(RwLock::new(slot_storage_entry)))),
-    );
-    accounts_db
-        .next_id
-        .store(next_append_vec_id, Ordering::Release);
+
+    accounts_db.next_id = next_append_vec_id;
     accounts_db
         .write_version
         .fetch_add(snapshot_version, Ordering::Release);
@@ -713,11 +677,10 @@ where
         })
         .unwrap();
 
-    let IndexGenerationInfo { accounts_data_len } = accounts_db.generate_index(
-        limit_load_slot_count_from_snapshot,
-        verify_index,
-        genesis_config,
+    let accounts_data_len = accounts_db.finalize_index(
         accounts_db_skip_shrink,
+        uncleaned_pubkeys,
+        accounts_data_len,
     );
 
     accounts_db.maybe_add_filler_accounts(
@@ -728,17 +691,6 @@ where
 
     handle.join().unwrap();
     measure_notify.stop();
-
-    datapoint_info!(
-        "reconstruct_accountsdb_from_fields()",
-        ("remap-time-us", measure_remap.as_us(), i64),
-        (
-            "remap-collisions",
-            num_collisions.load(Ordering::Relaxed),
-            i64
-        ),
-        ("accountsdb-notify-at-start-us", measure_notify.as_us(), i64),
-    );
 
     Ok((
         Arc::try_unwrap(accounts_db).unwrap(),

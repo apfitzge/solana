@@ -1,13 +1,18 @@
 use {
     crate::{
         accounts_db::{
-            AccountShrinkThreshold, AccountsDbConfig, SnapshotStorage, SnapshotStorages,
+            AccountInfoAccountsIndex, AccountShrinkThreshold, AccountsDbConfig, SnapshotStorage,
+            SnapshotStorages,
         },
-        accounts_index::AccountSecondaryIndexes,
+        accounts_index::{AccountSecondaryIndexes, AccountsIndex},
+        accounts_index_storage::Startup,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         bank::{Bank, BankSlotDelta},
         builtins::Builtins,
-        hardened_unpack::{unpack_snapshot, ParallelSelector, UnpackError, UnpackedAppendVecMap},
+        hardened_unpack::{
+            streaming_unpack_snapshot, unpack_snapshot, ParallelSelector, UnpackError,
+            UnpackedAppendVecMap,
+        },
         serde_snapshot::{bank_from_streams, bank_to_stream, SerdeStyle, SnapshotStreams},
         shared_buffer_reader::{SharedBuffer, SharedBufferReader},
         snapshot_archive_info::{
@@ -19,12 +24,14 @@ use {
     },
     bincode::{config::Options, serialize_into},
     bzip2::bufread::BzDecoder,
+    crossbeam_channel::{Receiver, Sender},
+    dashmap::DashMap,
     flate2::read::GzDecoder,
     lazy_static::lazy_static,
     log::*,
-    rayon::prelude::*,
+    rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
     regex::Regex,
-    solana_measure::measure::Measure,
+    solana_measure::{measure, measure::Measure},
     solana_sdk::{clock::Slot, genesis_config::GenesisConfig, hash::Hash, pubkey::Pubkey},
     std::{
         cmp::Ordering,
@@ -35,7 +42,7 @@ use {
         path::{Path, PathBuf},
         process::ExitStatus,
         str::FromStr,
-        sync::Arc,
+        sync::{atomic::AtomicU32, Arc, RwLock},
     },
     tar::{self, Archive},
     tempfile::TempDir,
@@ -44,6 +51,12 @@ use {
 
 mod archive_format;
 pub use archive_format::*;
+
+use crate::{
+    accounts_db::{AccountStorageEntry, AccountsDb, AppendVecId, SlotStores},
+    append_vec::AppendVec,
+    serde_snapshot::snapshot_stream_to_snapshot_storages,
+};
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
@@ -165,14 +178,16 @@ struct SnapshotRootPaths {
     incremental_snapshot_root_file_path: Option<PathBuf>,
 }
 
-/// Helper type to bundle up the results from `unarchive_snapshot()`
+/// Helper type to bundle up the results from `unarchive_and_index_snapshot()`
 #[derive(Debug)]
-struct UnarchivedSnapshot {
+struct UnarchivedIndexedSnapshot {
     #[allow(dead_code)]
     unpack_dir: TempDir,
-    unpacked_append_vec_map: UnpackedAppendVecMap,
+    storage: DashMap<Slot, SlotStores>,
+    uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
     unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion,
-    measure_untar: Measure,
+    measure_unarchive_and_index: Measure,
 }
 
 /// Helper type for passing around the unpacked snapshots dir and the snapshot version together
@@ -824,57 +839,85 @@ pub fn bank_from_snapshot_archives(
     let accounts_db_skip_shrink =
         accounts_db_skip_shrink || !full_snapshot_archive_info.is_remote();
 
-    let parallel_divisions = std::cmp::min(
+    let untar_parallel_divisions = std::cmp::min(
         PARALLEL_UNTAR_READERS_DEFAULT,
         std::cmp::max(1, num_cpus::get() / 4),
     );
 
-    let unarchived_full_snapshot = unarchive_snapshot(
+    let accounts_index: Arc<AccountInfoAccountsIndex> = Arc::new(AccountsIndex::new(
+        accounts_db_config.as_ref().and_then(|x| x.index.clone()),
+    ));
+    let account_secondary_indexes = Arc::new(account_secondary_indexes);
+    let next_append_vec_id = Arc::new(AtomicU32::new(0));
+
+    accounts_index.set_startup(Startup::Startup);
+
+    let unarchived_and_indexed_full_snapshot = unarchive_and_index_snapshot(
+        account_paths,
         &bank_snapshots_dir,
         TMP_SNAPSHOT_ARCHIVE_PREFIX,
         full_snapshot_archive_info.path(),
-        "snapshot untar",
-        account_paths,
         full_snapshot_archive_info.archive_format(),
-        parallel_divisions,
-    )?;
+        untar_parallel_divisions,
+        accounts_index.clone(),
+        account_secondary_indexes.clone(),
+        next_append_vec_id.clone(),
+        "full snapshot unarchive and index",
+    );
 
-    let mut unarchived_incremental_snapshot =
+    let mut unarchived_and_indexed_incremental_snapshot =
         if let Some(incremental_snapshot_archive_info) = incremental_snapshot_archive_info {
-            let unarchived_incremental_snapshot = unarchive_snapshot(
+            let unarchived_and_indexed_incremental_snapshot = unarchive_and_index_snapshot(
+                account_paths,
                 &bank_snapshots_dir,
                 TMP_SNAPSHOT_ARCHIVE_PREFIX,
                 incremental_snapshot_archive_info.path(),
-                "incremental snapshot untar",
-                account_paths,
                 incremental_snapshot_archive_info.archive_format(),
-                parallel_divisions,
-            )?;
-            Some(unarchived_incremental_snapshot)
+                untar_parallel_divisions,
+                accounts_index.clone(),
+                account_secondary_indexes.clone(),
+                next_append_vec_id.clone(),
+                "full snapshot unarchive and index",
+            );
+            Some(unarchived_and_indexed_incremental_snapshot)
         } else {
             None
         };
 
-    let mut unpacked_append_vec_map = unarchived_full_snapshot.unpacked_append_vec_map;
-    if let Some(ref mut unarchive_preparation_result) = unarchived_incremental_snapshot {
-        let incremental_snapshot_unpacked_append_vec_map =
-            std::mem::take(&mut unarchive_preparation_result.unpacked_append_vec_map);
-        unpacked_append_vec_map.extend(incremental_snapshot_unpacked_append_vec_map.into_iter());
+    let mut storage = unarchived_and_indexed_full_snapshot.storage;
+    let mut uncleaned_pubkeys = unarchived_and_indexed_full_snapshot.uncleaned_pubkeys;
+    let mut accounts_data_len = unarchived_and_indexed_full_snapshot.accounts_data_len;
+    if let Some(ref mut unarchive_preparation_result) = unarchived_and_indexed_incremental_snapshot
+    {
+        let incremental_storage = std::mem::take(&mut unarchive_preparation_result.storage);
+        let incremental_uncleaned_pubkeys =
+            std::mem::take(&mut unarchive_preparation_result.uncleaned_pubkeys);
+        storage.extend(incremental_storage.into_iter());
+        uncleaned_pubkeys.extend(incremental_uncleaned_pubkeys);
+        accounts_data_len += unarchive_preparation_result.accounts_data_len;
     }
+
+    let accounts_index = Arc::try_unwrap(accounts_index).unwrap();
+    let account_secondary_indexes = Arc::try_unwrap(account_secondary_indexes).unwrap();
+    let next_append_vec_id = Arc::try_unwrap(next_append_vec_id).unwrap();
 
     let mut measure_rebuild = Measure::start("rebuild bank from snapshots");
     let bank = rebuild_bank_from_snapshots(
-        &unarchived_full_snapshot.unpacked_snapshots_dir_and_version,
-        unarchived_incremental_snapshot
+        &unarchived_and_indexed_full_snapshot.unpacked_snapshots_dir_and_version,
+        unarchived_and_indexed_incremental_snapshot
             .as_ref()
             .map(|unarchive_preparation_result| {
                 &unarchive_preparation_result.unpacked_snapshots_dir_and_version
             }),
         account_paths,
-        unpacked_append_vec_map,
+        storage,
+        uncleaned_pubkeys,
+        accounts_data_len,
+        next_append_vec_id,
         genesis_config,
         debug_keys,
         additional_builtins,
+        accounts_index,
         account_secondary_indexes,
         accounts_db_caching_enabled,
         limit_load_slot_count_from_snapshot,
@@ -885,7 +928,6 @@ pub fn bank_from_snapshot_archives(
         accounts_db_skip_shrink,
     )?;
     measure_rebuild.stop();
-    info!("{}", measure_rebuild);
 
     let mut measure_verify = Measure::start("verify");
     if !bank.verify_snapshot_bank(
@@ -897,14 +939,21 @@ pub fn bank_from_snapshot_archives(
         panic!("Snapshot bank for slot {} failed to verify", bank.slot());
     }
     measure_verify.stop();
+    info!("{}", measure_rebuild);
 
     let timings = BankFromArchiveTimings {
         rebuild_bank_from_snapshots_us: measure_rebuild.as_us(),
-        full_snapshot_untar_us: unarchived_full_snapshot.measure_untar.as_us(),
-        incremental_snapshot_untar_us: unarchived_incremental_snapshot
-            .map_or(0, |unarchive_preparation_result| {
-                unarchive_preparation_result.measure_untar.as_us()
-            }),
+        full_snapshot_untar_us: unarchived_and_indexed_full_snapshot
+            .measure_unarchive_and_index
+            .as_us(),
+        incremental_snapshot_untar_us: unarchived_and_indexed_incremental_snapshot.map_or(
+            0,
+            |unarchive_preparation_result| {
+                unarchive_preparation_result
+                    .measure_unarchive_and_index
+                    .as_us()
+            },
+        ),
         verify_snapshot_bank_us: measure_verify.as_us(),
     };
     Ok((bank, timings))
@@ -1038,50 +1087,361 @@ fn verify_bank_against_expected_slot_hash(
     Ok(())
 }
 
-/// Perform the common tasks when unarchiving a snapshot.  Handles creating the temporary
-/// directories, untaring, reading the version file, and then returning those fields plus the
-/// unpacked append vec map.
-fn unarchive_snapshot<P, Q>(
+/// Perform the common tasks when unarchiving and indexing a snapshot.
+fn unarchive_and_index_snapshot<P, Q>(
+    account_paths: &[PathBuf],
     bank_snapshots_dir: P,
     unpacked_snapshots_dir_prefix: &'static str,
     snapshot_archive_path: Q,
-    measure_name: &'static str,
-    account_paths: &[PathBuf],
     archive_format: ArchiveFormat,
-    parallel_divisions: usize,
-) -> Result<UnarchivedSnapshot>
+    untar_parallel_divisions: usize,
+    accounts_index: Arc<AccountInfoAccountsIndex>,
+    account_secondary_indexes: Arc<AccountSecondaryIndexes>,
+    next_append_vec_id: Arc<AtomicU32>,
+    measure_name: &'static str,
+) -> UnarchivedIndexedSnapshot
 where
     P: AsRef<Path>,
     Q: AsRef<Path>,
 {
+    // create temporary dir for unpacking the snapshot
     let unpack_dir = tempfile::Builder::new()
         .prefix(unpacked_snapshots_dir_prefix)
-        .tempdir_in(bank_snapshots_dir)?;
+        .tempdir_in(&bank_snapshots_dir)
+        .unwrap();
     let unpacked_snapshots_dir = unpack_dir.path().join("snapshots");
 
-    let mut measure_untar = Measure::start(measure_name);
-    let unpacked_append_vec_map = untar_snapshot_in(
-        snapshot_archive_path,
-        unpack_dir.path(),
+    // channels for sending unpacked files/path from unpacking to indexing threads
+    let (file_sender, file_receiver) = crossbeam_channel::unbounded();
+
+    // create and spawn threadpool for unarchiving snapshot
+    unarchive_snapshot(
         account_paths,
+        bank_snapshots_dir,
+        unpack_dir.path(),
+        snapshot_archive_path,
         archive_format,
-        parallel_divisions,
-    )?;
-    measure_untar.stop();
-    info!("{}", measure_untar);
+        untar_parallel_divisions,
+        file_sender,
+    );
+
+    // create and spawn threadpool for indexing snapshot
+    // this will wait for index completion
+    let ((storage, uncleaned_pubkeys, accounts_data_len), measure_unarchive_and_index) = measure!(
+        index_snapshot(
+            unpack_dir.path(),
+            accounts_index,
+            account_secondary_indexes,
+            next_append_vec_id,
+            file_receiver,
+            num_cpus::get() - untar_parallel_divisions,
+        ),
+        measure_name
+    );
 
     let unpacked_version_file = unpack_dir.path().join("version");
-    let snapshot_version = snapshot_version_from_file(&unpacked_version_file)?;
+    let snapshot_version = snapshot_version_from_file(&unpacked_version_file).unwrap();
 
-    Ok(UnarchivedSnapshot {
+    UnarchivedIndexedSnapshot {
         unpack_dir,
-        unpacked_append_vec_map,
+        storage,
+        uncleaned_pubkeys,
+        accounts_data_len,
         unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion {
             unpacked_snapshots_dir,
             snapshot_version,
         },
-        measure_untar,
-    })
+        measure_unarchive_and_index,
+    }
+}
+
+/// Perform the common tasks when unarchiving a snapshot.  Handles creating the temporary
+/// directories, untaring, reading the version file, and then returning those fields plus the
+/// unpacked append vec map.
+fn unarchive_snapshot<P, Q>(
+    account_paths: &[PathBuf],
+    bank_snapshots_dir: P,
+    unpack_dir: &Path,
+    snapshot_archive_path: Q,
+    archive_format: ArchiveFormat,
+    untar_parallel_divisions: usize,
+    sender: crossbeam_channel::Sender<(PathBuf, String)>,
+) where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    streaming_untar_snapshot_file(
+        snapshot_archive_path.as_ref(),
+        unpack_dir,
+        account_paths,
+        archive_format,
+        untar_parallel_divisions,
+        sender,
+    );
+}
+
+/// Used to determine if a filename is structured like a snapshot file, storage file, or neither
+enum SnapshotFileKind {
+    SnapshotFile,
+    StorageFile,
+}
+
+/// Determines `SnapshotFileKind` for `filename` if any
+fn get_snapshot_file_kind(filename: &str) -> Option<SnapshotFileKind> {
+    let mut periods = 0;
+    let mut saw_numbers = false;
+    for x in filename.chars() {
+        if !x.is_ascii_digit() {
+            if x == '.' {
+                if periods > 0 || !saw_numbers {
+                    return None;
+                }
+                saw_numbers = false;
+                periods += 1;
+            } else {
+                return None;
+            }
+        } else {
+            saw_numbers = true;
+        }
+    }
+
+    match (periods, saw_numbers) {
+        (0, true) => Some(SnapshotFileKind::SnapshotFile),
+        (1, true) => Some(SnapshotFileKind::StorageFile),
+        (_, _) => None,
+    }
+}
+
+fn process_snapshot_file(
+    path_buf: PathBuf,
+    filename: String,
+) -> HashMap<Slot, HashMap<usize, usize>> {
+    let (file_size, mut stream) =
+        create_snapshot_data_file_stream(&path_buf.as_path(), MAX_SNAPSHOT_DATA_FILE_SIZE).unwrap();
+    snapshot_stream_to_snapshot_storages(SerdeStyle::Newer, &mut stream).unwrap()
+}
+
+fn index_snapshot(
+    ledger_dir: &Path,
+    accounts_index: Arc<AccountInfoAccountsIndex>,
+    account_secondary_indexes: Arc<AccountSecondaryIndexes>,
+    next_append_vec_id: Arc<AtomicU32>,
+    file_receiver: Receiver<(PathBuf, String)>,
+    num_threads: usize,
+) -> (
+    DashMap<Slot, SlotStores>,
+    DashMap<Slot, HashSet<Pubkey>>,
+    u64,
+) {
+    // Due to parallel untar, we may receive some accounts files before we get the snapshot file.
+    // Create a vector here to store them, with an initial capacity we don't expect to exceed.
+    let mut snapshot_storages_to_process = Vec::with_capacity(1024);
+    let snapshot_storages = Arc::new(loop {
+        if let Ok((path_buf, filename)) = file_receiver.recv() {
+            match get_snapshot_file_kind(&filename) {
+                Some(SnapshotFileKind::SnapshotFile) => {
+                    break process_snapshot_file(path_buf, filename);
+                }
+                Some(SnapshotFileKind::StorageFile) => {
+                    snapshot_storages_to_process.push((path_buf, filename));
+                }
+                None => todo!(),
+            }
+        } else {
+            panic!("did not receive snapshot file from unpacking threads");
+        }
+    });
+
+    // Create a threadpool for workers
+    let thread_pool = ThreadPoolBuilder::default()
+        .num_threads(num_threads)
+        .build()
+        .unwrap();
+
+    // Pre-allocate storage
+    let storage = Arc::new(DashMap::with_capacity(snapshot_storages.len()));
+    let uncleaned_pubkeys = Arc::new(DashMap::with_capacity(snapshot_storages.len()));
+    for (slot, slot_store_lens) in snapshot_storages.iter() {
+        storage.insert(
+            *slot,
+            Arc::new(RwLock::new(HashMap::with_capacity(slot_store_lens.len()))),
+        );
+    }
+
+    // create channels to receive accounts_data_len and wait for all workers to finish
+    let (exit_sender, exit_receiver) = crossbeam_channel::unbounded();
+
+    for _ in 0..num_threads {
+        index_snapshot_worker(
+            &thread_pool,
+            file_receiver.clone(),
+            accounts_index.clone(),
+            account_secondary_indexes.clone(),
+            snapshot_storages.clone(),
+            next_append_vec_id.clone(),
+            storage.clone(),
+            uncleaned_pubkeys.clone(),
+            exit_sender.clone(),
+        );
+    }
+    drop(exit_sender); // manually drop otherwise the below loop is infinite
+
+    // wait for all indexing threads to finish
+    let mut accounts_data_len = 0;
+    while let Ok(thread_accounts_data_len) = exit_receiver.recv() {
+        accounts_data_len += thread_accounts_data_len;
+    }
+
+    let storage = Arc::try_unwrap(storage).unwrap();
+    let uncleaned_pubkeys = Arc::try_unwrap(uncleaned_pubkeys).unwrap();
+
+    (storage, uncleaned_pubkeys, accounts_data_len)
+}
+
+fn index_snapshot_worker(
+    thread_pool: &ThreadPool,
+    file_receiver: Receiver<(PathBuf, String)>,
+    accounts_index: Arc<AccountInfoAccountsIndex>,
+    account_secondary_indexes: Arc<AccountSecondaryIndexes>,
+    snapshot_storage_lengths: Arc<HashMap<Slot, HashMap<usize, usize>>>,
+    next_append_vec_id: Arc<AtomicU32>,
+    storage: Arc<DashMap<Slot, SlotStores>>,
+    uncleaned_pubkeys: Arc<DashMap<Slot, HashSet<Pubkey>>>,
+    exit_sender: Sender<u64>,
+) {
+    thread_pool.spawn(move || {
+        let mut accounts_data_len = 0;
+        for (path_buf, filename) in file_receiver.iter() {
+            if let Some(SnapshotFileKind::StorageFile) = get_snapshot_file_kind(&filename) {
+                accounts_data_len += index_snapshot_process_storage_file(
+                    path_buf,
+                    filename,
+                    &accounts_index,
+                    &account_secondary_indexes,
+                    &snapshot_storage_lengths,
+                    &next_append_vec_id,
+                    &storage,
+                    &uncleaned_pubkeys,
+                );
+            }
+        }
+
+        exit_sender.send(accounts_data_len);
+    });
+}
+
+fn index_snapshot_process_storage_file(
+    path_buf: PathBuf,
+    filename: String,
+    accounts_index: &AccountInfoAccountsIndex,
+    account_secondary_indexes: &AccountSecondaryIndexes,
+    snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
+    next_append_vec_id: &AtomicU32,
+    storage: &DashMap<Slot, SlotStores>,
+    uncleaned_pubkeys: &DashMap<Slot, HashSet<Pubkey>>,
+) -> u64 {
+    let (slot, path_buf, old_append_vec_id, new_append_vec_id) =
+        remap_append_vec_file(path_buf, filename, next_append_vec_id);
+    let storage_entry = create_account_storage_entry(
+        snapshot_storage_lengths,
+        &slot,
+        old_append_vec_id,
+        new_append_vec_id,
+        path_buf,
+    );
+
+    // pre-allocated storage, so slot should always exist
+    let slot_entry = storage.get(&slot).unwrap();
+    let num_slot_storages =
+        index_snapshot_insert_storage(&slot_entry, new_append_vec_id, storage_entry);
+
+    // if all storages for this slot have been processd, do processing
+    if num_slot_storages == snapshot_storage_lengths.get(&slot).unwrap().len() {
+        let slot_entry_lock = slot_entry.read().unwrap();
+        let pubkey_to_index_entry = AccountsDb::process_slot_storage_entries(&slot_entry_lock);
+        AccountsDb::update_storage_entries_info(&slot_entry_lock, &pubkey_to_index_entry);
+        let (slot_dirty_pubkeys, slot_accounts_data_len) =
+            AccountsDb::generate_index_for_slot_storages(
+                accounts_index,
+                account_secondary_indexes,
+                slot,
+                pubkey_to_index_entry,
+            );
+
+        uncleaned_pubkeys
+            .entry(slot)
+            .or_insert(HashSet::<Pubkey>::default())
+            .extend(slot_dirty_pubkeys);
+
+        slot_accounts_data_len
+    } else {
+        0
+    }
+}
+
+fn remap_append_vec_file(
+    old_append_vec_path: PathBuf,
+    filename: String,
+    next_append_vec_id: &AtomicU32,
+) -> (Slot, PathBuf, AppendVecId, AppendVecId) {
+    let (slot, old_append_vec_id) = get_slot_and_append_vec_id(&filename);
+    let new_append_vec_id = next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let new_filename = AppendVec::file_name(slot, new_append_vec_id);
+    let new_append_vec_path = old_append_vec_path.parent().unwrap().join(&new_filename);
+
+    if old_append_vec_id != new_append_vec_id {
+        std::fs::rename(old_append_vec_path, &new_append_vec_path);
+    }
+
+    (
+        slot,
+        new_append_vec_path,
+        old_append_vec_id,
+        new_append_vec_id,
+    )
+}
+
+fn get_slot_and_append_vec_id(filename: &str) -> (Slot, AppendVecId) {
+    let mut split = filename.split('.');
+    let slot = split.next().unwrap().parse().unwrap();
+    let append_vec_id = split.next().unwrap().parse().unwrap();
+    assert!(split.next().is_none());
+
+    (slot, append_vec_id)
+}
+
+fn create_account_storage_entry(
+    snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
+    slot: &Slot,
+    old_append_vec_id: AppendVecId,
+    new_append_vec_id: AppendVecId,
+    append_vec_path: PathBuf,
+) -> Arc<AccountStorageEntry> {
+    let current_len = *snapshot_storage_lengths
+        .get(&slot)
+        .unwrap()
+        .get(&(old_append_vec_id as usize))
+        .unwrap();
+
+    let (accounts, num_accounts) = AppendVec::new_from_file(&append_vec_path, current_len).unwrap();
+    Arc::new(AccountStorageEntry::new_existing(
+        *slot,
+        new_append_vec_id,
+        accounts,
+        num_accounts,
+    ))
+}
+
+// write-lock SlotStores, insert storage entry, and return the size
+fn index_snapshot_insert_storage(
+    slot_stores: &SlotStores,
+    append_vec_id: AppendVecId,
+    storage_entry: Arc<AccountStorageEntry>,
+) -> usize {
+    let mut slot_stores_lock = slot_stores.write().unwrap();
+    slot_stores_lock.insert(append_vec_id, storage_entry);
+    slot_stores_lock.len()
 }
 
 /// Reads the `snapshot_version` from a file. Before opening the file, its size
@@ -1437,6 +1797,51 @@ pub fn purge_old_snapshot_archives(
     }
 }
 
+fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
+    reader: F,
+    ledger_dir: &Path,
+    account_paths: &[PathBuf],
+    untar_parallel_divisions: usize,
+    sender: crossbeam_channel::Sender<(PathBuf, String)>,
+) {
+    // a shared 'reader' that reads the decompressed stream once, keeps some history, and acts as a reader for multiple parallel archive readers
+    let shared_buffer = SharedBuffer::new(reader());
+
+    // allocate all readers before any readers start reading
+    let readers = (0..untar_parallel_divisions)
+        .into_iter()
+        .map(|_| SharedBufferReader::new(&shared_buffer))
+        .collect::<Vec<_>>();
+
+    let ledger_dir = ledger_dir.to_owned();
+    let account_paths = account_paths.to_owned();
+
+    // create threadpool and spawn unpack workers
+    let thread_pool = ThreadPoolBuilder::default()
+        .num_threads(untar_parallel_divisions)
+        .build()
+        .unwrap();
+    thread_pool.spawn(move || {
+        readers
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(index, reader)| {
+                let parallel_selector = Some(ParallelSelector {
+                    index,
+                    divisions: untar_parallel_divisions,
+                });
+                let mut archive = Archive::new(reader);
+                streaming_unpack_snapshot(
+                    &mut archive,
+                    &ledger_dir,
+                    &account_paths,
+                    parallel_selector,
+                    sender.clone(),
+                );
+            });
+    });
+}
+
 fn unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
     reader: F,
     ledger_dir: &Path,
@@ -1473,6 +1878,54 @@ fn unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn() -> T>(
     }
 
     Ok(unpacked_append_vec_map)
+}
+
+fn streaming_untar_snapshot_file(
+    snapshot_tar: &Path,
+    unpack_dir: &Path,
+    account_paths: &[PathBuf],
+    archive_format: ArchiveFormat,
+    untar_parallel_divisions: usize,
+    sender: crossbeam_channel::Sender<(PathBuf, String)>,
+) {
+    let open_file = || File::open(&snapshot_tar).unwrap();
+    match archive_format {
+        ArchiveFormat::TarBzip2 => streaming_unpack_snapshot_local(
+            || BzDecoder::new(BufReader::new(open_file())),
+            unpack_dir,
+            account_paths,
+            untar_parallel_divisions,
+            sender,
+        ),
+        ArchiveFormat::TarGzip => streaming_unpack_snapshot_local(
+            || GzDecoder::new(BufReader::new(open_file())),
+            unpack_dir,
+            account_paths,
+            untar_parallel_divisions,
+            sender,
+        ),
+        ArchiveFormat::TarZstd => streaming_unpack_snapshot_local(
+            || zstd::stream::read::Decoder::new(BufReader::new(open_file())).unwrap(),
+            unpack_dir,
+            account_paths,
+            untar_parallel_divisions,
+            sender,
+        ),
+        ArchiveFormat::TarLz4 => streaming_unpack_snapshot_local(
+            || lz4::Decoder::new(BufReader::new(open_file())).unwrap(),
+            unpack_dir,
+            account_paths,
+            untar_parallel_divisions,
+            sender,
+        ),
+        ArchiveFormat::Tar => streaming_unpack_snapshot_local(
+            || BufReader::new(open_file()),
+            unpack_dir,
+            account_paths,
+            untar_parallel_divisions,
+            sender,
+        ),
+    };
 }
 
 fn untar_snapshot_file(
@@ -1518,22 +1971,6 @@ fn untar_snapshot_file(
     Ok(account_paths_map)
 }
 
-fn untar_snapshot_in<P: AsRef<Path>>(
-    snapshot_tar: P,
-    unpack_dir: &Path,
-    account_paths: &[PathBuf],
-    archive_format: ArchiveFormat,
-    parallel_divisions: usize,
-) -> Result<UnpackedAppendVecMap> {
-    untar_snapshot_file(
-        snapshot_tar.as_ref(),
-        unpack_dir,
-        account_paths,
-        archive_format,
-        parallel_divisions,
-    )
-}
-
 fn verify_unpacked_snapshots_dir_and_version(
     unpacked_snapshots_dir_and_version: &UnpackedSnapshotsDirAndVersion,
 ) -> Result<(SnapshotVersion, BankSnapshotInfo)> {
@@ -1568,10 +2005,14 @@ fn rebuild_bank_from_snapshots(
         &UnpackedSnapshotsDirAndVersion,
     >,
     account_paths: &[PathBuf],
-    unpacked_append_vec_map: UnpackedAppendVecMap,
+    storage: DashMap<Slot, SlotStores>,
+    uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
+    accounts_data_len: u64,
+    next_append_vec_id: AtomicU32,
     genesis_config: &GenesisConfig,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     additional_builtins: Option<&Builtins>,
+    accounts_index: AccountInfoAccountsIndex,
     account_secondary_indexes: AccountSecondaryIndexes,
     accounts_db_caching_enabled: bool,
     limit_load_slot_count_from_snapshot: Option<usize>,
@@ -1617,10 +2058,14 @@ fn rebuild_bank_from_snapshots(
                     SerdeStyle::Newer,
                     snapshot_streams,
                     account_paths,
-                    unpacked_append_vec_map,
+                    storage,
+                    uncleaned_pubkeys,
+                    accounts_data_len,
+                    next_append_vec_id,
                     genesis_config,
                     debug_keys,
                     additional_builtins,
+                    accounts_index,
                     account_secondary_indexes,
                     accounts_db_caching_enabled,
                     limit_load_slot_count_from_snapshot,
@@ -1707,8 +2152,8 @@ pub fn verify_snapshot_archive<P, Q, R>(
 {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let unpack_dir = temp_dir.path();
-    untar_snapshot_in(
-        snapshot_archive,
+    untar_snapshot_file(
+        snapshot_archive.as_ref(),
         unpack_dir,
         &[unpack_dir.to_path_buf()],
         archive_format,
