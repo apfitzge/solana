@@ -1268,6 +1268,12 @@ fn index_snapshot(
     // create channels to receive accounts_data_len and wait for all workers to finish
     let (exit_sender, exit_receiver) = crossbeam_channel::unbounded();
 
+    // re-send snapshot storages unpacked before the snapshot file
+    snapshot_storages_to_process
+        .into_iter()
+        .for_each(|x| file_sender.send(x).unwrap());
+    drop(file_sender); // manually drop otherwise indexing threads will run indefinitely
+
     for _ in 0..num_threads {
         index_snapshot_worker(
             &thread_pool,
@@ -1283,14 +1289,10 @@ fn index_snapshot(
     }
     drop(exit_sender); // manually drop otherwise the below loop is infinite
 
-    // re-send snapshot storages unpacked before the snapshot file
-    snapshot_storages_to_process
-        .into_iter()
-        .for_each(|x| file_sender.send(x).unwrap());
-
     // wait for all indexing threads to finish
     let mut accounts_data_len = 0;
     while let Ok(thread_accounts_data_len) = exit_receiver.recv() {
+        info!("indexing thead completed with {thread_accounts_data_len}");
         accounts_data_len += thread_accounts_data_len;
     }
 
