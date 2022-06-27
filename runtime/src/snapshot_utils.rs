@@ -1239,7 +1239,7 @@ fn index_snapshot(
                 Some(SnapshotFileKind::StorageFile) => {
                     snapshot_storages_to_process.push((path_buf, filename));
                 }
-                None => todo!(),
+                None => {} // do nothing for other kinds of files
             }
         } else {
             panic!("did not receive snapshot file from unpacking threads");
