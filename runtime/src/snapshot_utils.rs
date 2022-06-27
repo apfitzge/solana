@@ -1117,7 +1117,6 @@ where
     // create and spawn threadpool for unarchiving snapshot
     unarchive_snapshot(
         account_paths,
-        bank_snapshots_dir,
         unpack_dir.path(),
         snapshot_archive_path,
         archive_format,
@@ -1126,10 +1125,9 @@ where
     );
 
     // create and spawn threadpool for indexing snapshot
-    // this will wait for index completion
+    // this will wait for unarchive and index completion
     let ((storage, uncleaned_pubkeys, accounts_data_len), measure_unarchive_and_index) = measure!(
         index_snapshot(
-            unpack_dir.path(),
             accounts_index,
             account_secondary_indexes,
             next_append_vec_id,
@@ -1158,17 +1156,15 @@ where
 /// Perform the common tasks when unarchiving a snapshot.  Handles creating the temporary
 /// directories, untaring, reading the version file, and then returning those fields plus the
 /// unpacked append vec map.
-fn unarchive_snapshot<P, Q>(
+fn unarchive_snapshot<P>(
     account_paths: &[PathBuf],
-    bank_snapshots_dir: P,
     unpack_dir: &Path,
-    snapshot_archive_path: Q,
+    snapshot_archive_path: P,
     archive_format: ArchiveFormat,
     untar_parallel_divisions: usize,
     sender: crossbeam_channel::Sender<(PathBuf, String)>,
 ) where
     P: AsRef<Path>,
-    Q: AsRef<Path>,
 {
     streaming_untar_snapshot_file(
         snapshot_archive_path.as_ref(),
@@ -1213,17 +1209,13 @@ fn get_snapshot_file_kind(filename: &str) -> Option<SnapshotFileKind> {
     }
 }
 
-fn process_snapshot_file(
-    path_buf: PathBuf,
-    filename: String,
-) -> HashMap<Slot, HashMap<usize, usize>> {
-    let (file_size, mut stream) =
+fn process_snapshot_file(path_buf: PathBuf) -> HashMap<Slot, HashMap<usize, usize>> {
+    let (_file_size, mut stream) =
         create_snapshot_data_file_stream(&path_buf.as_path(), MAX_SNAPSHOT_DATA_FILE_SIZE).unwrap();
     snapshot_stream_to_snapshot_storages(SerdeStyle::Newer, &mut stream).unwrap()
 }
 
 fn index_snapshot(
-    ledger_dir: &Path,
     accounts_index: Arc<AccountInfoAccountsIndex>,
     account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     next_append_vec_id: Arc<AtomicU32>,
@@ -1241,7 +1233,7 @@ fn index_snapshot(
         if let Ok((path_buf, filename)) = file_receiver.recv() {
             match get_snapshot_file_kind(&filename) {
                 Some(SnapshotFileKind::SnapshotFile) => {
-                    break process_snapshot_file(path_buf, filename);
+                    break process_snapshot_file(path_buf);
                 }
                 Some(SnapshotFileKind::StorageFile) => {
                     snapshot_storages_to_process.push((path_buf, filename));
@@ -1327,7 +1319,7 @@ fn index_snapshot_worker(
             }
         }
 
-        exit_sender.send(accounts_data_len);
+        exit_sender.send(accounts_data_len).unwrap();
     });
 }
 
@@ -1391,7 +1383,7 @@ fn remap_append_vec_file(
     let new_append_vec_path = old_append_vec_path.parent().unwrap().join(&new_filename);
 
     if old_append_vec_id != new_append_vec_id {
-        std::fs::rename(old_append_vec_path, &new_append_vec_path);
+        std::fs::rename(old_append_vec_path, &new_append_vec_path).unwrap();
     }
 
     (

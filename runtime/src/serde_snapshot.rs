@@ -3,11 +3,11 @@ use {
         accounts::Accounts,
         accounts_db::{
             AccountInfoAccountsIndex, AccountShrinkThreshold, AccountStorageEntry, AccountsDb,
-            AccountsDbConfig, AppendVecId, BankHashInfo, SlotStores, SnapshotStorage,
+            AccountsDbConfig, BankHashInfo, SlotStores, SnapshotStorage,
         },
         accounts_index::AccountSecondaryIndexes,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
-        append_vec::{AppendVec, StoredMetaWriteVersion},
+        append_vec::StoredMetaWriteVersion,
         bank::{Bank, BankFieldsToDeserialize, BankRc},
         blockhash_queue::BlockhashQueue,
         builtins::Builtins,
@@ -580,25 +580,6 @@ where
     info!("rent_collector: {:?}", bank.rent_collector());
 
     Ok(bank)
-}
-
-fn reconstruct_single_storage<E>(
-    slot: &Slot,
-    append_vec_path: &Path,
-    storage_entry: &E,
-    append_vec_id: AppendVecId,
-    new_slot_storage: &mut HashMap<AppendVecId, Arc<AccountStorageEntry>>,
-) -> Result<(), Error>
-where
-    E: SerializableStorage,
-{
-    let (accounts, num_accounts) =
-        AppendVec::new_from_file(append_vec_path, storage_entry.current_len())?;
-    let u_storage_entry =
-        AccountStorageEntry::new_existing(*slot, append_vec_id, accounts, num_accounts);
-
-    new_slot_storage.insert(append_vec_id, Arc::new(u_storage_entry));
-    Ok(())
 }
 
 /// This struct contains side-info while reconstructing the accounts DB from fields.
