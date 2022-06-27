@@ -225,9 +225,9 @@ pub(crate) fn compare_two_serialized_banks(
     Ok(fields1 == fields2)
 }
 
-pub(crate) fn snapshot_stream_to_snapshot_storages<'a, R>(
+pub(crate) fn snapshot_stream_to_snapshot_storages<R>(
     serde_style: SerdeStyle,
-    snapshot_stream: &'a mut BufReader<R>,
+    snapshot_stream: &mut BufReader<R>,
 ) -> std::result::Result<HashMap<Slot, HashMap<usize, usize>>, Error>
 where
     R: Read,
@@ -588,6 +588,7 @@ struct ReconstructedAccountsDbInfo {
     accounts_data_len: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reconstruct_accountsdb_from_fields<E>(
     snapshot_accounts_db_fields: SnapshotAccountsDbFields<E>,
     account_paths: &[PathBuf],

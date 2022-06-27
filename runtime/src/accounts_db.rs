@@ -8038,7 +8038,7 @@ impl AccountsDb {
                     accounts_index.update_secondary_indexes(
                         &pubkey,
                         &stored_account,
-                        &account_secondary_indexes,
+                        account_secondary_indexes,
                     );
                 }
 
@@ -8260,7 +8260,7 @@ impl AccountsDb {
         }
 
         let mut slots = self.storage.all_slots();
-        slots.sort();
+        slots.sort_unstable();
 
         let unique_pubkeys: HashSet<_> = uncleaned_pubkeys
             .into_iter()
@@ -8604,9 +8604,9 @@ impl AccountsDb {
     }
 
     // generate index entries for slot storages
-    pub(crate) fn process_slot_storage_entries<'a>(
-        storages: &'a HashMap<AppendVecId, Arc<AccountStorageEntry>>,
-    ) -> GenerateIndexAccountsMap<'a> {
+    pub(crate) fn process_slot_storage_entries(
+        storages: &HashMap<AppendVecId, Arc<AccountStorageEntry>>,
+    ) -> GenerateIndexAccountsMap<'_> {
         let num_accounts = storages
             .iter()
             .map(|(_, storage_entry)| storage_entry.approx_stored_count())

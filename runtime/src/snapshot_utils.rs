@@ -1088,6 +1088,7 @@ fn verify_bank_against_expected_slot_hash(
 }
 
 /// Perform the common tasks when unarchiving and indexing a snapshot.
+#[allow(clippy::too_many_arguments)]
 fn unarchive_and_index_snapshot<P, Q>(
     account_paths: &[PathBuf],
     bank_snapshots_dir: P,
@@ -1411,7 +1412,7 @@ fn create_account_storage_entry(
     append_vec_path: PathBuf,
 ) -> Arc<AccountStorageEntry> {
     let current_len = *snapshot_storage_lengths
-        .get(&slot)
+        .get(slot)
         .unwrap()
         .get(&(old_append_vec_id as usize))
         .unwrap();

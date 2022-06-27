@@ -347,8 +347,10 @@ pub(crate) fn streaming_unpack_snapshot<A: Read>(
             }
         },
         |entry_path_buf, filename| {
-            if entry_path_buf.is_file() && filename.is_some() {
-                sender.send((entry_path_buf, filename.unwrap())).unwrap();
+            if let Some(filename) = filename {
+                if entry_path_buf.is_file() {
+                    sender.send((entry_path_buf, filename)).unwrap();
+                }
             }
         },
     )
