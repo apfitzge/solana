@@ -4,10 +4,11 @@ use {
     crate::{
         accounts::{test_utils::create_test_accounts, Accounts},
         accounts_db::{get_temp_accounts_paths, AccountShrinkThreshold},
+        accounts_index_storage::Startup,
+        append_vec::AppendVec,
         bank::{Bank, Rewrites, StatusCacheRc},
         genesis_utils::{activate_all_features, activate_feature},
-        hardened_unpack::UnpackedAppendVecMap,
-        snapshot_utils::ArchiveFormat,
+        snapshot_utils::{index_snapshot_storages, ArchiveFormat},
     },
     bincode::serialize_into,
     rand::{thread_rng, Rng},
@@ -26,23 +27,85 @@ use {
     tempfile::TempDir,
 };
 
+struct SimulatedSnapshotUnpackAndIndexResult {
+    accounts_index: AccountInfoAccountsIndex,
+    account_secondary_indexes: AccountSecondaryIndexes,
+    storage: DashMap<Slot, SlotStores>,
+    uncleaned_pubkeys: DashMap<Slot, HashSet<Pubkey>>,
+    next_append_vec_id: AtomicU32,
+    accounts_data_len: u64,
+}
+
+fn simulate_snapshot_unpack_and_index<P: AsRef<Path>>(
+    accounts_db: &AccountsDb,
+    output_dir: P,
+) -> std::io::Result<SimulatedSnapshotUnpackAndIndexResult> {
+    let (append_vec_files, slot_storage_lengths) = copy_append_vecs(accounts_db, output_dir)?;
+    let accounts_index = AccountInfoAccountsIndex::default_for_tests();
+    let account_secondary_indexes = AccountSecondaryIndexes::default();
+    accounts_index.set_startup(Startup::Startup);
+
+    let storage = slot_storage_lengths
+        .iter()
+        .map(|(slot, _)| (*slot, SlotStores::default()))
+        .collect::<DashMap<_, _>>();
+    let uncleaned_pubkeys = DashMap::new();
+    let next_append_vec_id = AtomicU32::new(0);
+
+    let accounts_data_len = index_snapshot_storages(
+        append_vec_files.into_iter(),
+        &accounts_index,
+        &account_secondary_indexes,
+        &slot_storage_lengths,
+        &next_append_vec_id,
+        &storage,
+        &uncleaned_pubkeys,
+    );
+
+    Ok(SimulatedSnapshotUnpackAndIndexResult {
+        accounts_index,
+        account_secondary_indexes,
+        storage,
+        uncleaned_pubkeys,
+        next_append_vec_id,
+        accounts_data_len,
+    })
+}
+
 fn copy_append_vecs<P: AsRef<Path>>(
     accounts_db: &AccountsDb,
     output_dir: P,
-) -> std::io::Result<UnpackedAppendVecMap> {
+) -> std::io::Result<(Vec<(PathBuf, String)>, HashMap<Slot, HashMap<usize, usize>>)> {
     let storage_entries = accounts_db
         .get_snapshot_storages(Slot::max_value(), None, None)
         .0;
-    let mut unpacked_append_vec_map = UnpackedAppendVecMap::new();
-    for storage in storage_entries.iter().flatten() {
-        let storage_path = storage.get_path();
-        let file_name = AppendVec::file_name(storage.slot(), storage.append_vec_id());
+
+    let mut num_storage_entries = 0;
+    let slot_storage_lengths = storage_entries
+        .iter()
+        .map(|storages| {
+            let slot = storages.first().unwrap().slot();
+            num_storage_entries += storages.len();
+            (
+                slot,
+                storages
+                    .iter()
+                    .map(|storage| (storage.append_vec_id() as usize, storage.accounts.len()))
+                    .collect::<HashMap<_, _>>(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut append_vec_files = Vec::with_capacity(num_storage_entries);
+    for storage_entry in storage_entries.iter().flatten() {
+        let storage_path = storage_entry.get_path();
+        let file_name = AppendVec::file_name(storage_entry.slot(), storage_entry.append_vec_id());
         let output_path = output_dir.as_ref().join(&file_name);
         std::fs::copy(&storage_path, &output_path)?;
-        unpacked_append_vec_map.insert(file_name, output_path);
+        append_vec_files.push((output_path, file_name));
     }
 
-    Ok(unpacked_append_vec_map)
+    Ok((append_vec_files, slot_storage_lengths))
 }
 
 fn check_accounts(accounts: &Accounts, pubkeys: &[Pubkey], num: usize) {
@@ -61,7 +124,7 @@ fn check_accounts(accounts: &Accounts, pubkeys: &[Pubkey], num: usize) {
 fn context_accountsdb_from_stream<'a, C, R>(
     stream: &mut BufReader<R>,
     account_paths: &[PathBuf],
-    unpacked_append_vec_map: UnpackedAppendVecMap,
+    unpacked_and_indexed_result: SimulatedSnapshotUnpackAndIndexResult,
 ) -> Result<AccountsDb, Error>
 where
     C: TypeContext<'a>,
@@ -76,14 +139,17 @@ where
     reconstruct_accountsdb_from_fields(
         snapshot_accounts_db_fields,
         account_paths,
-        unpacked_append_vec_map,
+        unpacked_and_indexed_result.storage,
+        unpacked_and_indexed_result.uncleaned_pubkeys,
+        unpacked_and_indexed_result.accounts_data_len,
+        unpacked_and_indexed_result.next_append_vec_id,
         &GenesisConfig {
             cluster_type: ClusterType::Development,
             ..GenesisConfig::default()
         },
-        AccountSecondaryIndexes::default(),
+        unpacked_and_indexed_result.accounts_index,
+        unpacked_and_indexed_result.account_secondary_indexes,
         false,
-        None,
         AccountShrinkThreshold::default(),
         false,
         Some(crate::accounts_db::ACCOUNTS_DB_CONFIG_FOR_TESTING),
@@ -97,7 +163,7 @@ fn accountsdb_from_stream<R>(
     serde_style: SerdeStyle,
     stream: &mut BufReader<R>,
     account_paths: &[PathBuf],
-    unpacked_append_vec_map: UnpackedAppendVecMap,
+    unpacked_and_indexed_result: SimulatedSnapshotUnpackAndIndexResult,
 ) -> Result<AccountsDb, Error>
 where
     R: Read,
@@ -106,7 +172,7 @@ where
         SerdeStyle::Newer => context_accountsdb_from_stream::<newer::Context, R>(
             stream,
             account_paths,
-            unpacked_append_vec_map,
+            unpacked_and_indexed_result,
         ),
     }
 }
@@ -135,6 +201,8 @@ where
 }
 
 fn test_accounts_serialize_style(serde_style: SerdeStyle) {
+    const NUM_ACCOUNTS: usize = 50;
+
     solana_logger::setup();
     let (_accounts_dir, paths) = get_temp_accounts_paths(4).unwrap();
     let accounts = Accounts::new_with_config_for_tests(
@@ -146,8 +214,8 @@ fn test_accounts_serialize_style(serde_style: SerdeStyle) {
     );
 
     let mut pubkeys: Vec<Pubkey> = vec![];
-    create_test_accounts(&accounts, &mut pubkeys, 100, 0);
-    check_accounts(&accounts, &pubkeys, 100);
+    create_test_accounts(&accounts, &mut pubkeys, NUM_ACCOUNTS, 0);
+    check_accounts(&accounts, &pubkeys, NUM_ACCOUNTS);
     accounts.add_root(0);
 
     let mut writer = Cursor::new(vec![]);
@@ -161,24 +229,21 @@ fn test_accounts_serialize_style(serde_style: SerdeStyle) {
     .unwrap();
 
     let copied_accounts = TempDir::new().unwrap();
-
-    // Simulate obtaining a copy of the AppendVecs from a tarball
-    let unpacked_append_vec_map =
-        copy_append_vecs(&accounts.accounts_db, copied_accounts.path()).unwrap();
+    let unpacked_and_indexed_result =
+        simulate_snapshot_unpack_and_index(&accounts.accounts_db, copied_accounts.path()).unwrap();
 
     let buf = writer.into_inner();
     let mut reader = BufReader::new(&buf[..]);
     let (_accounts_dir, daccounts_paths) = get_temp_accounts_paths(2).unwrap();
-    let daccounts = Accounts::new_empty(
-        accountsdb_from_stream(
-            serde_style,
-            &mut reader,
-            &daccounts_paths,
-            unpacked_append_vec_map,
-        )
-        .unwrap(),
-    );
-    check_accounts(&daccounts, &pubkeys, 100);
+    let accounts_db = accountsdb_from_stream(
+        serde_style,
+        &mut reader,
+        &daccounts_paths,
+        unpacked_and_indexed_result,
+    )
+    .unwrap();
+    let daccounts = Accounts::new_empty(accounts_db);
+    check_accounts(&daccounts, &pubkeys, NUM_ACCOUNTS);
     assert_eq!(
         accounts.bank_hash_at(0, &Rewrites::default()),
         daccounts.bank_hash_at(0, &Rewrites::default())
@@ -280,8 +345,9 @@ fn test_bank_serialize_style(
     ref_sc.status_cache.write().unwrap().add_root(2);
     // Create a directory to simulate AppendVecs unpackaged from a snapshot tar
     let copied_accounts = TempDir::new().unwrap();
-    let unpacked_append_vec_map =
-        copy_append_vecs(&bank2.rc.accounts.accounts_db, copied_accounts.path()).unwrap();
+    let unpacked_and_indexed_result =
+        simulate_snapshot_unpack_and_index(&bank2.rc.accounts.accounts_db, copied_accounts.path())
+            .unwrap();
     let mut snapshot_streams = SnapshotStreams {
         full_snapshot_stream: &mut reader,
         incremental_snapshot_stream: None,
@@ -290,11 +356,15 @@ fn test_bank_serialize_style(
         serde_style,
         &mut snapshot_streams,
         &dbank_paths,
-        unpacked_append_vec_map,
+        unpacked_and_indexed_result.storage,
+        unpacked_and_indexed_result.uncleaned_pubkeys,
+        unpacked_and_indexed_result.accounts_data_len,
+        unpacked_and_indexed_result.next_append_vec_id,
         &genesis_config,
         None,
         None,
-        AccountSecondaryIndexes::default(),
+        unpacked_and_indexed_result.accounts_index,
+        unpacked_and_indexed_result.account_secondary_indexes,
         false,
         None,
         AccountShrinkThreshold::default(),
@@ -332,10 +402,15 @@ pub(crate) fn reconstruct_accounts_db_via_serialization(
     let copied_accounts = TempDir::new().unwrap();
 
     // Simulate obtaining a copy of the AppendVecs from a tarball
-    let unpacked_append_vec_map = copy_append_vecs(accounts, copied_accounts.path()).unwrap();
-    let mut accounts_db =
-        accountsdb_from_stream(SerdeStyle::Newer, &mut reader, &[], unpacked_append_vec_map)
-            .unwrap();
+    let unpacked_and_indexed_result =
+        simulate_snapshot_unpack_and_index(accounts, copied_accounts.path()).unwrap();
+    let mut accounts_db = accountsdb_from_stream(
+        SerdeStyle::Newer,
+        &mut reader,
+        &[],
+        unpacked_and_indexed_result,
+    )
+    .unwrap();
 
     // The append vecs will be used from `copied_accounts` directly by the new AccountsDb so keep
     // its TempDir alive
@@ -400,17 +475,22 @@ fn test_extra_fields_eof() {
     };
     let (_accounts_dir, dbank_paths) = get_temp_accounts_paths(4).unwrap();
     let copied_accounts = TempDir::new().unwrap();
-    let unpacked_append_vec_map =
-        copy_append_vecs(&bank.rc.accounts.accounts_db, copied_accounts.path()).unwrap();
+    let unpacked_and_indexed_result =
+        simulate_snapshot_unpack_and_index(&bank.rc.accounts.accounts_db, copied_accounts.path())
+            .unwrap();
     let dbank = crate::serde_snapshot::bank_from_streams(
         SerdeStyle::Newer,
         &mut snapshot_streams,
         &dbank_paths,
-        unpacked_append_vec_map,
+        unpacked_and_indexed_result.storage,
+        unpacked_and_indexed_result.uncleaned_pubkeys,
+        unpacked_and_indexed_result.accounts_data_len,
+        unpacked_and_indexed_result.next_append_vec_id,
         &genesis_config,
         None,
         None,
-        AccountSecondaryIndexes::default(),
+        unpacked_and_indexed_result.accounts_index,
+        unpacked_and_indexed_result.account_secondary_indexes,
         false,
         None,
         AccountShrinkThreshold::default(),
@@ -522,17 +602,22 @@ fn test_blank_extra_fields() {
     };
     let (_accounts_dir, dbank_paths) = get_temp_accounts_paths(4).unwrap();
     let copied_accounts = TempDir::new().unwrap();
-    let unpacked_append_vec_map =
-        copy_append_vecs(&bank.rc.accounts.accounts_db, copied_accounts.path()).unwrap();
+    let unpacked_and_indexed_result =
+        simulate_snapshot_unpack_and_index(&bank.rc.accounts.accounts_db, copied_accounts.path())
+            .unwrap();
     let dbank = crate::serde_snapshot::bank_from_streams(
         SerdeStyle::Newer,
         &mut snapshot_streams,
         &dbank_paths,
-        unpacked_append_vec_map,
+        unpacked_and_indexed_result.storage,
+        unpacked_and_indexed_result.uncleaned_pubkeys,
+        unpacked_and_indexed_result.accounts_data_len,
+        unpacked_and_indexed_result.next_append_vec_id,
         &genesis_config,
         None,
         None,
-        AccountSecondaryIndexes::default(),
+        unpacked_and_indexed_result.accounts_index,
+        unpacked_and_indexed_result.account_secondary_indexes,
         false,
         None,
         AccountShrinkThreshold::default(),

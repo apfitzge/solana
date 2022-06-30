@@ -1312,33 +1312,58 @@ fn index_snapshot_worker(
     exit_sender: Sender<u64>,
 ) {
     thread_pool.spawn(move || {
-        let mut accounts_data_len = 0;
-        let mut last_log_time = Instant::now();
-        let mut count = 0;
-        for (path_buf, filename) in file_receiver.iter() {
-            if let Some(SnapshotFileKind::StorageFile) = get_snapshot_file_kind(&filename) {
-                accounts_data_len += index_snapshot_process_storage_file(
-                    path_buf,
-                    filename,
-                    &accounts_index,
-                    &account_secondary_indexes,
-                    &snapshot_storage_lengths,
-                    &next_append_vec_id,
-                    &storage,
-                    &uncleaned_pubkeys,
-                );
-            }
-
-            count += 1;
-            let now = Instant::now();
-            if now.duration_since(last_log_time).as_millis() >= 2000 {
-                info!("indexed {count} entries so far...");
-                last_log_time = now;
-            }
-        }
-
+        let accounts_data_len = index_snapshot_storages(
+            file_receiver.iter(),
+            &accounts_index,
+            &account_secondary_indexes,
+            &snapshot_storage_lengths,
+            &next_append_vec_id,
+            &storage,
+            &uncleaned_pubkeys,
+        );
         exit_sender.send(accounts_data_len).unwrap();
     });
+}
+
+/// Indexes snapshot storage files, keeps track of account data length, and sends a signal when finished.
+pub(crate) fn index_snapshot_storages<I>(
+    file_receiver: I,
+    accounts_index: &AccountInfoAccountsIndex,
+    account_secondary_indexes: &AccountSecondaryIndexes,
+    snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
+    next_append_vec_id: &AtomicU32,
+    storage: &DashMap<Slot, SlotStores>,
+    uncleaned_pubkeys: &DashMap<Slot, HashSet<Pubkey>>,
+) -> u64
+where
+    I: Iterator<Item = (PathBuf, String)>,
+{
+    let mut accounts_data_len = 0;
+    let mut last_log_time = Instant::now();
+    let mut count = 0;
+    for (path_buf, filename) in file_receiver {
+        if let Some(SnapshotFileKind::StorageFile) = get_snapshot_file_kind(&filename) {
+            accounts_data_len += index_snapshot_process_storage_file(
+                path_buf,
+                filename,
+                &accounts_index,
+                &account_secondary_indexes,
+                &snapshot_storage_lengths,
+                &next_append_vec_id,
+                &storage,
+                &uncleaned_pubkeys,
+            );
+        }
+
+        count += 1;
+        let now = Instant::now();
+        if now.duration_since(last_log_time).as_millis() >= 2000 {
+            info!("indexed {count} entries so far...");
+            last_log_time = now;
+        }
+    }
+
+    accounts_data_len
 }
 
 fn index_snapshot_process_storage_file(
@@ -1351,20 +1376,16 @@ fn index_snapshot_process_storage_file(
     storage: &DashMap<Slot, SlotStores>,
     uncleaned_pubkeys: &DashMap<Slot, HashSet<Pubkey>>,
 ) -> u64 {
-    let (slot, path_buf, old_append_vec_id, new_append_vec_id) =
-        remap_append_vec_file(path_buf, filename, next_append_vec_id);
-    let storage_entry = create_account_storage_entry(
-        snapshot_storage_lengths,
-        &slot,
-        old_append_vec_id,
-        new_append_vec_id,
-        path_buf,
-    );
+    let (slot, append_vec_id) = get_slot_and_append_vec_id(&filename);
+    next_append_vec_id.fetch_max(append_vec_id, std::sync::atomic::Ordering::Relaxed);
+
+    let storage_entry =
+        create_account_storage_entry(snapshot_storage_lengths, &slot, append_vec_id, path_buf);
 
     // pre-allocated storage, so slot should always exist
     let slot_entry = storage.get(&slot).unwrap();
     let num_slot_storages =
-        index_snapshot_insert_storage(&slot_entry, new_append_vec_id, storage_entry);
+        index_snapshot_insert_storage(&slot_entry, append_vec_id, storage_entry);
 
     // if all storages for this slot have been processd, do processing
     if num_slot_storages == snapshot_storage_lengths.get(&slot).unwrap().len() {
@@ -1390,28 +1411,6 @@ fn index_snapshot_process_storage_file(
     }
 }
 
-fn remap_append_vec_file(
-    old_append_vec_path: PathBuf,
-    filename: String,
-    next_append_vec_id: &AtomicU32,
-) -> (Slot, PathBuf, AppendVecId, AppendVecId) {
-    let (slot, old_append_vec_id) = get_slot_and_append_vec_id(&filename);
-    let new_append_vec_id = next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let new_filename = AppendVec::file_name(slot, new_append_vec_id);
-    let new_append_vec_path = old_append_vec_path.parent().unwrap().join(&new_filename);
-
-    if old_append_vec_id != new_append_vec_id {
-        std::fs::rename(old_append_vec_path, &new_append_vec_path).unwrap();
-    }
-
-    (
-        slot,
-        new_append_vec_path,
-        old_append_vec_id,
-        new_append_vec_id,
-    )
-}
-
 fn get_slot_and_append_vec_id(filename: &str) -> (Slot, AppendVecId) {
     let mut split = filename.split('.');
     let slot = split.next().unwrap().parse().unwrap();
@@ -1424,23 +1423,24 @@ fn get_slot_and_append_vec_id(filename: &str) -> (Slot, AppendVecId) {
 fn create_account_storage_entry(
     snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
     slot: &Slot,
-    old_append_vec_id: AppendVecId,
-    new_append_vec_id: AppendVecId,
+    append_vec_id: AppendVecId,
     append_vec_path: PathBuf,
 ) -> Arc<AccountStorageEntry> {
     let current_len = *snapshot_storage_lengths
         .get(slot)
         .unwrap()
-        .get(&(old_append_vec_id as usize))
+        .get(&(append_vec_id as usize))
         .unwrap();
 
     let (accounts, num_accounts) = AppendVec::new_from_file(&append_vec_path, current_len).unwrap();
-    Arc::new(AccountStorageEntry::new_existing(
+    let storage = Arc::new(AccountStorageEntry::new_existing(
         *slot,
-        new_append_vec_id,
+        append_vec_id,
         accounts,
         num_accounts,
-    ))
+    ));
+
+    storage
 }
 
 // write-lock SlotStores, insert storage entry, and return the size

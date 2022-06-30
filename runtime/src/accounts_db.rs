@@ -1728,6 +1728,7 @@ impl<'a> ReadableAccount for StoredAccountMeta<'a> {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct IndexAccountMapEntry<'a> {
     pub write_version: StoredMetaWriteVersion,
     pub store_id: AppendVecId,
@@ -8277,8 +8278,8 @@ impl AccountsDb {
         info!("accounts data len: {accounts_data_len}");
 
         // Need to add these last, otherwise older updates will be cleaned
-        for slot in &slots {
-            self.accounts_index.add_root(*slot, accounts_db_skip_shrink);
+        for slot in slots {
+            self.accounts_index.add_root(slot, accounts_db_skip_shrink);
         }
 
         accounts_data_len
@@ -8637,6 +8638,7 @@ impl AccountsDb {
                 }
             });
         });
+
         accounts_map
     }
 
@@ -11069,6 +11071,7 @@ pub mod tests {
 
     fn assert_not_load_account(accounts: &AccountsDb, slot: Slot, pubkey: Pubkey) {
         let ancestors = vec![(slot, 0)].into_iter().collect();
+        error!("{pubkey}");
         assert!(accounts
             .load_without_fixed_root(&ancestors, &pubkey)
             .is_none());
