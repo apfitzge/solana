@@ -665,6 +665,10 @@ where
         accounts_data_len,
     );
 
+    if verify_index {
+        accounts_db.verify_index();
+    }
+
     accounts_db.maybe_add_filler_accounts(
         &genesis_config.epoch_schedule,
         &genesis_config.rent,

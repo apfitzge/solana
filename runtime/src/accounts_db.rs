@@ -8664,6 +8664,75 @@ impl AccountsDb {
         }
     }
 
+    /// verify accounts index
+    pub(crate) fn verify_index(&self) {
+        let mut slots = self.storage.all_slots();
+        #[allow(clippy::stable_sort_primitive)]
+        slots.sort();
+
+        let storage_info = StorageSizeAndCountMap::default();
+        let total_processed_slots_across_all_threads = AtomicU64::new(0);
+        let outer_slots_len = slots.len();
+        let threads = if self.accounts_index.is_disk_index_enabled() {
+            // these write directly to disk, so the more threads, the better
+            num_cpus::get()
+        } else {
+            // seems to be a good hueristic given varying # cpus for in-mem disk index
+            8
+        };
+        let chunk_size = (outer_slots_len / (std::cmp::max(1, threads.saturating_sub(1)))) + 1; // approximately 400k slots in a snapshot
+        let insertion_time_us = AtomicU64::new(0);
+        let storage_info_timings = Mutex::new(GenerateIndexTimings::default());
+        slots.par_chunks(chunk_size).for_each(|slots| {
+            let mut log_status = MultiThreadProgress::new(
+                &total_processed_slots_across_all_threads,
+                2,
+                outer_slots_len as u64,
+            );
+            for (index, slot) in slots.iter().enumerate() {
+                log_status.report(index as u64);
+                let storage_maps: Vec<Arc<AccountStorageEntry>> = self
+                    .storage
+                    .get_slot_storage_entries(*slot)
+                    .unwrap_or_default();
+                let accounts_map = self.process_storage_slot(&storage_maps);
+                Self::update_storage_info(&storage_info, &accounts_map, &storage_info_timings);
+
+                let insert_us = {
+                    // verify index matches expected and measure the time to get all items
+                    let mut lookup_time = Measure::start("lookup_time");
+                    for account in accounts_map.into_iter() {
+                        let (key, account_info) = account;
+                        let lock = self.accounts_index.get_account_maps_read_lock(&key);
+                        let x = lock.get(&key).unwrap();
+                        let sl = x.slot_list.read().unwrap();
+                        let mut count = 0;
+                        for (slot2, account_info2) in sl.iter() {
+                            if slot2 == slot {
+                                count += 1;
+                                let ai = AccountInfo::new(
+                                    StorageLocation::AppendVec(
+                                        account_info.store_id,
+                                        account_info.stored_account.offset,
+                                    ), // will never be cached
+                                    account_info.stored_account.stored_size as StoredSize, // stored_size should never exceed StoredSize::MAX because of max data len const
+                                    account_info.stored_account.account_meta.lamports,
+                                );
+                                assert_eq!(&ai, account_info2);
+                            }
+                        }
+                        assert_eq!(1, count);
+                    }
+                    lookup_time.stop();
+                    lookup_time.as_us()
+                };
+                insertion_time_us.fetch_add(insert_us, Ordering::Relaxed);
+            }
+        });
+
+        self.accounts_index.log_secondary_indexes();
+    }
+
     fn set_storage_count_and_alive_bytes(
         &self,
         stored_sizes_and_counts: StorageSizeAndCountMap,
