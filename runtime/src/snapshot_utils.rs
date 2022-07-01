@@ -876,7 +876,7 @@ pub fn bank_from_snapshot_archives(
                 accounts_index.clone(),
                 account_secondary_indexes.clone(),
                 next_append_vec_id.clone(),
-                "full snapshot unarchive and index",
+                "incremental snapshot unarchive and index",
             );
             Some(unarchived_and_indexed_incremental_snapshot)
         } else {
