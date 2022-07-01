@@ -1126,6 +1126,11 @@ where
 
     // create and spawn threadpool for indexing snapshot
     // this will wait for unarchive and index completion
+    let num_indexing_threads = if accounts_index.is_disk_index_enabled() {
+        num_cpus::get() - untar_parallel_divisions
+    } else {
+        8
+    };
     let ((storage, uncleaned_pubkeys, accounts_data_len), measure_unarchive_and_index) = measure!(
         index_snapshot(
             accounts_index,
@@ -1133,7 +1138,7 @@ where
             next_append_vec_id,
             file_sender,
             file_receiver,
-            num_cpus::get() - untar_parallel_divisions,
+            num_indexing_threads,
         ),
         measure_name
     );
