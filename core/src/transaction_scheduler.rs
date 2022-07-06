@@ -508,12 +508,9 @@ impl AccountTransactionQueue {
 }
 
 /// Helper function to get the lowest-priority blocking transaction
-fn upper_bound<'a>(
-    tree: &'a BTreeSet<TransactionRef>,
-    transaction: TransactionRef,
-) -> Option<&'a TransactionRef> {
+fn upper_bound<'a, T: Ord>(tree: &'a BTreeSet<T>, item: T) -> Option<&'a T> {
     use std::ops::Bound::*;
-    let mut iter = tree.range((Excluded(transaction), Unbounded));
+    let mut iter = tree.range((Excluded(item), Unbounded));
     iter.next()
 }
 
@@ -523,5 +520,211 @@ fn option_min<T: Ord>(lhs: Option<T>, rhs: Option<T>) -> Option<T> {
         (Some(lhs), Some(rhs)) => Some(std::cmp::min(lhs, rhs)),
         (lhs, None) => lhs,
         (None, rhs) => rhs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_sdk::{hash::Hash, signature::Keypair, system_transaction};
+
+    fn create_transfer(from: &Keypair, to: &Pubkey, priority: u64) -> Arc<TransactionPriority> {
+        Arc::new(TransactionPriority {
+            priority,
+            transaction: SanitizedTransaction::from_transaction_for_tests(
+                system_transaction::transfer(from, to, 0, Hash::default()),
+            ),
+        })
+    }
+
+    #[test]
+    fn test_account_transaction_queue_insert() {
+        let mut queue = AccountTransactionQueue::default();
+
+        let account1 = Keypair::new();
+        let account2 = Pubkey::new_unique();
+
+        queue.insert_transaction(create_transfer(&account1, &account2, 1), true);
+        assert_eq!(1, queue.writes.len());
+        assert_eq!(0, queue.reads.len());
+        assert!(queue.scheduled_lock.lock.is_none());
+        assert_eq!(0, queue.scheduled_lock.count);
+        assert_eq!(None, queue.scheduled_lock.lowest_priority_transaction);
+
+        queue.insert_transaction(create_transfer(&account1, &account2, 2), true);
+        assert_eq!(2, queue.writes.len());
+        assert_eq!(0, queue.reads.len());
+        assert!(queue.scheduled_lock.lock.is_none());
+        assert_eq!(0, queue.scheduled_lock.count);
+        assert_eq!(None, queue.scheduled_lock.lowest_priority_transaction);
+
+        queue.insert_transaction(create_transfer(&account1, &account2, 3), false);
+        assert_eq!(2, queue.writes.len());
+        assert_eq!(1, queue.reads.len());
+        assert!(queue.scheduled_lock.lock.is_none());
+        assert_eq!(0, queue.scheduled_lock.count);
+        assert_eq!(None, queue.scheduled_lock.lowest_priority_transaction);
+
+        queue.insert_transaction(create_transfer(&account1, &account2, 4), false);
+        assert_eq!(2, queue.writes.len());
+        assert_eq!(2, queue.reads.len());
+        assert!(queue.scheduled_lock.lock.is_none());
+        assert_eq!(0, queue.scheduled_lock.count);
+        assert_eq!(None, queue.scheduled_lock.lowest_priority_transaction);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_account_transaction_queue_handle_schedule_write_transaction() {
+        let mut queue = AccountTransactionQueue::default();
+
+        let account1 = Keypair::new();
+        let account2 = Pubkey::new_unique();
+
+        let tx1 = create_transfer(&account1, &account2, 1);
+        let tx2 = create_transfer(&account1, &account2, 5);
+        queue.insert_transaction(tx1.clone(), true);
+        queue.insert_transaction(tx2.clone(), false);
+        queue.handle_schedule_transaction(&tx1, true);
+
+        assert_eq!(1, queue.writes.len()); // still exists in the write queue
+        assert_eq!(1, queue.reads.len());
+        assert!(queue.scheduled_lock.lock.is_write()); // write-lock taken
+        assert_eq!(1, queue.scheduled_lock.count);
+        assert_eq!(Some(tx1), queue.scheduled_lock.lowest_priority_transaction);
+
+        queue.handle_schedule_transaction(&tx2, false); // should panic since write-lock is taken
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_account_transaction_queue_handle_schedule_read_transactions() {
+        let mut queue = AccountTransactionQueue::default();
+
+        let account1 = Keypair::new();
+        let account2 = Pubkey::new_unique();
+
+        let tx1 = create_transfer(&account1, &account2, 1);
+        let tx2 = create_transfer(&account1, &account2, 5);
+        let tx3 = create_transfer(&account1, &account2, 10);
+        queue.insert_transaction(tx2.clone(), true);
+        queue.insert_transaction(tx1.clone(), false);
+        queue.insert_transaction(tx3.clone(), false);
+        queue.handle_schedule_transaction(&tx1, false);
+
+        assert_eq!(1, queue.writes.len());
+        assert_eq!(2, queue.reads.len()); // still exists in the read queue
+        assert!(queue.scheduled_lock.lock.is_read()); // read-lock taken
+        assert_eq!(1, queue.scheduled_lock.count);
+        assert_eq!(
+            Some(tx1.clone()),
+            queue.scheduled_lock.lowest_priority_transaction
+        );
+
+        queue.handle_schedule_transaction(&tx3, false);
+
+        assert_eq!(1, queue.writes.len()); // still exists in the write queue
+        assert_eq!(2, queue.reads.len());
+        assert!(queue.scheduled_lock.lock.is_read()); // read-lock taken
+        assert_eq!(2, queue.scheduled_lock.count);
+        assert_eq!(Some(tx1), queue.scheduled_lock.lowest_priority_transaction);
+
+        queue.handle_schedule_transaction(&tx2, true); // should panic because we cannot schedule a write when read-lock is taken
+    }
+
+    #[test]
+    fn test_account_transaction_queue_handle_completed_transaction() {
+        let mut queue = AccountTransactionQueue::default();
+
+        let account1 = Keypair::new();
+        let account2 = Pubkey::new_unique();
+        let tx1 = create_transfer(&account1, &account2, 1);
+        let tx2 = create_transfer(&account1, &account2, 2);
+
+        queue.insert_transaction(tx1.clone(), true);
+        queue.insert_transaction(tx2.clone(), true);
+        assert_eq!(2, queue.writes.len());
+        assert_eq!(0, queue.reads.len());
+        assert!(queue.scheduled_lock.lock.is_none());
+        assert_eq!(0, queue.scheduled_lock.count);
+        assert_eq!(None, queue.scheduled_lock.lowest_priority_transaction);
+
+        queue.handle_schedule_transaction(&tx2, true);
+        assert!(!queue.handle_completed_transaction(&tx2, true)); // queue is not empty, so it should return false
+        assert_eq!(1, queue.writes.len());
+        assert_eq!(0, queue.reads.len());
+        assert!(queue.scheduled_lock.lock.is_none());
+        assert_eq!(0, queue.scheduled_lock.count);
+        assert_eq!(None, queue.scheduled_lock.lowest_priority_transaction);
+
+        queue.handle_schedule_transaction(&tx1, true);
+        assert!(queue.handle_completed_transaction(&tx1, true)); // queue is now empty, so it should return true
+        assert_eq!(0, queue.writes.len());
+        assert_eq!(0, queue.reads.len());
+        assert!(queue.scheduled_lock.lock.is_none());
+        assert_eq!(0, queue.scheduled_lock.count);
+        assert_eq!(None, queue.scheduled_lock.lowest_priority_transaction);
+    }
+
+    #[test]
+    fn test_account_transaction_queue_get_min_blocking_transaction() {
+        let mut queue = AccountTransactionQueue::default();
+
+        let account1 = Keypair::new();
+        let account2 = Pubkey::new_unique();
+        let tx1 = create_transfer(&account1, &account2, 1);
+        let tx2 = create_transfer(&account1, &account2, 2);
+        queue.insert_transaction(tx1.clone(), false);
+        queue.insert_transaction(tx2.clone(), true);
+
+        // write blocks read
+        assert_eq!(Some(&tx2), queue.get_min_blocking_transaction(&tx1, false));
+        assert_eq!(None, queue.get_min_blocking_transaction(&tx2, true));
+
+        let tx3 = create_transfer(&account1, &account2, 3);
+        queue.insert_transaction(tx3.clone(), false);
+
+        // read blocks write
+        assert_eq!(Some(&tx2), queue.get_min_blocking_transaction(&tx1, false));
+        assert_eq!(Some(&tx3), queue.get_min_blocking_transaction(&tx2, true));
+        assert_eq!(None, queue.get_min_blocking_transaction(&tx3, false));
+
+        // scheduled transaction blocks regardless of priority
+        queue.handle_schedule_transaction(&tx1, false);
+        assert_eq!(Some(&tx1), queue.get_min_blocking_transaction(&tx2, true));
+        assert_eq!(None, queue.get_min_blocking_transaction(&tx3, false));
+    }
+
+    #[test]
+    fn test_upper_bound_normal() {
+        let tree: BTreeSet<_> = [2, 3, 1].into_iter().collect();
+        assert_eq!(Some(&2), upper_bound(&tree, 1));
+    }
+
+    #[test]
+    fn test_upper_bound_duplicates() {
+        let tree: BTreeSet<_> = [2, 2, 3, 1, 1].into_iter().collect();
+        assert_eq!(Some(&2), upper_bound(&tree, 1));
+    }
+
+    #[test]
+    fn test_option_min_none_and_none() {
+        assert_eq!(None, option_min::<u32>(None, None));
+    }
+
+    #[test]
+    fn test_option_min_none_and_some() {
+        assert_eq!(Some(1), option_min(None, Some(1)));
+    }
+
+    #[test]
+    fn test_option_min_some_and_none() {
+        assert_eq!(Some(1), option_min(Some(1), None));
+    }
+
+    #[test]
+    fn test_option_min_some_and_some() {
+        assert_eq!(Some(1), option_min(Some(1), Some(2)));
+        assert_eq!(Some(1), option_min(Some(2), Some(1)));
     }
 }
