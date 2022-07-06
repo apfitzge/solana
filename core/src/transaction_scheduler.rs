@@ -1,22 +1,18 @@
 //! Implements a transaction scheduler
 
-use std::{
-    hash::Hash,
-    sync::atomic::{AtomicBool, Ordering},
-};
-
-use crossbeam_channel::{select, Sender};
-
 use {
-    crate::unprocessed_packet_batches::{self, DeserializedPacket, ImmutableDeserializedPacket},
-    crossbeam_channel::Receiver,
+    crate::unprocessed_packet_batches::{self, ImmutableDeserializedPacket},
+    crossbeam_channel::{Receiver, Sender},
     solana_perf::packet::PacketBatch,
     solana_runtime::bank::Bank,
     solana_sdk::{pubkey::Pubkey, signature::Signature, transaction::SanitizedTransaction},
     std::{
         collections::{BTreeSet, BinaryHeap, HashMap, HashSet},
-        rc::Rc,
-        sync::Arc,
+        hash::Hash,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
     },
 };
 
@@ -125,6 +121,35 @@ impl TransactionScheduler {
         self.do_scheduling();
     }
 
+    /// Handles packet batches as we receive them from the channel
+    fn handle_packet_batches(&mut self, packet_batch_message: PacketBatchMessage) {
+        for packet_batch in packet_batch_message {
+            let packet_indices: Vec<_> = packet_batch
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, p)| if !p.meta.discard() { Some(idx) } else { None })
+                .collect();
+            let transactions: Vec<_> =
+                unprocessed_packet_batches::deserialize_packets(&packet_batch, &packet_indices)
+                    .filter_map(|deserialized_packet| {
+                        TransactionPriority::try_new(
+                            deserialized_packet.immutable_section(),
+                            &self.bank,
+                        )
+                    })
+                    .collect();
+            for transaction in transactions {
+                self.insert_transaction(transaction);
+            }
+        }
+    }
+
+    /// Handle completed transactions
+    fn handle_completed_transaction(&mut self, transaction: TransactionMessage) {
+        self.update_queues_on_completed_transaction(&transaction);
+        self.push_unblocked_transactions(transaction.transaction.signature());
+    }
+
     /// Performs scheduling operations on currently pending transactions
     fn do_scheduling(&mut self) {
         // Allocate batches to be sent to threads
@@ -140,7 +165,7 @@ impl TransactionScheduler {
                 if batches[batch_index].len() == self.max_batch_size {
                     break;
                 }
-                batch_index += 1;
+                batch_index = (batch_index + 1) % batches.len();
             }
         }
 
@@ -153,66 +178,31 @@ impl TransactionScheduler {
         }
     }
 
-    /// Handles packet batches as we receive them from the channel
-    fn handle_packet_batches(&mut self, packet_batch_message: PacketBatchMessage) {
-        for packet_batch in packet_batch_message {
-            let packet_indices: Vec<_> = packet_batch
-                .into_iter()
-                .enumerate()
-                .filter_map(|(idx, p)| if !p.meta.discard() { Some(idx) } else { None })
-                .collect();
-
-            self.pending_transactions.extend(
-                unprocessed_packet_batches::deserialize_packets(&packet_batch, &packet_indices)
-                    .filter_map(|deserialized_packet| {
-                        TransactionPriority::try_new(
-                            deserialized_packet.immutable_section(),
-                            &self.bank,
-                        )
-                    })
-                    .map(|transaction| {
-                        if let Ok(account_locks) = transaction
-                            .transaction
-                            .get_account_locks(&self.bank.feature_set)
-                        {
-                            // Insert into readonly queues
-                            for account in account_locks.readonly {
-                                self.transactions_by_account
-                                    .entry(*account)
-                                    .or_default()
-                                    .reads
-                                    .insert(transaction.clone());
-                            }
-                            // Insert into writeonly queues
-                            for account in account_locks.writable {
-                                self.transactions_by_account
-                                    .entry(*account)
-                                    .or_default()
-                                    .writes
-                                    .insert(transaction.clone());
-                            }
-                        }
-
-                        transaction
-                    }),
-            );
+    /// Insert transaction into account queues
+    fn insert_transaction(&mut self, transaction: TransactionRef) {
+        if let Ok(account_locks) = transaction
+            .transaction
+            .get_account_locks(&self.bank.feature_set)
+        {
+            // Insert into readonly queues
+            for account in account_locks.readonly {
+                self.transactions_by_account
+                    .entry(*account)
+                    .or_default()
+                    .reads
+                    .insert(transaction.clone());
+            }
+            // Insert into writeonly queues
+            for account in account_locks.writable {
+                self.transactions_by_account
+                    .entry(*account)
+                    .or_default()
+                    .writes
+                    .insert(transaction.clone());
+            }
         }
-    }
 
-    /// Handle completed transactions
-    fn handle_completed_transaction(&mut self, transaction: TransactionMessage) {
-        self.update_queues_on_completed_transaction(&transaction);
-        self.push_unblocked_transactions(transaction.transaction.signature());
-    }
-
-    /// Sets the bank that we're scheduling for
-    fn set_bank(&mut self, bank: Arc<Bank>) {
-        self.bank = bank;
-    }
-
-    /// Sets the batch size
-    fn set_batch_size(&mut self, batch_size: usize) {
-        self.max_batch_size = batch_size;
+        self.pending_transactions.push(transaction);
     }
 
     /// Update account queues on transaction completion
@@ -327,7 +317,7 @@ impl TransactionScheduler {
                 self.transactions_by_account
                     .get_mut(account)
                     .unwrap()
-                    .handle_completed_transaction(transaction, true);
+                    .handle_schedule_transaction(transaction, true);
             }
         }
     }
@@ -342,93 +332,6 @@ struct AccountTransactionQueue {
     writes: BTreeSet<TransactionRef>,
     /// Tracks currently scheduled transactions on the account
     scheduled_lock: AccountLock,
-}
-
-/// Tracks the currently scheduled lock type and the lowest-fee blocking transaction
-#[derive(Debug, Default)]
-struct AccountLock {
-    lock: AccountLockKind,
-    count: usize,
-    lowest_priority_transaction: Option<TransactionRef>,
-}
-
-#[derive(Debug)]
-enum AccountLockKind {
-    None,
-    Read,
-    Write,
-}
-
-impl Default for AccountLockKind {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-impl AccountLockKind {
-    fn is_none(&self) -> bool {
-        match self {
-            Self::None => true,
-            _ => false,
-        }
-    }
-
-    fn is_write(&self) -> bool {
-        match self {
-            Self::Write => true,
-            _ => false,
-        }
-    }
-
-    fn is_read(&self) -> bool {
-        match self {
-            Self::Read => true,
-            _ => false,
-        }
-    }
-}
-
-impl AccountLock {
-    fn lock_on_transaction(&mut self, transaction: &TransactionRef, is_write: bool) {
-        if is_write {
-            assert!(self.lock.is_none()); // no outstanding lock if scheduling a write
-            assert!(self.lowest_priority_transaction.is_none());
-
-            self.lock = AccountLockKind::Write;
-            self.lowest_priority_transaction = Some(transaction.clone());
-        } else {
-            assert!(!self.lock.is_write()); // no outstanding write lock if scheduling a read
-            self.lock = AccountLockKind::Read;
-
-            match self.lowest_priority_transaction.as_ref() {
-                Some(tx) => {
-                    if transaction.cmp(tx).is_lt() {
-                        self.lowest_priority_transaction = Some(transaction.clone());
-                    }
-                }
-                None => self.lowest_priority_transaction = Some(transaction.clone()),
-            }
-        }
-
-        self.count += 1;
-    }
-
-    fn unlock_on_transaction(&mut self, transaction: &TransactionRef, is_write: bool) {
-        assert!(self.lowest_priority_transaction.is_some());
-        if is_write {
-            assert!(self.lock.is_write());
-            assert!(self.count == 1);
-        } else {
-            assert!(self.lock.is_read());
-            assert!(self.count >= 1);
-        }
-
-        self.count -= 1;
-        if self.count == 0 {
-            self.lock = AccountLockKind::None;
-            self.lowest_priority_transaction = None;
-        }
-    }
 }
 
 impl AccountTransactionQueue {
@@ -463,8 +366,7 @@ impl AccountTransactionQueue {
             assert!(self.reads.remove(transaction));
         }
         // unlock
-        self.scheduled_lock
-            .unlock_on_transaction(transaction, is_write);
+        self.scheduled_lock.unlock_on_transaction(is_write);
 
         // Returns true if there are no more transactions in this account queue
         self.writes.len() == 0 && self.reads.len() == 0
@@ -507,6 +409,93 @@ impl AccountTransactionQueue {
     }
 }
 
+/// Tracks the currently scheduled lock type and the lowest-fee blocking transaction
+#[derive(Debug, Default)]
+struct AccountLock {
+    lock: AccountLockKind,
+    count: usize,
+    lowest_priority_transaction: Option<TransactionRef>,
+}
+
+impl AccountLock {
+    fn lock_on_transaction(&mut self, transaction: &TransactionRef, is_write: bool) {
+        if is_write {
+            assert!(self.lock.is_none()); // no outstanding lock if scheduling a write
+            assert!(self.lowest_priority_transaction.is_none());
+
+            self.lock = AccountLockKind::Write;
+            self.lowest_priority_transaction = Some(transaction.clone());
+        } else {
+            assert!(!self.lock.is_write()); // no outstanding write lock if scheduling a read
+            self.lock = AccountLockKind::Read;
+
+            match self.lowest_priority_transaction.as_ref() {
+                Some(tx) => {
+                    if transaction.cmp(tx).is_lt() {
+                        self.lowest_priority_transaction = Some(transaction.clone());
+                    }
+                }
+                None => self.lowest_priority_transaction = Some(transaction.clone()),
+            }
+        }
+
+        self.count += 1;
+    }
+
+    fn unlock_on_transaction(&mut self, is_write: bool) {
+        assert!(self.lowest_priority_transaction.is_some());
+        if is_write {
+            assert!(self.lock.is_write());
+            assert!(self.count == 1);
+        } else {
+            assert!(self.lock.is_read());
+            assert!(self.count >= 1);
+        }
+
+        self.count -= 1;
+        if self.count == 0 {
+            self.lock = AccountLockKind::None;
+            self.lowest_priority_transaction = None;
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AccountLockKind {
+    None,
+    Read,
+    Write,
+}
+
+impl Default for AccountLockKind {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl AccountLockKind {
+    fn is_none(&self) -> bool {
+        match self {
+            Self::None => true,
+            _ => false,
+        }
+    }
+
+    fn is_write(&self) -> bool {
+        match self {
+            Self::Write => true,
+            _ => false,
+        }
+    }
+
+    fn is_read(&self) -> bool {
+        match self {
+            Self::Read => true,
+            _ => false,
+        }
+    }
+}
+
 /// Helper function to get the lowest-priority blocking transaction
 fn upper_bound<'a, T: Ord>(tree: &'a BTreeSet<T>, item: T) -> Option<&'a T> {
     use std::ops::Bound::*;
@@ -525,8 +514,13 @@ fn option_min<T: Ord>(lhs: Option<T>, rhs: Option<T>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use solana_sdk::{hash::Hash, signature::Keypair, system_transaction};
+    use {
+        super::*,
+        solana_perf::packet::Packet,
+        solana_sdk::{
+            hash::Hash, signature::Keypair, signer::Signer, system_program, system_transaction,
+        },
+    };
 
     fn create_transfer(from: &Keypair, to: &Pubkey, priority: u64) -> Arc<TransactionPriority> {
         Arc::new(TransactionPriority {
@@ -535,6 +529,158 @@ mod tests {
                 system_transaction::transfer(from, to, 0, Hash::default()),
             ),
         })
+    }
+
+    fn create_scheduler() -> (TransactionScheduler, Vec<Receiver<TransactionBatchMessage>>) {
+        const NUM_BANKING_THREADS: usize = 1;
+
+        let (_, pb_rx) = crossbeam_channel::unbounded();
+        let mut tb_txs = Vec::with_capacity(NUM_BANKING_THREADS);
+        let mut tb_rxs = Vec::with_capacity(NUM_BANKING_THREADS);
+        for _ in 0..NUM_BANKING_THREADS {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            tb_txs.push(tx);
+            tb_rxs.push(rx);
+        }
+        let (_, ct_rx) = crossbeam_channel::unbounded();
+
+        let scheduler = TransactionScheduler {
+            packet_batch_receiver: pb_rx,
+            transaction_batch_senders: tb_txs,
+            completed_transaction_receiver: ct_rx,
+            bank: Arc::new(Bank::default_for_tests()),
+            max_batch_size: 128,
+            exit: Arc::new(AtomicBool::default()),
+            pending_transactions: BinaryHeap::default(),
+            transactions_by_account: HashMap::default(),
+            blocked_transactions: HashMap::default(),
+        };
+
+        (scheduler, tb_rxs)
+    }
+
+    #[test]
+    fn test_transaction_scheduler_insert_transaction() {
+        let (mut scheduler, _) = create_scheduler();
+
+        let account1 = Keypair::new();
+        let account2 = Pubkey::new_unique();
+        let tx1 = create_transfer(&account1, &account2, 1);
+        scheduler.insert_transaction(tx1.clone());
+
+        assert_eq!(1, scheduler.pending_transactions.len());
+        assert_eq!(3, scheduler.transactions_by_account.len());
+
+        assert!(scheduler
+            .transactions_by_account
+            .contains_key(&account1.pubkey()));
+        assert_eq!(
+            1,
+            scheduler
+                .transactions_by_account
+                .get(&account1.pubkey())
+                .unwrap()
+                .writes
+                .len()
+        );
+
+        assert!(scheduler.transactions_by_account.contains_key(&account2));
+        assert_eq!(
+            1,
+            scheduler
+                .transactions_by_account
+                .get(&account2)
+                .unwrap()
+                .writes
+                .len()
+        );
+
+        assert!(scheduler
+            .transactions_by_account
+            .contains_key(&system_program::id()));
+        assert_eq!(
+            1,
+            scheduler
+                .transactions_by_account
+                .get(&system_program::id())
+                .unwrap()
+                .reads
+                .len()
+        );
+
+        let tx2 = create_transfer(&account1, &account2, 2);
+        scheduler.insert_transaction(tx2.clone());
+
+        assert_eq!(2, scheduler.pending_transactions.len());
+        assert_eq!(3, scheduler.transactions_by_account.len());
+        assert_eq!(
+            2,
+            scheduler
+                .transactions_by_account
+                .get(&account1.pubkey())
+                .unwrap()
+                .writes
+                .len()
+        );
+        assert_eq!(
+            2,
+            scheduler
+                .transactions_by_account
+                .get(&account2)
+                .unwrap()
+                .writes
+                .len()
+        );
+        assert_eq!(
+            2,
+            scheduler
+                .transactions_by_account
+                .get(&system_program::id())
+                .unwrap()
+                .reads
+                .len()
+        );
+    }
+
+    #[test]
+    fn test_transaction_scheduler_conflicting_writes() {
+        let (mut scheduler, tb_rxs) = create_scheduler();
+
+        let account1 = Keypair::new();
+        let account2 = Pubkey::new_unique();
+        let tx1 = create_transfer(&account1, &account2, 1);
+        let tx2 = create_transfer(&account1, &account2, 2);
+        scheduler.insert_transaction(tx1.clone());
+        scheduler.insert_transaction(tx2.clone());
+
+        scheduler.do_scheduling(); // should only schedule tx2, since it has higher priority and conflicts with tx1
+        let maybe_tx_batch = tb_rxs[0].try_recv();
+        assert!(maybe_tx_batch.is_ok());
+        let tx_batch = maybe_tx_batch.unwrap();
+        assert_eq!(1, tx_batch.len());
+        assert_eq!(tx2, tx_batch[0]);
+    }
+
+    #[test]
+    fn test_transaction_scheduler_non_conflicting_writes() {
+        let (mut scheduler, tb_rxs) = create_scheduler();
+
+        let account1 = Keypair::new();
+        let account2 = Pubkey::new_unique();
+        let account3 = Keypair::new();
+        let account4 = Pubkey::new_unique();
+        let tx1 = create_transfer(&account1, &account2, 1);
+        let tx2 = create_transfer(&account3, &account4, 2);
+        scheduler.insert_transaction(tx1.clone());
+        scheduler.insert_transaction(tx2.clone());
+
+        scheduler.do_scheduling(); // should scheduled both transactions since they don't conflict
+        let maybe_tx_batch = tb_rxs[0].try_recv();
+        assert!(maybe_tx_batch.is_ok());
+        let tx_batch = maybe_tx_batch.unwrap();
+        assert_eq!(2, tx_batch.len());
+        assert_eq!(tx2, tx_batch[0]); // tx2 still comes first since it was higher-priority
+        assert_eq!(tx1, tx_batch[1]);
     }
 
     #[test]
