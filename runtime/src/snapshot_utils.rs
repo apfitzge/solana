@@ -56,6 +56,7 @@ use {
 
 mod archive_format;
 pub use archive_format::*;
+use crossbeam_channel::select;
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
 pub const SNAPSHOT_ARCHIVE_DOWNLOAD_DIR: &str = "remote";
@@ -1281,6 +1282,9 @@ fn index_snapshot(
         .for_each(|x| file_sender.send(x).unwrap());
     drop(file_sender); // manually drop otherwise indexing threads will run indefinitely
 
+    let num_slots = snapshot_storages.len();
+    let processed_slot_count = Arc::new(AtomicU32::new(0));
+
     for _ in 0..num_threads {
         index_snapshot_worker(
             &thread_pool,
@@ -1292,6 +1296,7 @@ fn index_snapshot(
             storage_files.clone(),
             storage.clone(),
             uncleaned_pubkeys.clone(),
+            processed_slot_count.clone(),
             exit_sender.clone(),
         );
     }
@@ -1299,8 +1304,23 @@ fn index_snapshot(
 
     // wait for all indexing threads to finish
     let mut accounts_data_len = 0;
-    while let Ok(thread_accounts_data_len) = exit_receiver.recv() {
-        accounts_data_len += thread_accounts_data_len;
+    let mut last_log_time = Instant::now();
+    loop {
+        select! {
+            recv(exit_receiver) -> maybe_thread_accounts_data_len => {
+                match maybe_thread_accounts_data_len {
+                    Ok(thread_accounts_data_len) => accounts_data_len += thread_accounts_data_len,
+                    Err(_) => break,
+                }
+            }
+            default(std::time::Duration::from_millis(100)) => {
+                let now = Instant::now();
+                if now.duration_since(last_log_time).as_millis() >= 2000 {
+                    info!("indexed {}/{} slots", processed_slot_count.load(std::sync::atomic::Ordering::Relaxed), num_slots);
+                    last_log_time = now;
+                }
+            }
+        }
     }
 
     let storage = Arc::try_unwrap(storage).unwrap();
@@ -1320,6 +1340,7 @@ fn index_snapshot_worker(
     storage_files: Arc<DashMap<Slot, SlotStoreFiles>>,
     storage: Arc<DashMap<Slot, SlotStores>>,
     uncleaned_pubkeys: Arc<DashMap<Slot, HashSet<Pubkey>>>,
+    processed_slot_count: Arc<AtomicU32>,
     exit_sender: Sender<u64>,
 ) {
     thread_pool.spawn(move || {
@@ -1332,6 +1353,7 @@ fn index_snapshot_worker(
             &storage_files,
             &storage,
             &uncleaned_pubkeys,
+            &processed_slot_count,
         );
         exit_sender.send(accounts_data_len).unwrap();
     });
@@ -1347,13 +1369,12 @@ pub(crate) fn index_snapshot_storages<I>(
     storage_files: &DashMap<Slot, SlotStoreFiles>,
     storage: &DashMap<Slot, SlotStores>,
     uncleaned_pubkeys: &DashMap<Slot, HashSet<Pubkey>>,
+    processed_slot_count: &AtomicU32,
 ) -> u64
 where
     I: Iterator<Item = (PathBuf, String)>,
 {
     let mut accounts_data_len = 0;
-    let mut last_log_time = Instant::now();
-    let mut count = 0;
     for (path_buf, filename) in file_receiver {
         if let Some(SnapshotFileKind::StorageFile) = get_snapshot_file_kind(&filename) {
             let (slot, slot_complete) = index_snapshot_insert_slot_storage_file(
@@ -1373,14 +1394,9 @@ where
                     storage,
                     uncleaned_pubkeys,
                 );
-            }
-        }
 
-        count += 1;
-        let now = Instant::now();
-        if now.duration_since(last_log_time).as_millis() >= 2000 {
-            info!("indexed {count} entries so far...");
-            last_log_time = now;
+                processed_slot_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
         }
     }
 
