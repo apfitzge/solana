@@ -46,7 +46,7 @@ use {
         path::{Path, PathBuf},
         process::ExitStatus,
         str::FromStr,
-        sync::{atomic::AtomicU32, Arc, RwLock},
+        sync::{atomic::AtomicU32, Arc, Mutex, RwLock},
         time::Instant,
     },
     tar::{self, Archive},
@@ -1222,6 +1222,8 @@ fn process_snapshot_file(path_buf: PathBuf) -> HashMap<Slot, HashMap<usize, usiz
     snapshot_stream_to_snapshot_storages(SerdeStyle::Newer, &mut stream).unwrap()
 }
 
+type SlotStoreFiles = Mutex<HashSet<(PathBuf, String)>>; // alias for snapshot storage path/filename sets
+
 fn index_snapshot(
     accounts_index: Arc<AccountInfoAccountsIndex>,
     account_secondary_indexes: Arc<AccountSecondaryIndexes>,
@@ -1266,7 +1268,7 @@ fn index_snapshot(
     for (slot, slot_store_lens) in snapshot_storages.iter() {
         storage_files.insert(
             *slot,
-            Arc::new(RwLock::new(HashSet::with_capacity(slot_store_lens.len()))),
+            Mutex::new(HashSet::with_capacity(slot_store_lens.len())),
         );
     }
 
@@ -1307,6 +1309,7 @@ fn index_snapshot(
     (storage, uncleaned_pubkeys, accounts_data_len)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_snapshot_worker(
     thread_pool: &ThreadPool,
     file_receiver: Receiver<(PathBuf, String)>,
@@ -1314,7 +1317,7 @@ fn index_snapshot_worker(
     account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     snapshot_storage_lengths: Arc<HashMap<Slot, HashMap<usize, usize>>>,
     next_append_vec_id: Arc<AtomicU32>,
-    storage_files: Arc<DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>>,
+    storage_files: Arc<DashMap<Slot, SlotStoreFiles>>,
     storage: Arc<DashMap<Slot, SlotStores>>,
     uncleaned_pubkeys: Arc<DashMap<Slot, HashSet<Pubkey>>>,
     exit_sender: Sender<u64>,
@@ -1341,7 +1344,7 @@ pub(crate) fn index_snapshot_storages<I>(
     account_secondary_indexes: &AccountSecondaryIndexes,
     snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
     next_append_vec_id: &AtomicU32,
-    storage_files: &DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>,
+    storage_files: &DashMap<Slot, SlotStoreFiles>,
     storage: &DashMap<Slot, SlotStores>,
     uncleaned_pubkeys: &DashMap<Slot, HashSet<Pubkey>>,
 ) -> u64
@@ -1362,13 +1365,13 @@ where
             if slot_complete {
                 accounts_data_len += index_snapshot_process_slot(
                     slot,
-                    &accounts_index,
-                    &account_secondary_indexes,
-                    &snapshot_storage_lengths,
-                    &next_append_vec_id,
-                    &storage_files,
-                    &storage,
-                    &uncleaned_pubkeys,
+                    accounts_index,
+                    account_secondary_indexes,
+                    snapshot_storage_lengths,
+                    next_append_vec_id,
+                    storage_files,
+                    storage,
+                    uncleaned_pubkeys,
                 );
             }
         }
@@ -1386,7 +1389,7 @@ where
 
 fn index_snapshot_insert_slot_storage_file(
     snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
-    storage_files: &DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>,
+    storage_files: &DashMap<Slot, SlotStoreFiles>,
     path_buf: PathBuf,
     filename: String,
 ) -> (Slot, bool) {
@@ -1405,7 +1408,7 @@ fn index_snapshot_process_slot(
     account_secondary_indexes: &AccountSecondaryIndexes,
     snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
     next_append_vec_id: &AtomicU32,
-    storage_files: &DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>,
+    storage_files: &DashMap<Slot, SlotStoreFiles>,
     storage: &DashMap<Slot, SlotStores>,
     uncleaned_pubkeys: &DashMap<Slot, HashSet<Pubkey>>,
 ) -> u64 {
@@ -1439,16 +1442,16 @@ fn index_snapshot_process_slot(
 fn index_snapshot_generate_slot_storages(
     slot: &Slot,
     snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
-    storage_files: &DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>,
+    storage_files: &DashMap<Slot, SlotStoreFiles>,
     storage: &DashMap<Slot, SlotStores>,
     next_append_vec_id: &AtomicU32,
 ) {
-    let slot_storage_files = storage_files.get(&slot).unwrap();
-    let slot_storage_files_read_lock = slot_storage_files.read().unwrap();
+    let slot_storage_files = storage_files.get(slot).unwrap();
+    let slot_storage_files_lock = slot_storage_files.lock().unwrap();
 
     // Read all append the appendvecs for this slot and insert into storage
     let slot_stores = Arc::new(RwLock::new(
-        slot_storage_files_read_lock
+        slot_storage_files_lock
             .iter()
             .map(|(path_buf, filename)| {
                 let (old_append_vec_id, new_append_vec_id, new_path) =
@@ -1520,23 +1523,21 @@ fn create_account_storage_entry(
         .unwrap();
 
     let (accounts, num_accounts) = AppendVec::new_from_file(&append_vec_path, current_len).unwrap();
-    let storage = Arc::new(AccountStorageEntry::new_existing(
+    Arc::new(AccountStorageEntry::new_existing(
         *slot,
         new_append_vec_id,
         accounts,
         num_accounts,
-    ));
-
-    storage
+    ))
 }
 
 // write-lock storage files, insert new path/file, and return the size
 fn index_snapshot_insert_storage_file(
-    slot_storage_files: &RwLock<HashSet<(PathBuf, String)>>,
+    slot_storage_files: &SlotStoreFiles,
     path_buf: PathBuf,
     filename: String,
 ) -> usize {
-    let mut slot_storages = slot_storage_files.write().unwrap();
+    let mut slot_storages = slot_storage_files.lock().unwrap();
     slot_storages.insert((path_buf, filename));
     slot_storages.len()
 }
