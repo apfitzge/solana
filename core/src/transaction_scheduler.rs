@@ -181,7 +181,7 @@ impl TransactionScheduler {
         }
     }
 
-    /// Insert transaction into account queues
+    /// Insert transaction into account queues and pending queue
     fn insert_transaction(&mut self, transaction: TransactionRef) {
         if let Ok(account_locks) = transaction
             .transaction
@@ -239,7 +239,7 @@ impl TransactionScheduler {
         }
     }
 
-    /// Check for unblocked transactions on `signature` and push into `pending_transaction`
+    /// Check for unblocked transactions on `signature` and push into `pending_transactions`
     fn push_unblocked_transactions(&mut self, signature: &Signature) {
         if let Some(blocked_transactions) = self.blocked_transactions.remove(signature) {
             self.pending_transactions
@@ -248,8 +248,11 @@ impl TransactionScheduler {
     }
 
     /// Tries to schedule a transaction:
-    ///     - If it cannot be scheduled, it is inserted into `blocked_transaction` with the current lowest priority blocking transaction
+    ///     - If it cannot be scheduled, it is inserted into `blocked_transaction`
+    ///         with the current lowest priority blocking transaction's signature as the key
     ///     - If it can be scheduled, locks are taken, it is pushed into the provided batch.
+    ///
+    /// Returns true if the transaction was scheduled, and false otherwise
     fn try_schedule_transaction(
         &mut self,
         transaction: TransactionRef,
