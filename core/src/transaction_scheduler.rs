@@ -174,7 +174,10 @@ impl TransactionScheduler {
             .into_iter()
             .zip(self.transaction_batch_senders.iter())
         {
-            sender.send(batch).unwrap();
+            // Only send if we have a non-empty batch
+            if batch.len() > 0 {
+                sender.send(batch).unwrap();
+            }
         }
     }
 
@@ -518,7 +521,13 @@ mod tests {
         super::*,
         solana_perf::packet::Packet,
         solana_sdk::{
-            hash::Hash, signature::Keypair, signer::Signer, system_program, system_transaction,
+            hash::Hash,
+            instruction::{AccountMeta, Instruction},
+            message::Message,
+            signature::Keypair,
+            signer::Signer,
+            system_program, system_transaction,
+            transaction::Transaction,
         },
     };
 
@@ -528,6 +537,35 @@ mod tests {
             transaction: SanitizedTransaction::from_transaction_for_tests(
                 system_transaction::transfer(from, to, 0, Hash::default()),
             ),
+        })
+    }
+
+    fn create_transaction(
+        reads: &[&Keypair],
+        writes: &[&Keypair],
+        priority: u64,
+    ) -> Arc<TransactionPriority> {
+        let mut accounts: Vec<_> = reads
+            .into_iter()
+            .map(|account| AccountMeta::new_readonly(account.pubkey(), false))
+            .collect();
+        accounts.extend(
+            writes
+                .into_iter()
+                .map(|account| AccountMeta::new(account.pubkey(), false)),
+        );
+
+        let instruction = Instruction {
+            program_id: Pubkey::default(),
+            accounts,
+            data: vec![],
+        };
+        let message = Message::new(&[instruction], Some(&writes.first().unwrap().pubkey()));
+        let transaction = Transaction::new(&[writes[0].to_owned()], message, Hash::default());
+        let transaction = SanitizedTransaction::from_transaction_for_tests(transaction);
+        Arc::new(TransactionPriority {
+            priority,
+            transaction,
         })
     }
 
@@ -557,6 +595,39 @@ mod tests {
         };
 
         (scheduler, tb_rxs)
+    }
+
+    fn check_batch(
+        rx: &Receiver<TransactionBatchMessage>,
+        expected_batch: &[TransactionRef],
+    ) -> TransactionBatchMessage {
+        let maybe_tx_batch = rx.try_recv();
+
+        if expected_batch.len() > 0 {
+            assert!(maybe_tx_batch.is_ok());
+            let tx_batch = maybe_tx_batch.unwrap();
+
+            assert_eq!(
+                expected_batch.len(),
+                tx_batch.len(),
+                "expected: {:#?}, actual: {:#?}",
+                expected_batch,
+                tx_batch
+            );
+            for (expected_tx, tx) in expected_batch.into_iter().zip(tx_batch.iter()) {
+                assert_eq!(expected_tx, tx);
+            }
+            tx_batch
+        } else {
+            assert!(maybe_tx_batch.is_err());
+            TransactionBatchMessage::default()
+        }
+    }
+
+    fn complete_batch(scheduler: &mut TransactionScheduler, batch: &[TransactionRef]) {
+        for transaction in batch.into_iter().cloned() {
+            scheduler.handle_completed_transaction(transaction);
+        }
     }
 
     #[test]
@@ -653,12 +724,33 @@ mod tests {
         scheduler.insert_transaction(tx1.clone());
         scheduler.insert_transaction(tx2.clone());
 
-        scheduler.do_scheduling(); // should only schedule tx2, since it has higher priority and conflicts with tx1
-        let maybe_tx_batch = tb_rxs[0].try_recv();
-        assert!(maybe_tx_batch.is_ok());
-        let tx_batch = maybe_tx_batch.unwrap();
-        assert_eq!(1, tx_batch.len());
-        assert_eq!(tx2, tx_batch[0]);
+        // First batch should only be tx2, since it has higher priority and conflicts with tx1
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[tx2.clone()]);
+            complete_batch(&mut scheduler, &tx_batch);
+        }
+
+        // Second batch should have tx1, since it is now unblocked
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[tx1.clone()]);
+
+            // Nothing left to schedule while we wait for the transactions to be completed
+            {
+                scheduler.do_scheduling();
+                let maybe_tx_batch = tb_rxs[0].try_recv();
+                assert!(maybe_tx_batch.is_err());
+            }
+
+            complete_batch(&mut scheduler, &tx_batch);
+        }
+
+        // Nothing left to schedule
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[]);
+        }
     }
 
     #[test]
@@ -674,13 +766,163 @@ mod tests {
         scheduler.insert_transaction(tx1.clone());
         scheduler.insert_transaction(tx2.clone());
 
-        scheduler.do_scheduling(); // should scheduled both transactions since they don't conflict
-        let maybe_tx_batch = tb_rxs[0].try_recv();
-        assert!(maybe_tx_batch.is_ok());
-        let tx_batch = maybe_tx_batch.unwrap();
-        assert_eq!(2, tx_batch.len());
-        assert_eq!(tx2, tx_batch[0]); // tx2 still comes first since it was higher-priority
-        assert_eq!(tx1, tx_batch[1]);
+        // First batch should contain tx2 and tx1 since they don't conflict
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[tx2.clone(), tx1.clone()]);
+            complete_batch(&mut scheduler, &tx_batch);
+        }
+
+        // Nothing left to schedule
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[]);
+        }
+    }
+
+    #[test]
+    fn test_transaction_scheduler_higher_priority_transaction_comes_in_after_scheduling() {
+        let (mut scheduler, tb_rxs) = create_scheduler();
+
+        let account1 = Keypair::new();
+        let account2 = Pubkey::new_unique();
+        let tx1 = create_transfer(&account1, &account2, 1);
+        let tx2 = create_transfer(&account1, &account2, 2);
+        scheduler.insert_transaction(tx1.clone());
+
+        // First batch should only have tx1 since it is the only transaction inserted
+        scheduler.do_scheduling();
+        let tx_batch1 = check_batch(&tb_rxs[0], &[tx1.clone()]);
+
+        // Higher priority transaction (conflicting with tx1) comes in AFTER scheduling
+        scheduler.insert_transaction(tx2.clone());
+
+        // Nothing to schedule while tx_batch1 is outstanding
+        scheduler.do_scheduling();
+        let _ = check_batch(&tb_rxs[0], &[]);
+
+        // Once tx1 completes, we are able to schedule tx2
+        complete_batch(&mut scheduler, &tx_batch1);
+        scheduler.do_scheduling();
+        let tx_batch2 = check_batch(&tb_rxs[0], &[tx2.clone()]);
+        complete_batch(&mut scheduler, &tx_batch2);
+
+        // Nothing to schedule since nothing is left
+        scheduler.do_scheduling();
+        let _ = check_batch(&tb_rxs[0], &[]);
+    }
+
+    /// Tests the following case:
+    /// 400: A(W)      C(R)
+    /// 200:           C(R)      F(W)
+    /// 500: A(W) B(W)
+    /// 300:           C(R) E(W)
+    /// 350:           C(W) G(W)
+    #[test]
+    fn test_transaction_scheduler_case0() {
+        let (mut scheduler, tb_rxs) = create_scheduler();
+
+        let a = Keypair::new();
+        let b = Keypair::new();
+        let c = Keypair::new();
+        let e = Keypair::new();
+        let f = Keypair::new();
+        let g = Keypair::new();
+
+        let tx_400 = create_transaction(&[&c], &[&a], 400);
+        let tx_200 = create_transaction(&[&c], &[&f], 200);
+        let tx_500 = create_transaction(&[], &[&a, &b], 500);
+        let tx_300 = create_transaction(&[&c], &[&e], 300);
+        let tx_350 = create_transaction(&[], &[&c, &g], 350);
+
+        scheduler.insert_transaction(tx_400.clone());
+        scheduler.insert_transaction(tx_200.clone());
+        scheduler.insert_transaction(tx_500.clone());
+        scheduler.insert_transaction(tx_300.clone());
+        scheduler.insert_transaction(tx_350.clone());
+
+        // First batch should only have 500, since the next highest tx (400) is blocked
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[tx_500.clone()]);
+            complete_batch(&mut scheduler, &tx_batch);
+        }
+
+        // Second batch should only have 400, since the next highest tx (350) is blocked
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[tx_400.clone()]);
+            complete_batch(&mut scheduler, &tx_batch);
+        }
+
+        // Third batch should only have 350, since the next highest txs (300, 200) are blocked
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[tx_350.clone()]);
+            complete_batch(&mut scheduler, &tx_batch);
+        }
+
+        // Final batch should have (300, 200)
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[tx_300.clone(), tx_200.clone()]);
+            complete_batch(&mut scheduler, &tx_batch);
+        }
+
+        // Nothing left to schedule
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[]);
+        }
+    }
+
+    /// Tests the following case:
+    /// 400: A(W)      C(R)
+    /// 200:           C(R)      F(W)
+    /// 500: A(W) B(W)
+    /// 300:           C(R) E(W)
+    #[test]
+    fn test_transaction_scheduler_case1() {
+        let (mut scheduler, tb_rxs) = create_scheduler();
+
+        let a = Keypair::new();
+        let b = Keypair::new();
+        let c = Keypair::new();
+        let e = Keypair::new();
+        let f = Keypair::new();
+
+        let tx_400 = create_transaction(&[&c], &[&a], 400);
+        let tx_200 = create_transaction(&[&c], &[&f], 200);
+        let tx_500 = create_transaction(&[], &[&a, &b], 500);
+        let tx_300 = create_transaction(&[&c], &[&e], 300);
+
+        scheduler.insert_transaction(tx_400.clone());
+        scheduler.insert_transaction(tx_200.clone());
+        scheduler.insert_transaction(tx_500.clone());
+        scheduler.insert_transaction(tx_300.clone());
+
+        // First batch should have (500, 300, 200). 500 blocks 400, but 300 and 200 locks do not conflict with 400.
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(
+                &tb_rxs[0],
+                &[tx_500.clone(), tx_300.clone(), tx_200.clone()],
+            );
+            complete_batch(&mut scheduler, &tx_batch);
+        }
+
+        // Second batch should only have 400
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[tx_400.clone()]);
+            complete_batch(&mut scheduler, &tx_batch);
+        }
+
+        // Nothing left to schedule
+        {
+            scheduler.do_scheduling();
+            let tx_batch = check_batch(&tb_rxs[0], &[]);
+        }
     }
 
     #[test]
