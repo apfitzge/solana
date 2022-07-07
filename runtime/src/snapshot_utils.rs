@@ -1170,7 +1170,7 @@ fn unarchive_snapshot<P>(
     snapshot_archive_path: P,
     archive_format: ArchiveFormat,
     untar_parallel_divisions: usize,
-    sender: crossbeam_channel::Sender<(PathBuf, String)>,
+    sender: crossbeam_channel::Sender<PathBuf>,
 ) where
     P: AsRef<Path>,
 {
@@ -1223,14 +1223,14 @@ fn process_snapshot_file(path_buf: PathBuf) -> HashMap<Slot, HashMap<usize, usiz
     snapshot_stream_to_snapshot_storages(SerdeStyle::Newer, &mut stream).unwrap()
 }
 
-type SlotStoreFiles = Mutex<HashSet<(PathBuf, String)>>; // alias for snapshot storage path/filename sets
+type SlotStoreFiles = Mutex<Vec<(PathBuf, String)>>; // alias for snapshot storage path/filename sets
 
 fn index_snapshot(
     accounts_index: Arc<AccountInfoAccountsIndex>,
     account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     next_append_vec_id: Arc<AtomicU32>,
-    file_sender: Sender<(PathBuf, String)>,
-    file_receiver: Receiver<(PathBuf, String)>,
+    file_sender: Sender<PathBuf>,
+    file_receiver: Receiver<PathBuf>,
     num_threads: usize,
 ) -> (
     DashMap<Slot, SlotStores>,
@@ -1241,13 +1241,14 @@ fn index_snapshot(
     // Create a vector here to store them, with an initial capacity we don't expect to exceed.
     let mut snapshot_storages_to_process = Vec::with_capacity(1024);
     let snapshot_storages = Arc::new(loop {
-        if let Ok((path_buf, filename)) = file_receiver.recv() {
-            match get_snapshot_file_kind(&filename) {
+        if let Ok(path_buf) = file_receiver.recv() {
+            let filename = path_buf.file_name().unwrap().to_str().unwrap();
+            match get_snapshot_file_kind(filename) {
                 Some(SnapshotFileKind::SnapshotFile) => {
                     break process_snapshot_file(path_buf);
                 }
                 Some(SnapshotFileKind::StorageFile) => {
-                    snapshot_storages_to_process.push((path_buf, filename));
+                    snapshot_storages_to_process.push(path_buf);
                 }
                 None => {} // do nothing for other kinds of files
             }
@@ -1267,10 +1268,7 @@ fn index_snapshot(
     let storage = Arc::new(DashMap::with_capacity(snapshot_storages.len()));
     let uncleaned_pubkeys = Arc::new(DashMap::with_capacity(snapshot_storages.len()));
     for (slot, slot_store_lens) in snapshot_storages.iter() {
-        storage_files.insert(
-            *slot,
-            Mutex::new(HashSet::with_capacity(slot_store_lens.len())),
-        );
+        storage_files.insert(*slot, Mutex::new(Vec::with_capacity(slot_store_lens.len())));
     }
 
     // create channels to receive accounts_data_len and wait for all workers to finish
@@ -1332,7 +1330,7 @@ fn index_snapshot(
 #[allow(clippy::too_many_arguments)]
 fn index_snapshot_worker(
     thread_pool: &ThreadPool,
-    file_receiver: Receiver<(PathBuf, String)>,
+    file_receiver: Receiver<PathBuf>,
     accounts_index: Arc<AccountInfoAccountsIndex>,
     account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     snapshot_storage_lengths: Arc<HashMap<Slot, HashMap<usize, usize>>>,
@@ -1372,10 +1370,11 @@ pub(crate) fn index_snapshot_storages<I>(
     processed_slot_count: &AtomicU32,
 ) -> u64
 where
-    I: Iterator<Item = (PathBuf, String)>,
+    I: Iterator<Item = PathBuf>,
 {
     let mut accounts_data_len = 0;
-    for (path_buf, filename) in file_receiver {
+    for path_buf in file_receiver {
+        let filename = path_buf.file_name().unwrap().to_str().unwrap().to_owned();
         if let Some(SnapshotFileKind::StorageFile) = get_snapshot_file_kind(&filename) {
             let (slot, slot_complete) = index_snapshot_insert_slot_storage_file(
                 snapshot_storage_lengths,
@@ -1471,7 +1470,7 @@ fn index_snapshot_generate_slot_storages(
             .iter()
             .map(|(path_buf, filename)| {
                 let (old_append_vec_id, new_append_vec_id, new_path) =
-                    index_snapshot_remap_storage_file(path_buf, filename, next_append_vec_id);
+                    index_snapshot_remap_storage_file(path_buf, &filename, next_append_vec_id);
                 let storage_entry = create_account_storage_entry(
                     snapshot_storage_lengths,
                     slot,
@@ -1554,7 +1553,7 @@ fn index_snapshot_insert_storage_file(
     filename: String,
 ) -> usize {
     let mut slot_storages = slot_storage_files.lock().unwrap();
-    slot_storages.insert((path_buf, filename));
+    slot_storages.push((path_buf, filename));
     slot_storages.len()
 }
 
@@ -1916,7 +1915,7 @@ fn streaming_unpack_snapshot_local<T: 'static + Read + std::marker::Send, F: Fn(
     ledger_dir: &Path,
     account_paths: &[PathBuf],
     untar_parallel_divisions: usize,
-    sender: crossbeam_channel::Sender<(PathBuf, String)>,
+    sender: crossbeam_channel::Sender<PathBuf>,
 ) {
     // a shared 'reader' that reads the decompressed stream once, keeps some history, and acts as a reader for multiple parallel archive readers
     let shared_buffer = SharedBuffer::new(reader());
@@ -2000,7 +1999,7 @@ fn streaming_untar_snapshot_file(
     account_paths: &[PathBuf],
     archive_format: ArchiveFormat,
     untar_parallel_divisions: usize,
-    sender: crossbeam_channel::Sender<(PathBuf, String)>,
+    sender: crossbeam_channel::Sender<PathBuf>,
 ) {
     let open_file = || File::open(&snapshot_tar).unwrap();
     match archive_format {

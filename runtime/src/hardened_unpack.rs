@@ -100,7 +100,7 @@ fn unpack_archive<'a, A: Read, C, D>(
 ) -> Result<()>
 where
     C: FnMut(&[&str], tar::EntryType) -> UnpackPath<'a>,
-    D: FnMut(PathBuf, Option<String>),
+    D: FnMut(PathBuf),
 {
     let mut apparent_total_size: u64 = 0;
     let mut actual_total_size: u64 = 0;
@@ -137,10 +137,6 @@ where
         }
 
         let parts: Vec<_> = parts.map(|p| p.unwrap()).collect();
-        let filename = parts
-            .as_slice()
-            .get(1)
-            .map(|filename| (*filename).to_owned());
         let unpack_dir = match entry_checker(parts.as_slice(), kind) {
             UnpackPath::Invalid => {
                 return Err(UnpackError::Archive(format!(
@@ -185,7 +181,7 @@ where
         set_perms(&entry_path_buf, mode)?;
 
         // Process entry after setting permissions
-        entry_processor(entry_path_buf, filename);
+        entry_processor(entry_path_buf);
 
         total_entries += 1;
         let now = Instant::now();
@@ -308,7 +304,7 @@ pub(crate) fn streaming_unpack_snapshot<A: Read>(
     ledger_dir: &Path,
     account_paths: &[PathBuf],
     parallel_selector: Option<ParallelSelector>,
-    sender: crossbeam_channel::Sender<(PathBuf, String)>,
+    sender: crossbeam_channel::Sender<PathBuf>,
 ) {
     assert!(!account_paths.is_empty());
     let mut i = 0;
@@ -346,11 +342,9 @@ pub(crate) fn streaming_unpack_snapshot<A: Read>(
                 UnpackPath::Invalid
             }
         },
-        |entry_path_buf, filename| {
-            if let Some(filename) = filename {
-                if entry_path_buf.is_file() {
-                    sender.send((entry_path_buf, filename)).unwrap();
-                }
+        |entry_path_buf| {
+            if entry_path_buf.is_file() {
+                sender.send(entry_path_buf).unwrap();
             }
         },
     )
@@ -401,7 +395,7 @@ pub fn unpack_snapshot<A: Read>(
                 UnpackPath::Invalid
             }
         },
-        |_, _| {},
+        |_| {},
     )
     .map(|_| unpacked_append_vec_map)
 }
@@ -515,7 +509,7 @@ fn unpack_genesis<A: Read>(
         max_genesis_archive_unpacked_size,
         MAX_GENESIS_ARCHIVE_UNPACKED_COUNT,
         |p, k| is_valid_genesis_archive_entry(unpack_dir, p, k),
-        |_, _| {},
+        |_| {},
     )
 }
 
