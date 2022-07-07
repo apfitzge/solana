@@ -1260,12 +1260,13 @@ fn index_snapshot(
         .unwrap();
 
     // Pre-allocate storage
+    let storage_files = Arc::new(DashMap::with_capacity(snapshot_storages.len()));
     let storage = Arc::new(DashMap::with_capacity(snapshot_storages.len()));
     let uncleaned_pubkeys = Arc::new(DashMap::with_capacity(snapshot_storages.len()));
     for (slot, slot_store_lens) in snapshot_storages.iter() {
-        storage.insert(
+        storage_files.insert(
             *slot,
-            Arc::new(RwLock::new(HashMap::with_capacity(slot_store_lens.len()))),
+            Arc::new(RwLock::new(HashSet::with_capacity(slot_store_lens.len()))),
         );
     }
 
@@ -1286,6 +1287,7 @@ fn index_snapshot(
             account_secondary_indexes.clone(),
             snapshot_storages.clone(),
             next_append_vec_id.clone(),
+            storage_files.clone(),
             storage.clone(),
             uncleaned_pubkeys.clone(),
             exit_sender.clone(),
@@ -1312,6 +1314,7 @@ fn index_snapshot_worker(
     account_secondary_indexes: Arc<AccountSecondaryIndexes>,
     snapshot_storage_lengths: Arc<HashMap<Slot, HashMap<usize, usize>>>,
     next_append_vec_id: Arc<AtomicU32>,
+    storage_files: Arc<DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>>,
     storage: Arc<DashMap<Slot, SlotStores>>,
     uncleaned_pubkeys: Arc<DashMap<Slot, HashSet<Pubkey>>>,
     exit_sender: Sender<u64>,
@@ -1323,6 +1326,7 @@ fn index_snapshot_worker(
             &account_secondary_indexes,
             &snapshot_storage_lengths,
             &next_append_vec_id,
+            &storage_files,
             &storage,
             &uncleaned_pubkeys,
         );
@@ -1337,6 +1341,7 @@ pub(crate) fn index_snapshot_storages<I>(
     account_secondary_indexes: &AccountSecondaryIndexes,
     snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
     next_append_vec_id: &AtomicU32,
+    storage_files: &DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>,
     storage: &DashMap<Slot, SlotStores>,
     uncleaned_pubkeys: &DashMap<Slot, HashSet<Pubkey>>,
 ) -> u64
@@ -1348,16 +1353,24 @@ where
     let mut count = 0;
     for (path_buf, filename) in file_receiver {
         if let Some(SnapshotFileKind::StorageFile) = get_snapshot_file_kind(&filename) {
-            accounts_data_len += index_snapshot_process_storage_file(
+            let (slot, slot_complete) = index_snapshot_insert_slot_storage_file(
+                snapshot_storage_lengths,
+                storage_files,
                 path_buf,
                 filename,
-                &accounts_index,
-                &account_secondary_indexes,
-                &snapshot_storage_lengths,
-                &next_append_vec_id,
-                &storage,
-                &uncleaned_pubkeys,
             );
+            if slot_complete {
+                accounts_data_len += index_snapshot_process_slot(
+                    slot,
+                    &accounts_index,
+                    &account_secondary_indexes,
+                    &snapshot_storage_lengths,
+                    &next_append_vec_id,
+                    &storage_files,
+                    &storage,
+                    &uncleaned_pubkeys,
+                );
+            }
         }
 
         count += 1;
@@ -1371,49 +1384,117 @@ where
     accounts_data_len
 }
 
-fn index_snapshot_process_storage_file(
+fn index_snapshot_insert_slot_storage_file(
+    snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
+    storage_files: &DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>,
     path_buf: PathBuf,
     filename: String,
+) -> (Slot, bool) {
+    let (slot, _) = get_slot_and_append_vec_id(&filename);
+    let slot_storage_count =
+        index_snapshot_insert_storage_file(&storage_files.get(&slot).unwrap(), path_buf, filename);
+    (
+        slot,
+        slot_storage_count == snapshot_storage_lengths.get(&slot).unwrap().len(),
+    )
+}
+
+fn index_snapshot_process_slot(
+    slot: Slot,
     accounts_index: &AccountInfoAccountsIndex,
     account_secondary_indexes: &AccountSecondaryIndexes,
     snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
     next_append_vec_id: &AtomicU32,
+    storage_files: &DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>,
     storage: &DashMap<Slot, SlotStores>,
     uncleaned_pubkeys: &DashMap<Slot, HashSet<Pubkey>>,
 ) -> u64 {
-    let (slot, append_vec_id) = get_slot_and_append_vec_id(&filename);
-    next_append_vec_id.fetch_max(append_vec_id, std::sync::atomic::Ordering::Relaxed);
+    index_snapshot_generate_slot_storages(
+        &slot,
+        snapshot_storage_lengths,
+        storage_files,
+        storage,
+        next_append_vec_id,
+    );
 
-    let storage_entry =
-        create_account_storage_entry(snapshot_storage_lengths, &slot, append_vec_id, path_buf);
-
-    // pre-allocated storage, so slot should always exist
     let slot_entry = storage.get(&slot).unwrap();
-    let num_slot_storages =
-        index_snapshot_insert_storage(&slot_entry, append_vec_id, storage_entry);
+    let slot_entry_lock = slot_entry.read().unwrap();
+    let pubkey_to_index_entry = AccountsDb::process_slot_storage_entries(&slot_entry_lock);
+    AccountsDb::update_storage_entries_info(&slot_entry_lock, &pubkey_to_index_entry);
+    let (slot_dirty_pubkeys, slot_accounts_data_len) = AccountsDb::generate_index_for_slot_storages(
+        accounts_index,
+        account_secondary_indexes,
+        slot,
+        pubkey_to_index_entry,
+    );
 
-    // if all storages for this slot have been processd, do processing
-    if num_slot_storages == snapshot_storage_lengths.get(&slot).unwrap().len() {
-        let slot_entry_lock = slot_entry.read().unwrap();
-        let pubkey_to_index_entry = AccountsDb::process_slot_storage_entries(&slot_entry_lock);
-        AccountsDb::update_storage_entries_info(&slot_entry_lock, &pubkey_to_index_entry);
-        let (slot_dirty_pubkeys, slot_accounts_data_len) =
-            AccountsDb::generate_index_for_slot_storages(
-                accounts_index,
-                account_secondary_indexes,
-                slot,
-                pubkey_to_index_entry,
-            );
+    uncleaned_pubkeys
+        .entry(slot)
+        .or_insert(HashSet::<Pubkey>::default())
+        .extend(slot_dirty_pubkeys);
 
-        uncleaned_pubkeys
-            .entry(slot)
-            .or_insert(HashSet::<Pubkey>::default())
-            .extend(slot_dirty_pubkeys);
+    slot_accounts_data_len
+}
 
-        slot_accounts_data_len
-    } else {
-        0
+fn index_snapshot_generate_slot_storages(
+    slot: &Slot,
+    snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
+    storage_files: &DashMap<Slot, Arc<RwLock<HashSet<(PathBuf, String)>>>>,
+    storage: &DashMap<Slot, SlotStores>,
+    next_append_vec_id: &AtomicU32,
+) {
+    let slot_storage_files = storage_files.get(&slot).unwrap();
+    let slot_storage_files_read_lock = slot_storage_files.read().unwrap();
+
+    // Read all append the appendvecs for this slot and insert into storage
+    let slot_stores = Arc::new(RwLock::new(
+        slot_storage_files_read_lock
+            .iter()
+            .map(|(path_buf, filename)| {
+                let (old_append_vec_id, new_append_vec_id, new_path) =
+                    index_snapshot_remap_storage_file(path_buf, filename, next_append_vec_id);
+                let storage_entry = create_account_storage_entry(
+                    snapshot_storage_lengths,
+                    slot,
+                    old_append_vec_id,
+                    new_append_vec_id,
+                    new_path,
+                );
+                (new_append_vec_id, storage_entry)
+            })
+            .collect(),
+    ));
+    storage.insert(*slot, slot_stores);
+}
+
+fn index_snapshot_remap_storage_file(
+    path_buf: &PathBuf,
+    filename: &str,
+    next_append_vec_id: &AtomicU32,
+) -> (AppendVecId, AppendVecId, PathBuf) {
+    // Get current slot and append vec id
+    let (slot, old_append_vec_id) = get_slot_and_append_vec_id(filename);
+
+    // Check for collisions until we find a free append_vec_id
+    let (new_append_vec_id, new_append_vec_path) = loop {
+        let new_append_vec_id =
+            next_append_vec_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let new_filename = AppendVec::file_name(slot, new_append_vec_id);
+        let new_append_vec_path = path_buf.parent().unwrap().join(&new_filename);
+
+        if old_append_vec_id == new_append_vec_id
+            || std::fs::metadata(&new_append_vec_path).is_err()
+        {
+            break (new_append_vec_id, new_append_vec_path);
+        }
+    };
+
+    // Rename the file if necessary
+    if old_append_vec_id != new_append_vec_id {
+        std::fs::rename(&path_buf, &new_append_vec_path).unwrap();
     }
+
+    (old_append_vec_id, new_append_vec_id, new_append_vec_path)
 }
 
 fn get_slot_and_append_vec_id(filename: &str) -> (Slot, AppendVecId) {
@@ -1428,19 +1509,20 @@ fn get_slot_and_append_vec_id(filename: &str) -> (Slot, AppendVecId) {
 fn create_account_storage_entry(
     snapshot_storage_lengths: &HashMap<Slot, HashMap<usize, usize>>,
     slot: &Slot,
-    append_vec_id: AppendVecId,
+    old_append_vec_id: AppendVecId,
+    new_append_vec_id: AppendVecId,
     append_vec_path: PathBuf,
 ) -> Arc<AccountStorageEntry> {
     let current_len = *snapshot_storage_lengths
         .get(slot)
         .unwrap()
-        .get(&(append_vec_id as usize))
+        .get(&(old_append_vec_id as usize))
         .unwrap();
 
     let (accounts, num_accounts) = AppendVec::new_from_file(&append_vec_path, current_len).unwrap();
     let storage = Arc::new(AccountStorageEntry::new_existing(
         *slot,
-        append_vec_id,
+        new_append_vec_id,
         accounts,
         num_accounts,
     ));
@@ -1448,15 +1530,15 @@ fn create_account_storage_entry(
     storage
 }
 
-// write-lock SlotStores, insert storage entry, and return the size
-fn index_snapshot_insert_storage(
-    slot_stores: &SlotStores,
-    append_vec_id: AppendVecId,
-    storage_entry: Arc<AccountStorageEntry>,
+// write-lock storage files, insert new path/file, and return the size
+fn index_snapshot_insert_storage_file(
+    slot_storage_files: &RwLock<HashSet<(PathBuf, String)>>,
+    path_buf: PathBuf,
+    filename: String,
 ) -> usize {
-    let mut slot_stores_lock = slot_stores.write().unwrap();
-    slot_stores_lock.insert(append_vec_id, storage_entry);
-    slot_stores_lock.len()
+    let mut slot_storages = slot_storage_files.write().unwrap();
+    slot_storages.insert((path_buf, filename));
+    slot_storages.len()
 }
 
 /// Reads the `snapshot_version` from a file. Before opening the file, its size
