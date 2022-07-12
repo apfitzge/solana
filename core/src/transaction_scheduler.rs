@@ -13,12 +13,12 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc,
         },
+        thread::JoinHandle,
     },
 };
-
 /// Wrapper to store a sanitized transaction and priority
 #[derive(Clone, Debug)]
-struct TransactionPriority {
+pub struct TransactionPriority {
     /// Transaction priority
     priority: u64,
     /// Sanitized transaction
@@ -100,6 +100,30 @@ pub struct TransactionScheduler {
 }
 
 impl TransactionScheduler {
+    /// Create and start transaction scheduler thread
+    pub fn spawn_scheduler(
+        packet_batch_receiver: Receiver<PacketBatchMessage>,
+        transaction_batch_senders: Vec<Sender<TransactionBatchMessage>>,
+        completed_transaction_receiver: Receiver<TransactionMessage>,
+        bank: Arc<Bank>,
+        max_batch_size: usize,
+        exit: Arc<AtomicBool>,
+    ) -> JoinHandle<()> {
+        let scheduler = TransactionScheduler {
+            packet_batch_receiver,
+            transaction_batch_senders,
+            completed_transaction_receiver,
+            bank,
+            max_batch_size,
+            exit,
+            pending_transactions: BinaryHeap::default(),
+            transactions_by_account: HashMap::default(),
+            blocked_transactions: HashMap::default(),
+        };
+
+        std::thread::spawn(move || scheduler.main())
+    }
+
     /// Driving loop
     fn main(mut self) {
         loop {
