@@ -80,6 +80,7 @@ members = [
     "tokens",
     "transaction-dos",
     "transaction-status",
+    "transaction-scheduler-bench",
     "upload-perf",
     "validator",
     "version",
