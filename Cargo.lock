@@ -839,6 +839,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_lex"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2850f2f5a82cbf437dd5af4d49848fbdfc27c157c3d010345776f952765261c5"
+dependencies = [
+ "os_str_bytes",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7484,6 +7493,24 @@ dependencies = [
  "sharded-slab",
  "thread_local",
  "tracing-core",
+]
+
+[[package]]
+name = "transaction-scheduler-bench"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "clap 3.2.2",
+ "crossbeam-channel",
+ "itertools",
+ "log",
+ "rand 0.8.5",
+ "solana-core",
+ "solana-logger 1.11.4",
+ "solana-measure",
+ "solana-perf",
+ "solana-runtime",
+ "solana-sdk 1.11.4",
 ]
 
 [[package]]

@@ -183,10 +183,7 @@ impl TransactionScheduler {
 
     /// Insert transaction into account queues and pending queue
     fn insert_transaction(&mut self, transaction: TransactionRef) {
-        if let Ok(account_locks) = transaction
-            .transaction
-            .get_account_locks(&self.bank.feature_set)
-        {
+        if let Ok(account_locks) = transaction.transaction.get_account_locks() {
             // Insert into readonly queues
             for account in account_locks.readonly {
                 self.transactions_by_account
@@ -211,10 +208,7 @@ impl TransactionScheduler {
     /// Update account queues on transaction completion
     fn update_queues_on_completed_transaction(&mut self, transaction: &TransactionMessage) {
         // Should always be able to get account locks here since it was a pre-requisite to scheduling
-        let account_locks = transaction
-            .transaction
-            .get_account_locks(&self.bank.feature_set)
-            .unwrap();
+        let account_locks = transaction.transaction.get_account_locks().unwrap();
 
         for account in account_locks.readonly {
             if self
@@ -280,7 +274,7 @@ impl TransactionScheduler {
     ) -> Option<&TransactionRef> {
         transaction
             .transaction
-            .get_account_locks(&self.bank.feature_set)
+            .get_account_locks()
             .ok()
             .and_then(|account_locks| {
                 let min_blocking_transaction = account_locks
@@ -309,10 +303,7 @@ impl TransactionScheduler {
 
     /// Apply account locks for a transaction
     fn lock_for_transaction(&mut self, transaction: &TransactionRef) {
-        if let Ok(account_locks) = transaction
-            .transaction
-            .get_account_locks(&self.bank.feature_set)
-        {
+        if let Ok(account_locks) = transaction.transaction.get_account_locks() {
             for account in account_locks.readonly {
                 self.transactions_by_account
                     .get_mut(account)
