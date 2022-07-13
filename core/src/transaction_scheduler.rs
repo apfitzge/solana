@@ -228,9 +228,15 @@ impl TransactionScheduler {
 
     /// Handle completed transactions
     fn handle_completed_transaction(&mut self, transaction: TransactionMessage) {
-        self.update_queues_on_completed_transaction(&transaction);
-        self.push_unblocked_transactions(transaction.transaction.signature());
+        let (_, update_queues_time) =
+            measure!(self.update_queues_on_completed_transaction(&transaction));
+        let (_, unblock_transactions_time) =
+            measure!(self.push_unblocked_transactions(transaction.transaction.signature()));
+
         self.num_executing_transactions -= 1;
+        self.metrics.completed_transactions_update_queues_us += update_queues_time.as_us();
+        self.metrics.completed_transactions_unblock_transactions_us +=
+            unblock_transactions_time.as_us();
     }
 
     /// Performs scheduling operations on currently pending transactions
@@ -646,6 +652,10 @@ struct SchedulerMetrics {
 
     /// Total time spent processing completed transactions in microseconds
     completed_transactions_time_us: u64,
+    /// Completed Transaction - Time spent updating queues
+    completed_transactions_update_queues_us: u64,
+    /// Completed Transaciton - Time spent unblocking transactions
+    completed_transactions_unblock_transactions_us: u64,
 
     /// Total time spent processing packet batches in microseconds
     packet_batch_time_us: u64,
@@ -679,6 +689,8 @@ impl Default for SchedulerMetrics {
             max_blocked_transactions: Default::default(),
             max_executing_transactions: Default::default(),
             completed_transactions_time_us: Default::default(),
+            completed_transactions_update_queues_us: Default::default(),
+            completed_transactions_unblock_transactions_us: Default::default(),
             packet_batch_time_us: Default::default(),
             packet_batch_filter_time_us: Default::default(),
             packet_batch_deserialize_time_us: Default::default(),
@@ -720,6 +732,16 @@ impl SchedulerMetrics {
                 (
                     "completed_transactions_time_us",
                     self.completed_transactions_time_us as i64,
+                    i64
+                ),
+                (
+                    "completed_transactions_update_queues_us",
+                    self.completed_transactions_update_queues_us as i64,
+                    i64
+                ),
+                (
+                    "completed_transactions_unblock_transactions_us",
+                    self.completed_transactions_unblock_transactions_us as i64,
                     i64
                 ),
                 (
