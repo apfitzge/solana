@@ -1,6 +1,7 @@
 use {
     clap::Parser,
     crossbeam_channel::{select, Receiver, Sender},
+    log::info,
     rand::Rng,
     solana_core::transaction_scheduler::{TransactionPriority, TransactionScheduler},
     solana_measure::measure,
@@ -17,11 +18,11 @@ use {
     },
     std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
         thread::{sleep, JoinHandle},
-        time::Duration,
+        time::{Duration, Instant},
     },
 };
 
@@ -65,6 +66,35 @@ struct Args {
     num_read_write_locks_per_tx: usize,
 }
 
+#[derive(Debug, Default)]
+struct TransactionSchedulerMetrics {
+    /// Number of batches sent to the scheduler
+    num_batches_sent: AtomicUsize,
+    /// Number of transactions sent to the scheduler
+    num_transactions_sent: AtomicUsize,
+    /// Number of transaction batches scheduled
+    num_batches_scheduled: AtomicUsize,
+    /// Number of transactions scheduled
+    num_transactions_scheduled: AtomicUsize,
+    /// Number of transactions completed
+    num_transactions_completed: AtomicUsize,
+}
+
+impl TransactionSchedulerMetrics {
+    fn report(&self) {
+        let num_batches_sent = self.num_batches_sent.load(Ordering::Relaxed);
+        let num_transactions_sent = self.num_transactions_sent.load(Ordering::Relaxed);
+        let num_batches_scheduled = self.num_batches_scheduled.load(Ordering::Relaxed);
+        let num_transactions_scheduled = self.num_transactions_scheduled.load(Ordering::Relaxed);
+        let num_transactions_completed = self.num_transactions_completed.load(Ordering::Relaxed);
+
+        let num_transactions_pending = num_transactions_sent - num_transactions_scheduled;
+        info!("num_transactions_sent: {num_transactions_sent} num_transactions_pending: {num_transactions_pending} num_transactions_scheduled: {num_transactions_scheduled} num_transactions_completed: {num_transactions_completed}");
+
+        // info!("num_batches_sent: {num_batches_sent} num_transactions_sent: {num_transactions_sent} num_batches_scheduled: {num_batches_scheduled} num_transactions_scheduled: {num_transactions_scheduled} num_transactions_completed: {num_transactions_completed}");
+    }
+}
+
 fn main() {
     solana_logger::setup_with_default("INFO");
 
@@ -89,7 +119,7 @@ fn main() {
     let exit = Arc::new(AtomicBool::new(false));
 
     // Spawns and runs the scheduler thread
-    let scheduler_handle = TransactionScheduler::spawn_scheduler(
+    TransactionScheduler::spawn_scheduler(
         packet_batch_receiver,
         transaction_batch_senders,
         completed_transaction_receiver,
@@ -98,8 +128,11 @@ fn main() {
         exit.clone(),
     );
 
+    let metrics = Arc::new(TransactionSchedulerMetrics::default());
+
     // Spawn the execution threads (sleep on transactions and then send completed batches back)
-    let execution_handles = start_execution_threads(
+    start_execution_threads(
+        metrics.clone(),
         transaction_batch_receivers,
         completed_transaction_sender,
         execution_per_tx_us,
@@ -107,9 +140,13 @@ fn main() {
     );
 
     // Spawn thread to create and send packet batches
-    let packet_sender_handle = spawn_packet_sender(
+    info!("building accounts...");
+    let accounts = Arc::new(build_accounts(num_accounts));
+    info!("built accounts...");
+    spawn_packet_senders(
+        metrics.clone(),
+        accounts,
         packet_batch_sender,
-        num_accounts,
         packets_per_batch,
         batches_per_msg,
         packet_send_rate,
@@ -118,19 +155,24 @@ fn main() {
         exit.clone(),
     );
 
-    // Wait
-    std::thread::sleep(Duration::from_secs_f32(duration));
-    exit.store(false, Ordering::Relaxed);
+    // Spawn thread for reporting metrics
+    std::thread::spawn({
+        let exit = exit.clone();
+        move || loop {
+            if exit.load(Ordering::Relaxed) {
+                break;
+            }
+            metrics.report();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
 
-    // Join
-    packet_sender_handle.join().unwrap();
-    scheduler_handle.join().unwrap();
-    execution_handles
-        .into_iter()
-        .for_each(|jh| jh.join().unwrap());
+    std::thread::sleep(Duration::from_secs_f32(duration));
+    exit.store(true, Ordering::Relaxed);
 }
 
 fn start_execution_threads(
+    metrics: Arc<TransactionSchedulerMetrics>,
     transaction_batch_receivers: Vec<Receiver<Vec<Arc<TransactionPriority>>>>,
     completed_transaction_sender: Sender<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
@@ -140,6 +182,7 @@ fn start_execution_threads(
         .into_iter()
         .map(|transaction_batch_receiver| {
             start_execution_thread(
+                metrics.clone(),
                 transaction_batch_receiver,
                 completed_transaction_sender.clone(),
                 execution_per_tx_us,
@@ -150,6 +193,7 @@ fn start_execution_threads(
 }
 
 fn start_execution_thread(
+    metrics: Arc<TransactionSchedulerMetrics>,
     transaction_batch_receiver: Receiver<Vec<Arc<TransactionPriority>>>,
     completed_transaction_sender: Sender<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
@@ -157,6 +201,7 @@ fn start_execution_thread(
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         execution_worker(
+            metrics,
             transaction_batch_receiver,
             completed_transaction_sender,
             execution_per_tx_us,
@@ -166,6 +211,7 @@ fn start_execution_thread(
 }
 
 fn execution_worker(
+    metrics: Arc<TransactionSchedulerMetrics>,
     transaction_batch_receiver: Receiver<Vec<Arc<TransactionPriority>>>,
     completed_transaction_sender: Sender<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
@@ -179,7 +225,7 @@ fn execution_worker(
         select! {
             recv(transaction_batch_receiver) -> maybe_tx_batch => {
                 if let Ok(tx_batch) = maybe_tx_batch {
-                    handle_transaction_batch(&completed_transaction_sender, tx_batch, execution_per_tx_us);
+                    handle_transaction_batch(&metrics, &completed_transaction_sender, tx_batch, execution_per_tx_us);
                 }
             }
             default(Duration::from_millis(100)) => {}
@@ -188,36 +234,79 @@ fn execution_worker(
 }
 
 fn handle_transaction_batch(
+    metrics: &TransactionSchedulerMetrics,
     completed_transaction_sender: &Sender<Arc<TransactionPriority>>,
     transaction_batch: Vec<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
 ) {
-    // Sleep through executing the batch
     let num_transactions = transaction_batch.len() as u64;
-    sleep(Duration::from_micros(
-        num_transactions * execution_per_tx_us,
-    ));
+    metrics
+        .num_batches_scheduled
+        .fetch_add(1, Ordering::Relaxed);
+    metrics
+        .num_transactions_scheduled
+        .fetch_add(num_transactions as usize, Ordering::Relaxed);
+
+    // // Sleep through executing the batch
+    // sleep(Duration::from_micros(
+    //     num_transactions * execution_per_tx_us,
+    // ));
 
     // Send transaction complete messages
     for tx in transaction_batch {
+        sleep(Duration::from_micros(execution_per_tx_us));
+
         let _ = completed_transaction_sender.send(tx);
+        metrics
+            .num_transactions_completed
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
-fn spawn_packet_sender(
+const NUM_SENDERS: usize = 4;
+
+fn spawn_packet_senders(
+    metrics: Arc<TransactionSchedulerMetrics>,
+    accounts: Arc<Vec<Keypair>>,
     packet_batch_sender: Sender<Vec<PacketBatch>>,
-    num_accounts: usize,
     packets_per_batch: usize,
     batches_per_msg: usize,
     packet_send_rate: usize,
     num_read_locks_per_tx: usize,
     num_write_locks_per_tx: usize,
     exit: Arc<AtomicBool>,
-) -> JoinHandle<()> {
+) {
+    for _ in 0..NUM_SENDERS {
+        spawn_packet_sender(
+            metrics.clone(),
+            accounts.clone(),
+            packet_batch_sender.clone(),
+            packets_per_batch,
+            batches_per_msg,
+            packet_send_rate,
+            num_read_locks_per_tx,
+            num_write_locks_per_tx,
+            exit.clone(),
+        );
+    }
+}
+
+fn spawn_packet_sender(
+    metrics: Arc<TransactionSchedulerMetrics>,
+    accounts: Arc<Vec<Keypair>>,
+    packet_batch_sender: Sender<Vec<PacketBatch>>,
+    packets_per_batch: usize,
+    batches_per_msg: usize,
+    packet_send_rate: usize,
+    num_read_locks_per_tx: usize,
+    num_write_locks_per_tx: usize,
+    exit: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
         send_packets(
+            metrics,
+            accounts,
             packet_batch_sender,
-            num_accounts,
             packets_per_batch,
             batches_per_msg,
             packet_send_rate,
@@ -225,12 +314,13 @@ fn spawn_packet_sender(
             num_write_locks_per_tx,
             exit,
         );
-    })
+    });
 }
 
 fn send_packets(
+    metrics: Arc<TransactionSchedulerMetrics>,
+    accounts: Arc<Vec<Keypair>>,
     packet_batch_sender: Sender<Vec<PacketBatch>>,
-    num_accounts: usize,
     packets_per_batch: usize,
     batches_per_msg: usize,
     packet_send_rate: usize,
@@ -239,10 +329,11 @@ fn send_packets(
     exit: Arc<AtomicBool>,
 ) {
     let packets_per_msg = packets_per_batch * batches_per_msg;
-    let loop_frequency = packet_send_rate as f64 * packets_per_msg as f64;
+    let loop_frequency = packet_send_rate as f64 * packets_per_msg as f64 / NUM_SENDERS as f64;
     let loop_duration = Duration::from_secs_f64(1.0 / loop_frequency);
 
-    let accounts = build_accounts(num_accounts);
+    info!("sending packets: packets_per_msg: {packets_per_msg} loop_frequency: {loop_frequency} loop_duration: {loop_duration:?}");
+
     let blockhash = Hash::default();
 
     loop {
@@ -259,6 +350,13 @@ fn send_packets(
                 num_write_locks_per_tx,
             ),
             "build packets"
+        );
+        metrics
+            .num_batches_sent
+            .fetch_add(packet_batches.len(), Ordering::Relaxed);
+        metrics.num_transactions_sent.fetch_add(
+            packet_batches.iter().map(|pb| pb.len()).sum(),
+            Ordering::Relaxed,
         );
         let _ = packet_batch_sender.send(packet_batches);
 
@@ -322,7 +420,7 @@ fn build_packet(
     let write_account_metas =
         (0..num_write_locks_per_tx).map(|_| AccountMeta::new(get_random_account().pubkey(), false));
     let ixs = vec![
-        ComputeBudgetInstruction::set_compute_unit_price(100),
+        ComputeBudgetInstruction::set_compute_unit_price(rand::thread_rng().gen_range(50..500)),
         Instruction::new_with_bytes(
             system_program::id(),
             &[0],
