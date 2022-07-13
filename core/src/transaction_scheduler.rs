@@ -116,6 +116,8 @@ pub struct TransactionScheduler {
     blocked_transactions: HashMap<Signature, HashSet<TransactionRef>>,
     /// Tracks the current number of blocked transactions
     num_blocked_transactions: usize,
+    /// Tracks the current number of executing transacitons
+    num_executing_transactions: usize,
 
     /// Track metrics for scheduler thread
     metrics: SchedulerMetrics,
@@ -142,6 +144,7 @@ impl TransactionScheduler {
             transactions_by_account: HashMap::default(),
             blocked_transactions: HashMap::default(),
             num_blocked_transactions: 0,
+            num_executing_transactions: 0,
             metrics: SchedulerMetrics::default(),
         };
 
@@ -174,11 +177,11 @@ impl TransactionScheduler {
                     if let Ok(packet_batch_message) = maybe_tx_batch_message {
                         self.handle_packet_batches(packet_batch_message);
                     }
-                }, "packet batch");
+                });
                 self.metrics.packet_batch_time_us += packet_batch_time.as_us();
             }
             default() => {
-                let (_, scheduling_time) = measure!(self.do_scheduling(), "scheduling");
+                let (_, scheduling_time) = measure!(self.do_scheduling());
                 self.metrics.scheduling_time_us += scheduling_time.as_us();
             }
         }
@@ -218,6 +221,7 @@ impl TransactionScheduler {
     fn handle_completed_transaction(&mut self, transaction: TransactionMessage) {
         self.update_queues_on_completed_transaction(&transaction);
         self.push_unblocked_transactions(transaction.transaction.signature());
+        self.num_executing_transactions -= 1;
     }
 
     /// Performs scheduling operations on currently pending transactions
@@ -254,9 +258,14 @@ impl TransactionScheduler {
             // Only send if we have a non-empty batch
             if batch.len() > 0 {
                 self.metrics.num_transactions_scheduled += batch.len();
+                self.num_executing_transactions += batch.len();
                 sender.send(batch).unwrap();
             }
         }
+        self.metrics.max_executing_transactions = self
+            .metrics
+            .max_executing_transactions
+            .max(self.num_executing_transactions);
     }
 
     /// Insert transaction into account queues and pending queue
@@ -604,6 +613,8 @@ struct SchedulerMetrics {
     max_pending_transactions: usize,
     /// Maximum number of blocked transactions
     max_blocked_transactions: usize,
+    /// Maximum executing transactions
+    max_executing_transactions: usize,
 
     /// Time spent processing packet batches in microseconds
     packet_batch_time_us: u64,
@@ -620,6 +631,7 @@ impl Default for SchedulerMetrics {
             num_transactions_scheduled: Default::default(),
             max_pending_transactions: Default::default(),
             max_blocked_transactions: Default::default(),
+            max_executing_transactions: Default::default(),
             packet_batch_time_us: Default::default(),
             completed_transactions_time_us: Default::default(),
             scheduling_time_us: Default::default(),
@@ -635,10 +647,11 @@ impl SchedulerMetrics {
         let elapsed = self.last_reported.elapsed();
         if elapsed.as_millis() >= REPORT_INTERVAL_MILLIS {
             info!(
-                "num_transactions_scheduled: {} max_pending_transactions: {} max_blocked_transactions: {} total_us: {} packet_batch_time_us: {} completed_transactions_time_us: {} scheduling_time_us: {}",
+                "num_transactions_scheduled: {} max_pending_transactions: {} max_blocked_transactions: {} max_executing_transactions: {} total_us: {} packet_batch_time_us: {} completed_transactions_time_us: {} scheduling_time_us: {}",
                 self.num_transactions_scheduled,
                 self.max_pending_transactions,
                 self.max_blocked_transactions,
+                self.max_executing_transactions,
                 elapsed.as_micros(),
                 self.packet_batch_time_us,
                 self.completed_transactions_time_us,
