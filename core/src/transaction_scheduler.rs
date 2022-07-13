@@ -738,6 +738,11 @@ impl SchedulerMetrics {
                     i64
                 ),
                 (
+                    "max_executing_transactions",
+                    self.max_executing_transactions as i64,
+                    i64
+                ),
+                (
                     "completed_transactions_time_us",
                     self.completed_transactions_time_us as i64,
                     i64
