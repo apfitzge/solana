@@ -351,17 +351,26 @@ impl TransactionScheduler {
         transaction: TransactionRef,
         batch: &mut TransactionBatchMessage,
     ) -> bool {
-        if let Some(blocking_transaction) =
-            self.get_lowest_priority_blocking_transaction(&transaction)
-        {
-            self.blocked_transactions
+        let (maybe_blocking_transaction, get_lowest_blocking_transaction_time) =
+            measure!(self.get_lowest_priority_blocking_transaction(&transaction));
+        self.metrics.scheduling_find_blocking_transaction_us +=
+            get_lowest_blocking_transaction_time.as_us();
+
+        if let Some(blocking_transaction) = maybe_blocking_transaction {
+            let (_, insert_blocked_transaction_time) = measure!(self
+                .blocked_transactions
                 .entry(*blocking_transaction.transaction.signature())
                 .or_default()
-                .insert(transaction);
+                .insert(transaction));
+            self.metrics.scheduling_insert_blocking_transaction_us +=
+                insert_blocked_transaction_time.as_us();
 
             false
         } else {
-            self.lock_for_transaction(&transaction);
+            let (_, lock_scheduled_transaction_time) =
+                measure!(self.lock_for_transaction(&transaction));
+            self.metrics.scheduling_lock_transaction_accounts_us +=
+                lock_scheduled_transaction_time.as_us();
             batch.push(transaction);
             true
         }
@@ -371,7 +380,7 @@ impl TransactionScheduler {
     fn get_lowest_priority_blocking_transaction(
         &self,
         transaction: &TransactionRef,
-    ) -> Option<&TransactionRef> {
+    ) -> Option<TransactionRef> {
         transaction
             .transaction
             .get_account_locks(&self.bank.feature_set)
@@ -398,6 +407,7 @@ impl TransactionScheduler {
                             .get_min_blocking_transaction(transaction, true)
                     })
                     .fold(min_blocking_transaction, option_min)
+                    .map(|tx| tx.clone())
             })
     }
 
@@ -631,6 +641,17 @@ struct SchedulerMetrics {
     completed_transactions_time_us: u64,
     /// Time spent scheduling transactions in microseconds
     scheduling_time_us: u64,
+
+    /// Scheduling - Time spent preparing batches
+    scheduling_prepare_batches_us: u64,
+    /// Scheduling - Time spent sending batches
+    scheduling_send_batches_us: u64,
+    /// Scheduling - Time spent finding blocking transaction in microseconds
+    scheduling_find_blocking_transaction_us: u64,
+    /// Scheduling - Time spent inserting blocking transactions in microseconds
+    scheduling_insert_blocking_transaction_us: u64,
+    /// Scheduling - Time spent locking scheduled transactions in microseconds
+    scheduling_lock_transaction_accounts_us: u64,
 }
 
 impl Default for SchedulerMetrics {
@@ -644,6 +665,11 @@ impl Default for SchedulerMetrics {
             packet_batch_time_us: Default::default(),
             completed_transactions_time_us: Default::default(),
             scheduling_time_us: Default::default(),
+            scheduling_prepare_batches_us: Default::default(),
+            scheduling_send_batches_us: Default::default(),
+            scheduling_find_blocking_transaction_us: Default::default(),
+            scheduling_insert_blocking_transaction_us: Default::default(),
+            scheduling_lock_transaction_accounts_us: Default::default(),
         }
     }
 }
@@ -655,16 +681,59 @@ impl SchedulerMetrics {
 
         let elapsed = self.last_reported.elapsed();
         if elapsed.as_millis() >= REPORT_INTERVAL_MILLIS {
-            info!(
-                "num_transactions_scheduled: {} max_pending_transactions: {} max_blocked_transactions: {} max_executing_transactions: {} total_us: {} packet_batch_time_us: {} completed_transactions_time_us: {} scheduling_time_us: {}",
-                self.num_transactions_scheduled,
-                self.max_pending_transactions,
-                self.max_blocked_transactions,
-                self.max_executing_transactions,
-                elapsed.as_micros(),
-                self.packet_batch_time_us,
-                self.completed_transactions_time_us,
-                self.scheduling_time_us,
+            datapoint_info!(
+                "transaction-scheduler",
+                (
+                    "num_transactions_scheduled",
+                    self.num_transactions_scheduled as i64,
+                    i64
+                ),
+                (
+                    "max_pending_transactions",
+                    self.max_pending_transactions as i64,
+                    i64
+                ),
+                (
+                    "max_blocked_transactions",
+                    self.max_blocked_transactions as i64,
+                    i64
+                ),
+                (
+                    "packet_batch_time_us",
+                    self.packet_batch_time_us as i64,
+                    i64
+                ),
+                (
+                    "completed_transactions_time_us",
+                    self.completed_transactions_time_us as i64,
+                    i64
+                ),
+                ("scheduling_time_us", self.scheduling_time_us as i64, i64),
+                (
+                    "scheduling_prepare_batches_us",
+                    self.scheduling_prepare_batches_us as i64,
+                    i64
+                ),
+                (
+                    "scheduling_send_batches_us",
+                    self.scheduling_send_batches_us as i64,
+                    i64
+                ),
+                (
+                    "scheduling_find_blocking_transaction_us",
+                    self.scheduling_find_blocking_transaction_us as i64,
+                    i64
+                ),
+                (
+                    "scheduling_insert_blocking_transaction_us",
+                    self.scheduling_insert_blocking_transaction_us as i64,
+                    i64
+                ),
+                (
+                    "scheduling_lock_transaction_accounts_us",
+                    self.scheduling_lock_transaction_accounts_us as i64,
+                    i64
+                ),
             );
 
             *self = Self::default();
