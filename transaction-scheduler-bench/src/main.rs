@@ -129,7 +129,7 @@ fn main() {
     let exit = Arc::new(AtomicBool::new(false));
 
     // Spawns and runs the scheduler thread
-    TransactionScheduler::spawn_scheduler(
+    let scheduler_handle = TransactionScheduler::spawn_scheduler(
         packet_batch_receiver,
         transaction_batch_senders,
         completed_transaction_receiver,
@@ -141,7 +141,7 @@ fn main() {
     let metrics = Arc::new(TransactionSchedulerMetrics::default());
 
     // Spawn the execution threads (sleep on transactions and then send completed batches back)
-    start_execution_threads(
+    let execution_handles = start_execution_threads(
         metrics.clone(),
         transaction_batch_receivers,
         completed_transaction_sender,
@@ -154,7 +154,7 @@ fn main() {
     info!("building accounts...");
     let accounts = Arc::new(build_accounts(num_accounts));
     info!("built accounts...");
-    spawn_packet_senders(
+    let packet_sender_handles = spawn_packet_senders(
         metrics.clone(),
         accounts,
         packet_batch_sender,
@@ -180,6 +180,14 @@ fn main() {
 
     std::thread::sleep(Duration::from_secs_f32(duration));
     exit.store(true, Ordering::Relaxed);
+
+    scheduler_handle.join().unwrap();
+    execution_handles
+        .into_iter()
+        .for_each(|jh| jh.join().unwrap());
+    packet_sender_handles
+        .into_iter()
+        .for_each(|jh| jh.join().unwrap());
 }
 
 fn start_execution_threads(
@@ -296,20 +304,22 @@ fn spawn_packet_senders(
     num_read_locks_per_tx: usize,
     num_write_locks_per_tx: usize,
     exit: Arc<AtomicBool>,
-) {
-    for _ in 0..NUM_SENDERS {
-        spawn_packet_sender(
-            metrics.clone(),
-            accounts.clone(),
-            packet_batch_sender.clone(),
-            packets_per_batch,
-            batches_per_msg,
-            packet_send_rate,
-            num_read_locks_per_tx,
-            num_write_locks_per_tx,
-            exit.clone(),
-        );
-    }
+) -> Vec<JoinHandle<()>> {
+    (0..NUM_SENDERS)
+        .map(|_| {
+            spawn_packet_sender(
+                metrics.clone(),
+                accounts.clone(),
+                packet_batch_sender.clone(),
+                packets_per_batch,
+                batches_per_msg,
+                packet_send_rate,
+                num_read_locks_per_tx,
+                num_write_locks_per_tx,
+                exit.clone(),
+            )
+        })
+        .collect()
 }
 
 fn spawn_packet_sender(
@@ -322,7 +332,7 @@ fn spawn_packet_sender(
     num_read_locks_per_tx: usize,
     num_write_locks_per_tx: usize,
     exit: Arc<AtomicBool>,
-) {
+) -> JoinHandle<()> {
     std::thread::spawn(move || {
         send_packets(
             metrics,
@@ -335,7 +345,7 @@ fn spawn_packet_sender(
             num_write_locks_per_tx,
             exit,
         );
-    });
+    })
 }
 
 fn send_packets(
