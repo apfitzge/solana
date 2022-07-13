@@ -200,6 +200,7 @@ fn main() {
         transaction_batch_receivers,
         completed_transaction_sender,
         execution_per_tx_us,
+        banking_stage_only_alert_full_batch,
         exit.clone(),
     );
 
@@ -264,6 +265,7 @@ fn start_execution_threads(
     transaction_batch_receivers: Vec<Receiver<TransactionBatchMessage>>,
     completed_transaction_sender: Sender<TransactionMessage>,
     execution_per_tx_us: u64,
+    banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
 ) -> Vec<JoinHandle<()>> {
     transaction_batch_receivers
@@ -274,6 +276,7 @@ fn start_execution_threads(
                 transaction_batch_receiver,
                 completed_transaction_sender.clone(),
                 execution_per_tx_us,
+                banking_stage_only_alert_full_batch,
                 exit.clone(),
             )
         })
@@ -285,6 +288,7 @@ fn start_execution_thread(
     transaction_batch_receiver: Receiver<TransactionBatchMessage>,
     completed_transaction_sender: Sender<TransactionMessage>,
     execution_per_tx_us: u64,
+    banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -293,6 +297,7 @@ fn start_execution_thread(
             transaction_batch_receiver,
             completed_transaction_sender,
             execution_per_tx_us,
+            banking_stage_only_alert_full_batch,
             exit,
         )
     })
@@ -303,6 +308,7 @@ fn execution_worker(
     transaction_batch_receiver: Receiver<TransactionBatchMessage>,
     completed_transaction_sender: Sender<TransactionMessage>,
     execution_per_tx_us: u64,
+    banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
 ) {
     loop {
@@ -313,7 +319,7 @@ fn execution_worker(
         select! {
             recv(transaction_batch_receiver) -> maybe_tx_batch => {
                 if let Ok(tx_batch) = maybe_tx_batch {
-                    handle_transaction_batch(&metrics, &completed_transaction_sender, tx_batch, execution_per_tx_us);
+                    handle_transaction_batch(&metrics, &completed_transaction_sender, tx_batch, execution_per_tx_us, banking_stage_only_alert_full_batch);
                 }
             }
             default(Duration::from_millis(100)) => {}
@@ -326,6 +332,7 @@ fn handle_transaction_batch(
     completed_transaction_sender: &Sender<TransactionMessage>,
     transaction_batch: TransactionBatchMessage,
     execution_per_tx_us: u64,
+    banking_stage_only_alert_full_batch: bool,
 ) {
     let num_transactions = transaction_batch.len() as u64;
     metrics
