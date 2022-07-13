@@ -8,7 +8,7 @@ use {
     solana_runtime::bank::Bank,
     solana_sdk::{pubkey::Pubkey, signature::Signature, transaction::SanitizedTransaction},
     std::{
-        collections::{BTreeSet, BinaryHeap, HashMap, HashSet},
+        collections::{BTreeSet, BinaryHeap, HashMap},
         hash::Hash,
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -113,7 +113,7 @@ pub struct TransactionScheduler {
     /// Transaction queues and locks by account key
     transactions_by_account: HashMap<Pubkey, AccountTransactionQueue>,
     /// Map from transaction signature to transactions blocked by the signature
-    blocked_transactions: HashMap<Signature, HashSet<TransactionRef>>,
+    blocked_transactions: HashMap<Signature, Vec<TransactionRef>>,
     /// Tracks the current number of blocked transactions
     num_blocked_transactions: usize,
     /// Tracks the current number of executing transacitons
@@ -241,46 +241,54 @@ impl TransactionScheduler {
 
     /// Performs scheduling operations on currently pending transactions
     fn do_scheduling(&mut self) {
-        // Allocate batches to be sent to threads
-        let mut batches =
-            vec![Vec::with_capacity(self.max_batch_size); self.transaction_batch_senders.len()];
+        let (batches, prepare_batches_time) = measure!({
+            // Allocate batches to be sent to threads
+            let mut batches =
+                vec![Vec::with_capacity(self.max_batch_size); self.transaction_batch_senders.len()];
 
-        // Do scheduling work
-        let mut batch_index = 0;
-        while let Some(transaction) = self.pending_transactions.pop() {
-            if self.try_schedule_transaction(transaction, &mut batches[batch_index]) {
-                // break if we reach max batch size on any of the batches
-                // TODO: just don't add to this batch if it's full
-                if batches[batch_index].len() == self.max_batch_size {
-                    break;
+            // Do scheduling work
+            let mut batch_index = 0;
+            while let Some(transaction) = self.pending_transactions.pop() {
+                if self.try_schedule_transaction(transaction, &mut batches[batch_index]) {
+                    // break if we reach max batch size on any of the batches
+                    // TODO: just don't add to this batch if it's full
+                    if batches[batch_index].len() == self.max_batch_size {
+                        break;
+                    }
+                    batch_index = (batch_index + 1) % batches.len();
+                } else {
+                    self.num_blocked_transactions += 1;
                 }
-                batch_index = (batch_index + 1) % batches.len();
-            } else {
-                self.num_blocked_transactions += 1;
             }
-        }
+
+            batches
+        });
+
+        let (_, send_batches_time) = measure!({
+            // Send batches to banking threads
+            for (batch, sender) in batches
+                .into_iter()
+                .zip(self.transaction_batch_senders.iter())
+            {
+                // Only send if we have a non-empty batch
+                if batch.len() > 0 {
+                    self.metrics.num_transactions_scheduled += batch.len();
+                    self.num_executing_transactions += batch.len();
+                    sender.send(batch).unwrap();
+                }
+            }
+        });
 
         self.metrics.max_blocked_transactions = self
             .metrics
             .max_blocked_transactions
             .max(self.num_blocked_transactions);
-
-        // Send batches to banking threads
-        for (batch, sender) in batches
-            .into_iter()
-            .zip(self.transaction_batch_senders.iter())
-        {
-            // Only send if we have a non-empty batch
-            if batch.len() > 0 {
-                self.metrics.num_transactions_scheduled += batch.len();
-                self.num_executing_transactions += batch.len();
-                sender.send(batch).unwrap();
-            }
-        }
         self.metrics.max_executing_transactions = self
             .metrics
             .max_executing_transactions
             .max(self.num_executing_transactions);
+        self.metrics.scheduling_prepare_batches_us += prepare_batches_time.as_us();
+        self.metrics.scheduling_send_batches_us += send_batches_time.as_us();
     }
 
     /// Insert transaction into account queues and pending queue
@@ -370,7 +378,7 @@ impl TransactionScheduler {
                 .blocked_transactions
                 .entry(*blocking_transaction.transaction.signature())
                 .or_default()
-                .insert(transaction));
+                .push(transaction));
             self.metrics.scheduling_insert_blocking_transaction_us +=
                 insert_blocked_transaction_time.as_us();
 
