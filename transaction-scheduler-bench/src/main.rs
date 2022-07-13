@@ -126,6 +126,35 @@ struct PacketSendingConfig {
     num_write_locks_per_tx: usize,
 }
 
+#[derive(Debug, Default)]
+struct TransactionSchedulerMetrics {
+    /// Number of batches sent to the scheduler
+    num_batches_sent: AtomicUsize,
+    /// Number of transactions sent to the scheduler
+    num_transactions_sent: AtomicUsize,
+    /// Number of transaction batches scheduled
+    num_batches_scheduled: AtomicUsize,
+    /// Number of transactions scheduled
+    num_transactions_scheduled: AtomicUsize,
+    /// Number of transactions completed
+    num_transactions_completed: AtomicUsize,
+}
+
+impl TransactionSchedulerMetrics {
+    fn report(&self) {
+        let num_batches_sent = self.num_batches_sent.load(Ordering::Relaxed);
+        let num_transactions_sent = self.num_transactions_sent.load(Ordering::Relaxed);
+        let num_batches_scheduled = self.num_batches_scheduled.load(Ordering::Relaxed);
+        let num_transactions_scheduled = self.num_transactions_scheduled.load(Ordering::Relaxed);
+        let num_transactions_completed = self.num_transactions_completed.load(Ordering::Relaxed);
+
+        let num_transactions_pending = num_transactions_sent - num_transactions_scheduled;
+        info!("num_transactions_sent: {num_transactions_sent} num_transactions_pending: {num_transactions_pending} num_transactions_scheduled: {num_transactions_scheduled} num_transactions_completed: {num_transactions_completed}");
+
+        // info!("num_batches_sent: {num_batches_sent} num_transactions_sent: {num_transactions_sent} num_batches_scheduled: {num_batches_scheduled} num_transactions_scheduled: {num_transactions_scheduled} num_transactions_completed: {num_transactions_completed}");
+    }
+}
+
 fn main() {
     solana_logger::setup_with_default("INFO");
 
@@ -154,7 +183,7 @@ fn main() {
     let exit = Arc::new(AtomicBool::new(false));
 
     // Spawns and runs the scheduler thread
-    let scheduler_handle = TransactionScheduler::spawn_scheduler(
+    TransactionScheduler::spawn_scheduler(
         packet_batch_receiver,
         transaction_batch_senders,
         completed_transaction_receiver,
@@ -363,7 +392,7 @@ fn spawn_packet_sender(
     config: Arc<PacketSendingConfig>,
     duration: Duration,
     exit: Arc<AtomicBool>,
-) -> JoinHandle<()> {
+) {
     std::thread::spawn(move || {
         send_packets(
             metrics,
@@ -374,7 +403,7 @@ fn spawn_packet_sender(
             duration,
             exit,
         );
-    })
+    });
 }
 
 fn send_packets(
@@ -410,6 +439,13 @@ fn send_packets(
             &accounts,
             &blockhash
         ));
+        metrics.num_transactions_sent.fetch_add(
+            packet_batches.iter().map(|pb| pb.len()).sum(),
+            Ordering::Relaxed,
+        );
+        metrics
+            .num_batches_sent
+            .fetch_add(packet_batches.len(), Ordering::Relaxed);
         metrics.num_transactions_sent.fetch_add(
             packet_batches.iter().map(|pb| pb.len()).sum(),
             Ordering::Relaxed,
