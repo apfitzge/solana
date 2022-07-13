@@ -64,6 +64,10 @@ struct Args {
     /// Number of write locks per tx
     #[clap(long, env, default_value_t = 2)]
     num_read_write_locks_per_tx: usize,
+
+    /// Max batch size for scheduler
+    #[clap(long, env, default_value_t = 128)]
+    max_batch_size: usize,
 }
 
 #[derive(Debug, Default)]
@@ -108,6 +112,7 @@ fn main() {
         num_accounts,
         num_read_locks_per_tx,
         num_read_write_locks_per_tx,
+        max_batch_size,
     } = Args::parse();
 
     let (packet_batch_sender, packet_batch_receiver) = crossbeam_channel::unbounded();
@@ -124,7 +129,7 @@ fn main() {
         transaction_batch_senders,
         completed_transaction_receiver,
         bank,
-        packets_per_batch,
+        max_batch_size,
         exit.clone(),
     );
 
@@ -263,7 +268,7 @@ fn handle_transaction_batch(
     }
 }
 
-const NUM_SENDERS: usize = 4;
+const NUM_SENDERS: usize = 1;
 
 fn spawn_packet_senders(
     metrics: Arc<TransactionSchedulerMetrics>,
