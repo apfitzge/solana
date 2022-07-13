@@ -14,6 +14,7 @@ use {
             Arc,
         },
         thread::JoinHandle,
+        time::Instant,
     },
 };
 /// Wrapper to store a sanitized transaction and priority
@@ -23,23 +24,37 @@ pub struct TransactionPriority {
     priority: u64,
     /// Sanitized transaction
     transaction: SanitizedTransaction,
+    /// Timestamp the scheduler received the transaction - only used for ordering
+    timestamp: Instant,
 }
 
 impl Ord for TransactionPriority {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
+        match self.priority.cmp(&other.priority) {
+            std::cmp::Ordering::Equal => match self
+                .transaction
+                .message_hash()
+                .cmp(other.transaction.message_hash())
+            {
+                std::cmp::Ordering::Equal => self.timestamp.cmp(&other.timestamp),
+                ordering => ordering,
+            },
+            ordering => ordering,
+        }
     }
 }
 
 impl PartialOrd for TransactionPriority {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.priority.partial_cmp(&other.priority)
+        Some(self.cmp(other))
     }
 }
 
 impl PartialEq for TransactionPriority {
     fn eq(&self, other: &Self) -> bool {
         self.priority == other.priority
+            && self.transaction.message_hash() == other.transaction.message_hash()
+            && self.timestamp == other.timestamp
     }
 }
 
@@ -67,6 +82,7 @@ impl TransactionPriority {
         Some(Arc::new(Self {
             transaction,
             priority,
+            timestamp: Instant::now(),
         }))
     }
 }
