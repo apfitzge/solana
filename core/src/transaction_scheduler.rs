@@ -2,7 +2,8 @@
 
 use {
     crate::unprocessed_packet_batches::{self, ImmutableDeserializedPacket},
-    crossbeam_channel::{Receiver, Sender},
+    crossbeam_channel::{select, Receiver, Sender},
+    solana_measure::measure,
     solana_perf::packet::PacketBatch,
     solana_runtime::bank::Bank,
     solana_sdk::{pubkey::Pubkey, signature::Signature, transaction::SanitizedTransaction},
@@ -113,6 +114,11 @@ pub struct TransactionScheduler {
     transactions_by_account: HashMap<Pubkey, AccountTransactionQueue>,
     /// Map from transaction signature to transactions blocked by the signature
     blocked_transactions: HashMap<Signature, HashSet<TransactionRef>>,
+    /// Tracks the current number of blocked transactions
+    num_blocked_transactions: usize,
+
+    /// Track metrics for scheduler thread
+    metrics: SchedulerMetrics,
 }
 
 impl TransactionScheduler {
@@ -135,6 +141,8 @@ impl TransactionScheduler {
             pending_transactions: BinaryHeap::default(),
             transactions_by_account: HashMap::default(),
             blocked_transactions: HashMap::default(),
+            num_blocked_transactions: 0,
+            metrics: SchedulerMetrics::default(),
         };
 
         std::thread::spawn(move || scheduler.main())
@@ -152,13 +160,30 @@ impl TransactionScheduler {
 
     /// Performs work in a loop - Handles different channel receives/timers and performs scheduling
     fn iter(&mut self) {
-        if let Ok(packet_batch_message) = self.packet_batch_receiver.try_recv() {
-            self.handle_packet_batches(packet_batch_message);
+        select! {
+            recv(self.completed_transaction_receiver) -> maybe_completed_tx => {
+                let (_, completed_transaction_time) = measure!(
+                    if let Ok(completed_tx) = maybe_completed_tx {
+                        self.handle_completed_transaction(completed_tx);
+                    }
+                );
+                self.metrics.completed_transactions_time_us += completed_transaction_time.as_us();
+            }
+            recv(self.packet_batch_receiver) -> maybe_tx_batch_message => {
+                let (_, packet_batch_time) = measure!({
+                    if let Ok(packet_batch_message) = maybe_tx_batch_message {
+                        self.handle_packet_batches(packet_batch_message);
+                    }
+                }, "packet batch");
+                self.metrics.packet_batch_time_us += packet_batch_time.as_us();
+            }
+            default() => {
+                let (_, scheduling_time) = measure!(self.do_scheduling(), "scheduling");
+                self.metrics.scheduling_time_us += scheduling_time.as_us();
+            }
         }
-        if let Ok(completed_transaction) = self.completed_transaction_receiver.try_recv() {
-            self.handle_completed_transaction(completed_transaction);
-        }
-        self.do_scheduling();
+
+        self.metrics.report();
     }
 
     /// Handles packet batches as we receive them from the channel
@@ -182,6 +207,11 @@ impl TransactionScheduler {
                 self.insert_transaction(transaction);
             }
         }
+
+        self.metrics.max_pending_transactions = self
+            .metrics
+            .max_pending_transactions
+            .max(self.pending_transactions.len());
     }
 
     /// Handle completed transactions
@@ -206,8 +236,15 @@ impl TransactionScheduler {
                     break;
                 }
                 batch_index = (batch_index + 1) % batches.len();
+            } else {
+                self.num_blocked_transactions += 1;
             }
         }
+
+        self.metrics.max_blocked_transactions = self
+            .metrics
+            .max_blocked_transactions
+            .max(self.num_blocked_transactions);
 
         // Send batches to banking threads
         for (batch, sender) in batches
@@ -216,6 +253,7 @@ impl TransactionScheduler {
         {
             // Only send if we have a non-empty batch
             if batch.len() > 0 {
+                self.metrics.num_transactions_scheduled += batch.len();
                 sender.send(batch).unwrap();
             }
         }
@@ -282,8 +320,14 @@ impl TransactionScheduler {
     /// Check for unblocked transactions on `signature` and push into `pending_transactions`
     fn push_unblocked_transactions(&mut self, signature: &Signature) {
         if let Some(blocked_transactions) = self.blocked_transactions.remove(signature) {
+            self.num_blocked_transactions -= blocked_transactions.len();
             self.pending_transactions
                 .extend(blocked_transactions.into_iter());
+
+            self.metrics.max_pending_transactions = self
+                .metrics
+                .max_pending_transactions
+                .max(self.pending_transactions.len());
         }
     }
 
@@ -305,6 +349,7 @@ impl TransactionScheduler {
                 .entry(*blocking_transaction.transaction.signature())
                 .or_default()
                 .insert(transaction);
+
             false
         } else {
             self.lock_for_transaction(&transaction);
@@ -555,6 +600,62 @@ fn option_min<T: Ord>(lhs: Option<T>, rhs: Option<T>) -> Option<T> {
         (Some(lhs), Some(rhs)) => Some(std::cmp::min(lhs, rhs)),
         (lhs, None) => lhs,
         (None, rhs) => rhs,
+    }
+}
+
+/// Track metrics for the scheduler thread
+struct SchedulerMetrics {
+    /// Last timestamp reported
+    last_reported: Instant,
+    /// Number of transactions scheduled
+    num_transactions_scheduled: usize,
+    /// Maximum pending_transactions length
+    max_pending_transactions: usize,
+    /// Maximum number of blocked transactions
+    max_blocked_transactions: usize,
+
+    /// Time spent processing packet batches in microseconds
+    packet_batch_time_us: u64,
+    /// Time spent processing completed transactions in microseconds
+    completed_transactions_time_us: u64,
+    /// Time spent scheduling transactions in microseconds
+    scheduling_time_us: u64,
+}
+
+impl Default for SchedulerMetrics {
+    fn default() -> Self {
+        Self {
+            last_reported: Instant::now(),
+            num_transactions_scheduled: Default::default(),
+            max_pending_transactions: Default::default(),
+            max_blocked_transactions: Default::default(),
+            packet_batch_time_us: Default::default(),
+            completed_transactions_time_us: Default::default(),
+            scheduling_time_us: Default::default(),
+        }
+    }
+}
+
+impl SchedulerMetrics {
+    /// Report metrics if the interval has passed and reset metrics
+    fn report(&mut self) {
+        const REPORT_INTERVAL_MILLIS: u128 = 1000;
+
+        let elapsed = self.last_reported.elapsed();
+        if elapsed.as_millis() >= REPORT_INTERVAL_MILLIS {
+            info!(
+                "num_transactions_scheduled: {} max_pending_transactions: {} max_blocked_transactions: {} total_us: {} packet_batch_time_us: {} completed_transactions_time_us: {} scheduling_time_us: {}",
+                self.num_transactions_scheduled,
+                self.max_pending_transactions,
+                self.max_blocked_transactions,
+                elapsed.as_micros(),
+                self.packet_batch_time_us,
+                self.completed_transactions_time_us,
+                self.scheduling_time_us,
+            );
+
+            *self = Self::default();
+        }
     }
 }
 
