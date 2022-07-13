@@ -68,6 +68,10 @@ struct Args {
     /// Max batch size for scheduler
     #[clap(long, env, default_value_t = 128)]
     max_batch_size: usize,
+
+    /// Do execution threads only send back after the full batch is complete
+    #[clap(long, env, default_value_t = true)]
+    banking_stage_only_alert_full_batch: bool,
 }
 
 #[derive(Debug, Default)]
@@ -113,6 +117,7 @@ fn main() {
         num_read_locks_per_tx,
         num_read_write_locks_per_tx,
         max_batch_size,
+        banking_stage_only_alert_full_batch,
     } = Args::parse();
 
     let (packet_batch_sender, packet_batch_receiver) = crossbeam_channel::unbounded();
@@ -141,6 +146,7 @@ fn main() {
         transaction_batch_receivers,
         completed_transaction_sender,
         execution_per_tx_us,
+        banking_stage_only_alert_full_batch,
         exit.clone(),
     );
 
@@ -181,6 +187,7 @@ fn start_execution_threads(
     transaction_batch_receivers: Vec<Receiver<Vec<Arc<TransactionPriority>>>>,
     completed_transaction_sender: Sender<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
+    banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
 ) -> Vec<JoinHandle<()>> {
     transaction_batch_receivers
@@ -191,6 +198,7 @@ fn start_execution_threads(
                 transaction_batch_receiver,
                 completed_transaction_sender.clone(),
                 execution_per_tx_us,
+                banking_stage_only_alert_full_batch,
                 exit.clone(),
             )
         })
@@ -202,6 +210,7 @@ fn start_execution_thread(
     transaction_batch_receiver: Receiver<Vec<Arc<TransactionPriority>>>,
     completed_transaction_sender: Sender<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
+    banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -210,6 +219,7 @@ fn start_execution_thread(
             transaction_batch_receiver,
             completed_transaction_sender,
             execution_per_tx_us,
+            banking_stage_only_alert_full_batch,
             exit,
         )
     })
@@ -220,6 +230,7 @@ fn execution_worker(
     transaction_batch_receiver: Receiver<Vec<Arc<TransactionPriority>>>,
     completed_transaction_sender: Sender<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
+    banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
 ) {
     loop {
@@ -230,7 +241,7 @@ fn execution_worker(
         select! {
             recv(transaction_batch_receiver) -> maybe_tx_batch => {
                 if let Ok(tx_batch) = maybe_tx_batch {
-                    handle_transaction_batch(&metrics, &completed_transaction_sender, tx_batch, execution_per_tx_us);
+                    handle_transaction_batch(&metrics, &completed_transaction_sender, tx_batch, execution_per_tx_us, banking_stage_only_alert_full_batch);
                 }
             }
             default(Duration::from_millis(100)) => {}
@@ -243,6 +254,7 @@ fn handle_transaction_batch(
     completed_transaction_sender: &Sender<Arc<TransactionPriority>>,
     transaction_batch: Vec<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
+    banking_stage_only_alert_full_batch: bool,
 ) {
     let num_transactions = transaction_batch.len() as u64;
     metrics
@@ -252,14 +264,18 @@ fn handle_transaction_batch(
         .num_transactions_scheduled
         .fetch_add(num_transactions as usize, Ordering::Relaxed);
 
-    // // Sleep through executing the batch
-    // sleep(Duration::from_micros(
-    //     num_transactions * execution_per_tx_us,
-    // ));
+    if banking_stage_only_alert_full_batch {
+        // Sleep through executing the batch
+        sleep(Duration::from_micros(
+            num_transactions * execution_per_tx_us,
+        ));
+    }
 
     // Send transaction complete messages
     for tx in transaction_batch {
-        sleep(Duration::from_micros(execution_per_tx_us));
+        if !banking_stage_only_alert_full_batch {
+            sleep(Duration::from_micros(execution_per_tx_us));
+        }
 
         let _ = completed_transaction_sender.send(tx);
         metrics
