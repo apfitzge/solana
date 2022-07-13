@@ -192,12 +192,14 @@ impl TransactionScheduler {
     /// Handles packet batches as we receive them from the channel
     fn handle_packet_batches(&mut self, packet_batch_message: PacketBatchMessage) {
         for packet_batch in packet_batch_message {
-            let packet_indices: Vec<_> = packet_batch
-                .into_iter()
-                .enumerate()
-                .filter_map(|(idx, p)| if !p.meta.discard() { Some(idx) } else { None })
-                .collect();
-            let transactions: Vec<_> =
+            let (packet_indices, filter_time) = measure!({
+                packet_batch
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(idx, p)| if !p.meta.discard() { Some(idx) } else { None })
+                    .collect::<Vec<_>>()
+            });
+            let (transactions, deserialize_time) = measure!(
                 unprocessed_packet_batches::deserialize_packets(&packet_batch, &packet_indices)
                     .filter_map(|deserialized_packet| {
                         TransactionPriority::try_new(
@@ -205,10 +207,17 @@ impl TransactionScheduler {
                             &self.bank,
                         )
                     })
-                    .collect();
-            for transaction in transactions {
-                self.insert_transaction(transaction);
-            }
+                    .collect::<Vec<_>>()
+            );
+            let (_, insert_time) = measure!({
+                for transaction in transactions {
+                    self.insert_transaction(transaction);
+                }
+            });
+
+            self.metrics.packet_batch_filter_time_us += filter_time.as_us();
+            self.metrics.packet_batch_deserialize_time_us += deserialize_time.as_us();
+            self.metrics.packet_batch_insert_time_us += insert_time.as_us();
         }
 
         self.metrics.max_pending_transactions = self
@@ -635,13 +644,20 @@ struct SchedulerMetrics {
     /// Maximum executing transactions
     max_executing_transactions: usize,
 
-    /// Time spent processing packet batches in microseconds
-    packet_batch_time_us: u64,
-    /// Time spent processing completed transactions in microseconds
+    /// Total time spent processing completed transactions in microseconds
     completed_transactions_time_us: u64,
-    /// Time spent scheduling transactions in microseconds
-    scheduling_time_us: u64,
 
+    /// Total time spent processing packet batches in microseconds
+    packet_batch_time_us: u64,
+    /// Packet Batch - Time spent filtering packets
+    packet_batch_filter_time_us: u64,
+    /// Packet Batch - Time spent deserializing packets
+    packet_batch_deserialize_time_us: u64,
+    /// Packet Batch - Time spent inserting transactions
+    packet_batch_insert_time_us: u64,
+
+    /// Total time spent scheduling transactions in microseconds
+    scheduling_time_us: u64,
     /// Scheduling - Time spent preparing batches
     scheduling_prepare_batches_us: u64,
     /// Scheduling - Time spent sending batches
@@ -662,8 +678,11 @@ impl Default for SchedulerMetrics {
             max_pending_transactions: Default::default(),
             max_blocked_transactions: Default::default(),
             max_executing_transactions: Default::default(),
-            packet_batch_time_us: Default::default(),
             completed_transactions_time_us: Default::default(),
+            packet_batch_time_us: Default::default(),
+            packet_batch_filter_time_us: Default::default(),
+            packet_batch_deserialize_time_us: Default::default(),
+            packet_batch_insert_time_us: Default::default(),
             scheduling_time_us: Default::default(),
             scheduling_prepare_batches_us: Default::default(),
             scheduling_send_batches_us: Default::default(),
@@ -699,13 +718,28 @@ impl SchedulerMetrics {
                     i64
                 ),
                 (
+                    "completed_transactions_time_us",
+                    self.completed_transactions_time_us as i64,
+                    i64
+                ),
+                (
                     "packet_batch_time_us",
                     self.packet_batch_time_us as i64,
                     i64
                 ),
                 (
-                    "completed_transactions_time_us",
-                    self.completed_transactions_time_us as i64,
+                    "packet_batch_filter_time_us",
+                    self.packet_batch_filter_time_us as i64,
+                    i64
+                ),
+                (
+                    "packet_batch_deserialize_time_us",
+                    self.packet_batch_deserialize_time_us as i64,
+                    i64
+                ),
+                (
+                    "packet_batch_insert_time_us",
+                    self.packet_batch_insert_time_us as i64,
                     i64
                 ),
                 ("scheduling_time_us", self.scheduling_time_us as i64, i64),
