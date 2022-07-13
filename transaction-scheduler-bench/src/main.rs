@@ -183,7 +183,7 @@ fn main() {
     let exit = Arc::new(AtomicBool::new(false));
 
     // Spawns and runs the scheduler thread
-    TransactionScheduler::spawn_scheduler(
+    let scheduler_handle = TransactionScheduler::spawn_scheduler(
         packet_batch_receiver,
         transaction_batch_senders,
         completed_transaction_receiver,
@@ -399,7 +399,7 @@ fn spawn_packet_sender(
     config: Arc<PacketSendingConfig>,
     duration: Duration,
     exit: Arc<AtomicBool>,
-) {
+) -> JoinHandle<()> {
     std::thread::spawn(move || {
         send_packets(
             metrics,
@@ -410,7 +410,7 @@ fn spawn_packet_sender(
             duration,
             exit,
         );
-    });
+    })
 }
 
 fn send_packets(
