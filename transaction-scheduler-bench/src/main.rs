@@ -121,8 +121,9 @@ fn main() {
     } = Args::parse();
 
     let (packet_batch_sender, packet_batch_receiver) = crossbeam_channel::unbounded();
-    let (transaction_batch_senders, transaction_batch_receivers) =
-        build_channels(num_execution_threads);
+    // let (transaction_batch_senders, transaction_batch_receivers) =
+    //     build_channels(num_execution_threads);
+    let (transaction_batch_sender, transaction_batch_receiver) = crossbeam_channel::unbounded();
     let (completed_transaction_sender, completed_transaction_receiver) =
         crossbeam_channel::unbounded();
     let bank = Arc::new(Bank::default_for_tests());
@@ -131,7 +132,7 @@ fn main() {
     // Spawns and runs the scheduler thread
     let scheduler_handle = TransactionScheduler::spawn_scheduler(
         packet_batch_receiver,
-        transaction_batch_senders,
+        transaction_batch_sender,
         completed_transaction_receiver,
         bank,
         max_batch_size,
@@ -143,7 +144,8 @@ fn main() {
     // Spawn the execution threads (sleep on transactions and then send completed batches back)
     let execution_handles = start_execution_threads(
         metrics.clone(),
-        transaction_batch_receivers,
+        num_execution_threads,
+        transaction_batch_receiver,
         completed_transaction_sender,
         execution_per_tx_us,
         banking_stage_only_alert_full_batch,
@@ -192,18 +194,18 @@ fn main() {
 
 fn start_execution_threads(
     metrics: Arc<TransactionSchedulerMetrics>,
-    transaction_batch_receivers: Vec<Receiver<Vec<Arc<TransactionPriority>>>>,
+    num_execution_threads: usize,
+    transaction_batch_receiver: Receiver<Vec<Arc<TransactionPriority>>>,
     completed_transaction_sender: Sender<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
     banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
 ) -> Vec<JoinHandle<()>> {
-    transaction_batch_receivers
-        .into_iter()
-        .map(|transaction_batch_receiver| {
+    (0..num_execution_threads)
+        .map(|_| {
             start_execution_thread(
                 metrics.clone(),
-                transaction_batch_receiver,
+                transaction_batch_receiver.clone(),
                 completed_transaction_sender.clone(),
                 execution_per_tx_us,
                 banking_stage_only_alert_full_batch,
