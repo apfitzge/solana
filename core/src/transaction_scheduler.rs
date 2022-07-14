@@ -119,6 +119,11 @@ pub struct TransactionScheduler {
     /// Tracks the current number of executing transacitons
     num_executing_transactions: usize,
 
+    /// Generates TransactionBatchIds
+    next_transaction_batch_id: TransactionBatchId,
+    /// Tracks TransactionBatchDetails by TransactionBatchId
+    transaction_batches: HashMap<TransactionBatchId, TransactionBatch>,
+
     /// Track metrics for scheduler thread
     metrics: SchedulerMetrics,
 }
@@ -145,6 +150,8 @@ impl TransactionScheduler {
             blocked_transactions: HashMap::default(),
             num_blocked_transactions: 0,
             num_executing_transactions: 0,
+            next_transaction_batch_id: 0,
+            transaction_batches: HashMap::default(),
             metrics: SchedulerMetrics::default(),
         };
 
@@ -618,6 +625,17 @@ impl AccountLockKind {
             _ => false,
         }
     }
+}
+
+/// Identified for TransactionBatches
+pub type TransactionBatchId = usize;
+
+/// Transactions in a batch
+struct TransactionBatch {
+    /// Identifier
+    id: TransactionBatchId,
+    /// Vector of transactions included in the batch
+    transactions: Arc<Vec<TransactionRef>>,
 }
 
 /// Helper function to get the lowest-priority blocking transaction
