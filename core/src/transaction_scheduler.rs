@@ -163,28 +163,76 @@ impl TransactionScheduler {
 
     /// Performs work in a loop - Handles different channel receives/timers and performs scheduling
     fn iter(&mut self) {
-        select! {
-            recv(self.completed_transaction_receiver) -> maybe_completed_txs => {
-                let (_, completed_transaction_time) = measure!(
-                    if let Ok(completed_txs) = maybe_completed_txs {
-                        for completed_tx in completed_txs {
-                            self.handle_completed_transaction(completed_tx);
+        // select! {
+        //     recv(self.completed_transaction_receiver) -> maybe_completed_txs => {
+        //         let (_, completed_transaction_time) = measure!(
+        //             if let Ok(completed_txs) = maybe_completed_txs {
+        //                 for completed_tx in completed_txs {
+        //                     self.handle_completed_transaction(completed_tx);
+        //                 }
+        //             }
+        //         );
+        //         self.metrics.completed_transactions_time_us += completed_transaction_time.as_us();
+        //     }
+        //     recv(self.packet_batch_receiver) -> maybe_tx_batch_message => {
+        //         let (_, packet_batch_time) = measure!({
+        //             if let Ok(packet_batch_message) = maybe_tx_batch_message {
+        //                 self.handle_packet_batches(packet_batch_message);
+        //             }
+        //         });
+        //         self.metrics.packet_batch_time_us += packet_batch_time.as_us();
+        //     }
+        //     default() => {
+        //         let (_, scheduling_time) = measure!(self.do_scheduling());
+        //         self.metrics.scheduling_time_us += scheduling_time.as_us();
+        //     }
+        // }
+
+        let outstanding_tx = self.num_blocked_transactions
+            + self.num_executing_transactions
+            + self.pending_transactions.len();
+        if outstanding_tx > 20 * self.max_batch_size * 2 {
+            select! {
+                recv(self.completed_transaction_receiver) -> maybe_completed_txs => {
+                    let (_, completed_transaction_time) = measure!(
+                        if let Ok(completed_txs) = maybe_completed_txs {
+                            for completed_tx in completed_txs {
+                                self.handle_completed_transaction(completed_tx);
+                            }
                         }
-                    }
-                );
-                self.metrics.completed_transactions_time_us += completed_transaction_time.as_us();
+                    );
+                    self.metrics.completed_transactions_time_us += completed_transaction_time.as_us();
+                }
+
+                default() => {
+                    let (_, scheduling_time) = measure!(self.do_scheduling());
+                    self.metrics.scheduling_time_us += scheduling_time.as_us();
+                }
             }
-            recv(self.packet_batch_receiver) -> maybe_tx_batch_message => {
-                let (_, packet_batch_time) = measure!({
-                    if let Ok(packet_batch_message) = maybe_tx_batch_message {
-                        self.handle_packet_batches(packet_batch_message);
-                    }
-                });
-                self.metrics.packet_batch_time_us += packet_batch_time.as_us();
-            }
-            default() => {
-                let (_, scheduling_time) = measure!(self.do_scheduling());
-                self.metrics.scheduling_time_us += scheduling_time.as_us();
+        } else {
+            select! {
+                recv(self.completed_transaction_receiver) -> maybe_completed_txs => {
+                    let (_, completed_transaction_time) = measure!(
+                        if let Ok(completed_txs) = maybe_completed_txs {
+                            for completed_tx in completed_txs {
+                                self.handle_completed_transaction(completed_tx);
+                            }
+                        }
+                    );
+                    self.metrics.completed_transactions_time_us += completed_transaction_time.as_us();
+                }
+                recv(self.packet_batch_receiver) -> maybe_tx_batch_message => {
+                    let (_, packet_batch_time) = measure!({
+                        if let Ok(packet_batch_message) = maybe_tx_batch_message {
+                            self.handle_packet_batches(packet_batch_message);
+                        }
+                    });
+                    self.metrics.packet_batch_time_us += packet_batch_time.as_us();
+                }
+                default() => {
+                    let (_, scheduling_time) = measure!(self.do_scheduling());
+                    self.metrics.scheduling_time_us += scheduling_time.as_us();
+                }
             }
         }
 
@@ -243,6 +291,9 @@ impl TransactionScheduler {
 
     /// Performs scheduling operations on currently pending transactions
     fn do_scheduling(&mut self) {
+        if self.transaction_batch_sender.len() >= 20 * 2 {
+            return;
+        }
         let (batch, prepare_batch_time) = measure!({
             let mut batch = Vec::with_capacity(self.max_batch_size);
 
