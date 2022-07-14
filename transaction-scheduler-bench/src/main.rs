@@ -196,7 +196,7 @@ fn start_execution_threads(
     metrics: Arc<TransactionSchedulerMetrics>,
     num_execution_threads: usize,
     transaction_batch_receiver: Receiver<Vec<Arc<TransactionPriority>>>,
-    completed_transaction_sender: Sender<Arc<TransactionPriority>>,
+    completed_transaction_sender: Sender<Vec<Arc<TransactionPriority>>>,
     execution_per_tx_us: u64,
     banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
@@ -218,7 +218,7 @@ fn start_execution_threads(
 fn start_execution_thread(
     metrics: Arc<TransactionSchedulerMetrics>,
     transaction_batch_receiver: Receiver<Vec<Arc<TransactionPriority>>>,
-    completed_transaction_sender: Sender<Arc<TransactionPriority>>,
+    completed_transaction_sender: Sender<Vec<Arc<TransactionPriority>>>,
     execution_per_tx_us: u64,
     banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
@@ -238,7 +238,7 @@ fn start_execution_thread(
 fn execution_worker(
     metrics: Arc<TransactionSchedulerMetrics>,
     transaction_batch_receiver: Receiver<Vec<Arc<TransactionPriority>>>,
-    completed_transaction_sender: Sender<Arc<TransactionPriority>>,
+    completed_transaction_sender: Sender<Vec<Arc<TransactionPriority>>>,
     execution_per_tx_us: u64,
     banking_stage_only_alert_full_batch: bool,
     exit: Arc<AtomicBool>,
@@ -261,7 +261,7 @@ fn execution_worker(
 
 fn handle_transaction_batch(
     metrics: &TransactionSchedulerMetrics,
-    completed_transaction_sender: &Sender<Arc<TransactionPriority>>,
+    completed_transaction_sender: &Sender<Vec<Arc<TransactionPriority>>>,
     transaction_batch: Vec<Arc<TransactionPriority>>,
     execution_per_tx_us: u64,
     banking_stage_only_alert_full_batch: bool,
@@ -274,24 +274,16 @@ fn handle_transaction_batch(
         .num_transactions_scheduled
         .fetch_add(num_transactions as usize, Ordering::Relaxed);
 
-    if banking_stage_only_alert_full_batch {
-        // Sleep through executing the batch
-        sleep(Duration::from_micros(
-            num_transactions * execution_per_tx_us,
-        ));
-    }
+    // Sleep through executing the batch
+    sleep(Duration::from_micros(
+        num_transactions * execution_per_tx_us,
+    ));
 
-    // Send transaction complete messages
-    for tx in transaction_batch {
-        if !banking_stage_only_alert_full_batch {
-            sleep(Duration::from_micros(execution_per_tx_us));
-        }
-
-        let _ = completed_transaction_sender.send(tx);
-        metrics
-            .num_transactions_completed
-            .fetch_add(1, Ordering::Relaxed);
-    }
+    // Send transaction complete message
+    let _ = completed_transaction_sender.send(transaction_batch);
+    metrics
+        .num_transactions_completed
+        .fetch_add(num_transactions as usize, Ordering::Relaxed);
 }
 
 const NUM_SENDERS: usize = 4;

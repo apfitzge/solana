@@ -100,7 +100,7 @@ pub struct TransactionScheduler {
     /// Channel for sending transaction batches to banking threads
     transaction_batch_sender: Sender<TransactionBatchMessage>,
     /// Channel for receiving completed transactions from any banking thread
-    completed_transaction_receiver: Receiver<TransactionMessage>,
+    completed_transaction_receiver: Receiver<TransactionBatchMessage>,
     /// Bank that we are currently scheduling for
     bank: Arc<Bank>,
     /// Max number of transactions to send to a single banking-thread in a batch
@@ -128,7 +128,7 @@ impl TransactionScheduler {
     pub fn spawn_scheduler(
         packet_batch_receiver: Receiver<PacketBatchMessage>,
         transaction_batch_sender: Sender<TransactionBatchMessage>,
-        completed_transaction_receiver: Receiver<TransactionMessage>,
+        completed_transaction_receiver: Receiver<TransactionBatchMessage>,
         bank: Arc<Bank>,
         max_batch_size: usize,
         exit: Arc<AtomicBool>,
@@ -164,10 +164,12 @@ impl TransactionScheduler {
     /// Performs work in a loop - Handles different channel receives/timers and performs scheduling
     fn iter(&mut self) {
         select! {
-            recv(self.completed_transaction_receiver) -> maybe_completed_tx => {
+            recv(self.completed_transaction_receiver) -> maybe_completed_txs => {
                 let (_, completed_transaction_time) = measure!(
-                    if let Ok(completed_tx) = maybe_completed_tx {
-                        self.handle_completed_transaction(completed_tx);
+                    if let Ok(completed_txs) = maybe_completed_txs {
+                        for completed_tx in completed_txs {
+                            self.handle_completed_transaction(completed_tx);
+                        }
                     }
                 );
                 self.metrics.completed_transactions_time_us += completed_transaction_time.as_us();
