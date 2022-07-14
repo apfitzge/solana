@@ -90,7 +90,7 @@ impl TransactionPriority {
 
 type PacketBatchMessage = Vec<PacketBatch>;
 type TransactionMessage = TransactionRef;
-type TransactionBatchMessage = Vec<TransactionMessage>;
+type TransactionBatchMessage = (TransactionBatchId, Arc<Vec<TransactionMessage>>);
 
 /// Stores state for scheduling transactions and channels for communicating
 /// with other threads: SigVerify and Banking
@@ -100,7 +100,7 @@ pub struct TransactionScheduler {
     /// Channels for sending transaction batches to banking threads
     transaction_batch_senders: Vec<Sender<TransactionBatchMessage>>,
     /// Channel for receiving completed transactions from any banking thread
-    completed_transaction_receiver: Receiver<TransactionMessage>,
+    completed_batch_receiver: Receiver<TransactionBatchId>,
     /// Bank that we are currently scheduling for
     bank: Arc<Bank>,
     /// Max number of transactions to send to a single banking-thread in a batch
@@ -133,7 +133,7 @@ impl TransactionScheduler {
     pub fn spawn_scheduler(
         packet_batch_receiver: Receiver<PacketBatchMessage>,
         transaction_batch_senders: Vec<Sender<TransactionBatchMessage>>,
-        completed_transaction_receiver: Receiver<TransactionMessage>,
+        completed_batch_receiver: Receiver<TransactionBatchId>,
         bank: Arc<Bank>,
         max_batch_size: usize,
         exit: Arc<AtomicBool>,
@@ -141,7 +141,7 @@ impl TransactionScheduler {
         let scheduler = TransactionScheduler {
             packet_batch_receiver,
             transaction_batch_senders,
-            completed_transaction_receiver,
+            completed_batch_receiver,
             bank,
             max_batch_size,
             exit,
@@ -171,13 +171,13 @@ impl TransactionScheduler {
     /// Performs work in a loop - Handles different channel receives/timers and performs scheduling
     fn iter(&mut self) {
         select! {
-            recv(self.completed_transaction_receiver) -> maybe_completed_tx => {
-                let (_, completed_transaction_time) = measure!(
-                    if let Ok(completed_tx) = maybe_completed_tx {
-                        self.handle_completed_transaction(completed_tx);
+            recv(self.completed_batch_receiver) -> maybe_completed_batch => {
+                let (_, completed_batch_time) = measure!(
+                    if let Ok(completed_batch) = maybe_completed_batch {
+                        self.handle_completed_batch(completed_batch);
                     }
                 );
-                self.metrics.completed_transactions_time_us += completed_transaction_time.as_us();
+                self.metrics.completed_transactions_time_us += completed_batch_time.as_us();
             }
             recv(self.packet_batch_receiver) -> maybe_tx_batch_message => {
                 let (_, packet_batch_time) = measure!({
@@ -233,10 +233,18 @@ impl TransactionScheduler {
             .max(self.pending_transactions.len());
     }
 
+    /// Handle completed transaction batch
+    fn handle_completed_batch(&mut self, batch_id: TransactionBatchId) {
+        let batch = self.transaction_batches.remove(&batch_id).unwrap();
+        for transaction in batch.transactions.iter() {
+            self.handle_completed_transaction(transaction);
+        }
+    }
+
     /// Handle completed transactions
-    fn handle_completed_transaction(&mut self, transaction: TransactionMessage) {
+    fn handle_completed_transaction(&mut self, transaction: &TransactionMessage) {
         let (_, update_queues_time) =
-            measure!(self.update_queues_on_completed_transaction(&transaction));
+            measure!(self.update_queues_on_completed_transaction(transaction));
         let (_, unblock_transactions_time) =
             measure!(self.push_unblocked_transactions(transaction.transaction.signature()));
 
@@ -250,16 +258,26 @@ impl TransactionScheduler {
     fn do_scheduling(&mut self) {
         let (batches, prepare_batches_time) = measure!({
             // Allocate batches to be sent to threads
-            let mut batches =
-                vec![Vec::with_capacity(self.max_batch_size); self.transaction_batch_senders.len()];
+            let mut batches = (0..self.transaction_batch_senders.len())
+                .map(|_| {
+                    let transaction_batch_id = self.next_transaction_batch_id;
+                    self.next_transaction_batch_id += 1;
+                    TransactionBatchBuilder {
+                        id: transaction_batch_id,
+                        transactions: Vec::with_capacity(self.max_batch_size),
+                    }
+                })
+                .collect::<Vec<_>>();
 
             // Do scheduling work
             let mut batch_index = 0;
             while let Some(transaction) = self.pending_transactions.pop() {
-                if self.try_schedule_transaction(transaction, &mut batches[batch_index]) {
+                if self.try_schedule_transaction(&transaction) {
+                    batches[batch_index].transactions.push(transaction);
+
                     // break if we reach max batch size on any of the batches
                     // TODO: just don't add to this batch if it's full
-                    if batches[batch_index].len() == self.max_batch_size {
+                    if batches[batch_index].transactions.len() == self.max_batch_size {
                         break;
                     }
                     batch_index = (batch_index + 1) % batches.len();
@@ -278,10 +296,13 @@ impl TransactionScheduler {
                 .zip(self.transaction_batch_senders.iter())
             {
                 // Only send if we have a non-empty batch
-                if batch.len() > 0 {
-                    self.metrics.num_transactions_scheduled += batch.len();
-                    self.num_executing_transactions += batch.len();
-                    sender.send(batch).unwrap();
+                let num_transactions = batch.transactions.len();
+                if num_transactions > 0 {
+                    self.metrics.num_transactions_scheduled += num_transactions;
+                    self.num_executing_transactions += num_transactions;
+                    let batch = batch.build();
+                    self.transaction_batches.insert(batch.id, batch.clone());
+                    sender.send((batch.id, batch.transactions)).unwrap();
                 }
             }
         });
@@ -370,13 +391,9 @@ impl TransactionScheduler {
     ///     - If it can be scheduled, locks are taken, it is pushed into the provided batch.
     ///
     /// Returns true if the transaction was scheduled, and false otherwise
-    fn try_schedule_transaction(
-        &mut self,
-        transaction: TransactionRef,
-        batch: &mut TransactionBatchMessage,
-    ) -> bool {
+    fn try_schedule_transaction(&mut self, transaction: &TransactionRef) -> bool {
         let (maybe_blocking_transaction, get_lowest_blocking_transaction_time) =
-            measure!(self.get_lowest_priority_blocking_transaction(&transaction));
+            measure!(self.get_lowest_priority_blocking_transaction(transaction));
         self.metrics.scheduling_find_blocking_transaction_us +=
             get_lowest_blocking_transaction_time.as_us();
 
@@ -385,17 +402,16 @@ impl TransactionScheduler {
                 .blocked_transactions
                 .entry(*blocking_transaction.transaction.signature())
                 .or_default()
-                .push(transaction));
+                .push(transaction.clone()));
             self.metrics.scheduling_insert_blocking_transaction_us +=
                 insert_blocked_transaction_time.as_us();
 
             false
         } else {
             let (_, lock_scheduled_transaction_time) =
-                measure!(self.lock_for_transaction(&transaction));
+                measure!(self.lock_for_transaction(transaction));
             self.metrics.scheduling_lock_transaction_accounts_us +=
                 lock_scheduled_transaction_time.as_us();
-            batch.push(transaction);
             true
         }
     }
@@ -631,11 +647,28 @@ impl AccountLockKind {
 pub type TransactionBatchId = usize;
 
 /// Transactions in a batch
+#[derive(Debug, Clone)]
 struct TransactionBatch {
     /// Identifier
     id: TransactionBatchId,
     /// Vector of transactions included in the batch
     transactions: Arc<Vec<TransactionRef>>,
+}
+
+struct TransactionBatchBuilder {
+    /// Identifier
+    id: TransactionBatchId,
+    /// Vector of transactions included in the batch
+    transactions: Vec<TransactionRef>,
+}
+
+impl TransactionBatchBuilder {
+    fn build(self) -> TransactionBatch {
+        TransactionBatch {
+            id: self.id,
+            transactions: Arc::new(self.transactions),
+        }
+    }
 }
 
 /// Helper function to get the lowest-priority blocking transaction
@@ -889,7 +922,7 @@ mod tests {
         let scheduler = TransactionScheduler {
             packet_batch_receiver: pb_rx,
             transaction_batch_senders: tb_txs,
-            completed_transaction_receiver: ct_rx,
+            completed_batch_receiver: ct_rx,
             bank: Arc::new(Bank::default_for_tests()),
             max_batch_size: 128,
             exit: Arc::new(AtomicBool::default()),
@@ -930,7 +963,7 @@ mod tests {
 
     fn complete_batch(scheduler: &mut TransactionScheduler, batch: &[TransactionRef]) {
         for transaction in batch.into_iter().cloned() {
-            scheduler.handle_completed_transaction(transaction);
+            scheduler.handle_completed_batch(transaction);
         }
     }
 
