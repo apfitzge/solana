@@ -22,11 +22,11 @@ use {
 #[derive(Clone, Debug)]
 pub struct TransactionPriority {
     /// Transaction priority
-    priority: u64,
+    pub priority: u64,
     /// Sanitized transaction
-    transaction: SanitizedTransaction,
+    pub transaction: SanitizedTransaction,
     /// Timestamp the scheduler received the transaction - only used for ordering
-    timestamp: Instant,
+    pub timestamp: Instant,
 }
 
 impl Ord for TransactionPriority {
