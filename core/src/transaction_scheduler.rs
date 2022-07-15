@@ -307,10 +307,21 @@ impl TransactionScheduler {
 
     /// Handle completed transaction batch
     fn handle_completed_batch(&mut self, batch_id: TransactionBatchId) {
+        // Check batch exists in the tracking and matches the queue for the execution thread
         let batch = self.transaction_batches.remove(&batch_id).unwrap();
+        assert_eq!(
+            batch_id,
+            self.execution_thread_stats[batch.execution_thread_index]
+                .queued_batches
+                .pop_front()
+                .unwrap()
+        );
 
         // Update number of executing transactions
         self.num_executing_transactions -= batch.num_transactions;
+        let execution_thread_stats = &mut self.execution_thread_stats[batch.execution_thread_index];
+        // TODO: actually track CUs instead of just num transacitons
+        execution_thread_stats.queued_transactions -= batch.num_transactions;
 
         // Remove account locks
         for (account, _lock) in batch.account_locks {
@@ -387,6 +398,11 @@ impl TransactionScheduler {
 
         // Build the batch
         let (batch, transactions) = batch_builder.build(&self.bank);
+
+        // Update execution thread stats
+        let execution_thread_stats = &mut self.execution_thread_stats[batch.execution_thread_index];
+        execution_thread_stats.queued_batches.push_back(batch.id);
+        execution_thread_stats.queued_transactions += transactions.len();
 
         // Add batch to account locks
         self.lock_accounts(&batch);
