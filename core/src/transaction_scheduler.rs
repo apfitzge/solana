@@ -207,6 +207,11 @@ pub struct TransactionScheduler {
     /// Tracks TransactionBatchDetails by TransactionBatchId
     transaction_batches: HashMap<TransactionBatchId, TransactionBatch>,
 
+    /// Number of execution threads
+    num_execution_threads: usize,
+    /// Tracks status of exeuction threads
+    execution_thread_stats: Vec<ExecutionThreadStats>,
+
     /// Track metrics for scheduler thread
     metrics: SchedulerMetrics,
 }
@@ -233,6 +238,11 @@ impl TransactionScheduler {
         };
 
         std::thread::spawn(move || packet_handler.main());
+        let num_execution_threads = transaction_batch_senders.len();
+        let execution_thread_stats = (0..num_execution_threads)
+            .into_iter()
+            .map(|_| ExecutionThreadStats::default())
+            .collect();
 
         let scheduler = TransactionScheduler {
             transaction_batch_senders,
@@ -249,6 +259,8 @@ impl TransactionScheduler {
             num_executing_transactions: 0,
             next_transaction_batch_id: 0,
             transaction_batches: HashMap::default(),
+            num_execution_threads,
+            execution_thread_stats,
             metrics: SchedulerMetrics::default(),
         };
 
@@ -740,6 +752,17 @@ fn option_min<T: Ord>(lhs: Option<T>, rhs: Option<T>) -> Option<T> {
         (lhs, None) => lhs,
         (None, rhs) => rhs,
     }
+}
+
+/// Track stats for the execution threads - Order of members matters for derived implementations of PartialCmp
+#[derive(Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+struct ExecutionThreadStats {
+    /// Currently queued compute-units
+    queued_compute_units: usize,
+    /// Currently queued number of transactions
+    queued_transactions: usize,
+    /// Currently queued batch ids
+    queued_batches: VecDeque<TransactionBatchId>,
 }
 
 /// Track metrics for the scheduler thread
