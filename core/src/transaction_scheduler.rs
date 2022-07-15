@@ -2,17 +2,18 @@
 
 use {
     crate::unprocessed_packet_batches::{self, ImmutableDeserializedPacket},
-    crossbeam_channel::{select, Receiver, Sender},
-    solana_measure::measure,
+    crossbeam_channel::{select, Receiver, Sender, TryRecvError},
+    dashmap::DashMap,
+    solana_measure::{measure, measure::Measure},
     solana_perf::packet::PacketBatch,
     solana_runtime::bank::Bank,
     solana_sdk::{pubkey::Pubkey, signature::Signature, transaction::SanitizedTransaction},
     std::{
-        collections::{BTreeSet, BinaryHeap, HashMap, HashSet},
+        collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque},
         hash::Hash,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc,
+            Arc, Mutex,
         },
         thread::JoinHandle,
         time::Instant,
@@ -92,11 +93,90 @@ type PacketBatchMessage = Vec<PacketBatch>;
 type TransactionMessage = TransactionRef;
 type TransactionBatchMessage = (TransactionBatchId, Arc<Vec<TransactionMessage>>);
 
+/// Separate packet deserialization and ordering
+struct PacketBatchHandler {
+    /// Exit signal
+    exit: Arc<AtomicBool>,
+    /// Bank
+    bank: Arc<Bank>,
+    /// Channel for receiving deserialized packet batches from SigVerify
+    packet_batch_receiver: Receiver<PacketBatchMessage>,
+    /// Pending transactions to be send to the scheduler
+    pending_transactions: Arc<Mutex<BinaryHeap<TransactionRef>>>,
+    /// Account Queues
+    transactions_by_account: Arc<DashMap<Pubkey, AccountTransactionQueue>>,
+}
+
+impl PacketBatchHandler {
+    /// Driving loop
+    fn main(mut self) {
+        loop {
+            if self.exit.load(Ordering::Relaxed) {
+                break;
+            }
+            self.iter();
+        }
+    }
+
+    /// Try receiving packets or send out buffered transactions
+    fn iter(&mut self) {
+        if let Ok(packet_batches) = self.packet_batch_receiver.try_recv() {
+            self.handle_packet_batches(packet_batches);
+        }
+    }
+
+    /// Handle received packet batches - deserialize and put into the buffer
+    fn handle_packet_batches(&mut self, packet_batches: Vec<PacketBatch>) {
+        for packet_batch in packet_batches {
+            let packet_indices = packet_batch
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, p)| if !p.meta.discard() { Some(idx) } else { None })
+                .collect::<Vec<_>>();
+            let transactions =
+                unprocessed_packet_batches::deserialize_packets(&packet_batch, &packet_indices)
+                    .filter_map(|deserialized_packet| {
+                        TransactionPriority::try_new(
+                            deserialized_packet.immutable_section(),
+                            &self.bank,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+            self.insert_transactions(transactions);
+        }
+    }
+
+    /// Insert transactions into queues and pending
+    fn insert_transactions(&self, transactions: Vec<TransactionRef>) {
+        for tx in &transactions {
+            // Get account locks
+            let account_locks = tx.transaction.get_account_locks().unwrap();
+            for account in account_locks.readonly.into_iter() {
+                self.transactions_by_account
+                    .entry(*account)
+                    .or_default()
+                    .reads
+                    .insert(tx.clone());
+            }
+
+            for account in account_locks.writable.into_iter() {
+                self.transactions_by_account
+                    .entry(*account)
+                    .or_default()
+                    .writes
+                    .insert(tx.clone());
+            }
+        }
+        self.pending_transactions
+            .lock()
+            .unwrap()
+            .extend(transactions.into_iter());
+    }
+}
+
 /// Stores state for scheduling transactions and channels for communicating
 /// with other threads: SigVerify and Banking
 pub struct TransactionScheduler {
-    /// Channel for receiving deserialized packet batches from SigVerify
-    packet_batch_receiver: Receiver<PacketBatchMessage>,
     /// Channels for sending transaction batches to banking threads
     transaction_batch_senders: Vec<Sender<TransactionBatchMessage>>,
     /// Channel for receiving completed transactions from any banking thread
@@ -109,9 +189,9 @@ pub struct TransactionScheduler {
     exit: Arc<AtomicBool>,
 
     /// Pending transactions that are not known to be blocked
-    pending_transactions: BinaryHeap<TransactionRef>,
+    pending_transactions: Arc<Mutex<BinaryHeap<TransactionRef>>>,
     /// Transaction queues and locks by account key
-    transactions_by_account: HashMap<Pubkey, AccountTransactionQueue>,
+    transactions_by_account: Arc<DashMap<Pubkey, AccountTransactionQueue>>,
     /// Map from transaction signature to transactions blocked by the signature
     blocked_transactions: HashMap<Signature, Vec<TransactionRef>>,
     /// Map from blocking BatchId to transactions
@@ -142,15 +222,27 @@ impl TransactionScheduler {
         max_batch_size: usize,
         exit: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
-        let scheduler = TransactionScheduler {
+        let pending_transactions = Arc::new(Mutex::new(BinaryHeap::default()));
+        let transactions_by_account = Arc::new(DashMap::default());
+
+        let packet_handler = PacketBatchHandler {
+            exit: exit.clone(),
+            bank: bank.clone(),
             packet_batch_receiver,
+            pending_transactions: pending_transactions.clone(),
+            transactions_by_account: transactions_by_account.clone(),
+        };
+
+        std::thread::spawn(move || packet_handler.main());
+
+        let scheduler = TransactionScheduler {
             transaction_batch_senders,
             completed_batch_receiver,
             bank,
             max_batch_size,
             exit,
-            pending_transactions: BinaryHeap::default(),
-            transactions_by_account: HashMap::default(),
+            pending_transactions,
+            transactions_by_account,
             blocked_transactions: HashMap::default(),
             blocked_transactions_by_batch_id: HashMap::default(),
             blocked_transactions_batch_count: HashMap::default(),
@@ -176,87 +268,73 @@ impl TransactionScheduler {
 
     /// Performs work in a loop - Handles different channel receives/timers and performs scheduling
     fn iter(&mut self) {
-        let outstanding_transactions = self.num_blocked_transactions
-            + self.num_executing_transactions
-            + self.pending_transactions.len();
-        if outstanding_transactions > 16096 {
-            select! {
-                recv(self.completed_batch_receiver) -> maybe_completed_batch => {
-                    let (_, completed_batch_time) = measure!(
-                        if let Ok(completed_batch) = maybe_completed_batch {
-                            self.handle_completed_batch(completed_batch);
-                        }
-                    );
-                    self.metrics.completed_transactions_time_us += completed_batch_time.as_us();
-                }
-                default() => {
-                    let (_, scheduling_time) = measure!(self.do_scheduling());
-                    self.metrics.scheduling_time_us += scheduling_time.as_us();
-                }
-            }
-        } else {
-            select! {
-                recv(self.completed_batch_receiver) -> maybe_completed_batch => {
-                    let (_, completed_batch_time) = measure!(
-                        if let Ok(completed_batch) = maybe_completed_batch {
-                            self.handle_completed_batch(completed_batch);
-                        }
-                    );
-                    self.metrics.completed_transactions_time_us += completed_batch_time.as_us();
-                }
-                recv(self.packet_batch_receiver) -> maybe_tx_batch_message => {
-                    let (_, packet_batch_time) = measure!({
-                        if let Ok(packet_batch_message) = maybe_tx_batch_message {
-                            self.handle_packet_batches(packet_batch_message);
-                        }
-                    });
-                    self.metrics.packet_batch_time_us += packet_batch_time.as_us();
-                }
-                default() => {
-                    let (_, scheduling_time) = measure!(self.do_scheduling());
-                    self.metrics.scheduling_time_us += scheduling_time.as_us();
-                }
-            }
+        // let outstanding_transactions = self.num_blocked_transactions
+        //     + self.num_executing_transactions
+        //     + self.pending_transactions.len();
+        // if outstanding_transactions > 16000 {
+        //     select! {
+        //         recv(self.completed_batch_receiver) -> maybe_completed_batch => {
+        //             let (_, completed_batch_time) = measure!(
+        //                 if let Ok(completed_batch) = maybe_completed_batch {
+        //                     self.handle_completed_batch(completed_batch);
+        //                 }
+        //             );
+        //             self.metrics.completed_transactions_time_us += completed_batch_time.as_us();
+        //         }
+        //         default() => {
+        //             let (_, scheduling_time) = measure!(self.do_scheduling());
+        //             self.metrics.scheduling_time_us += scheduling_time.as_us();
+        //         }
+        //     }
+        // } else {
+        //     select! {
+        //         recv(self.completed_batch_receiver) -> maybe_completed_batch => {
+        //             let (_, completed_batch_time) = measure!(
+        //                 if let Ok(completed_batch) = maybe_completed_batch {
+        //                     self.handle_completed_batch(completed_batch);
+        //                 }
+        //             );
+        //             self.metrics.completed_transactions_time_us += completed_batch_time.as_us();
+        //         }
+        //         recv(self.transaction_receiver) -> maybe_tx_batch => {
+        //             let (_, transaction_receive_time) = measure!({                    if let Ok(tx_batch) = maybe_tx_batch {
+        //                 for tx in tx_batch.into_iter() {
+        //                     self.insert_transaction(tx);
+        //                 }
+        //             }});
+        //             self.metrics.packet_batch_time_us += transaction_receive_time.as_us();
+
+        //         }
+        //         default() => {
+        //             let (_, scheduling_time) = measure!(self.do_scheduling());
+        //             self.metrics.scheduling_time_us += scheduling_time.as_us();
+        //         }
+        //     }
+        // }
+        fn try_recv<T>(receiver: &Receiver<T>) -> (Result<T, TryRecvError>, Measure) {
+            measure!(receiver.try_recv())
         }
 
-        self.metrics.report();
-    }
-
-    /// Handles packet batches as we receive them from the channel
-    fn handle_packet_batches(&mut self, packet_batch_message: PacketBatchMessage) {
-        for packet_batch in packet_batch_message {
-            let (packet_indices, filter_time) = measure!({
-                packet_batch
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(idx, p)| if !p.meta.discard() { Some(idx) } else { None })
-                    .collect::<Vec<_>>()
-            });
-            let (transactions, deserialize_time) = measure!(
-                unprocessed_packet_batches::deserialize_packets(&packet_batch, &packet_indices)
-                    .filter_map(|deserialized_packet| {
-                        TransactionPriority::try_new(
-                            deserialized_packet.immutable_section(),
-                            &self.bank,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            );
-            let (_, insert_time) = measure!({
-                for transaction in transactions {
-                    self.insert_transaction(transaction);
+        // Try receiving completed batches
+        let (_, completed_batch_time) = measure!({
+            let (maybe_completed_batch, recv_time) = try_recv(&self.completed_batch_receiver);
+            let (_, handle_batch_time) = measure!({
+                if let Ok(completed_batch) = maybe_completed_batch {
+                    self.handle_completed_batch(completed_batch);
                 }
             });
 
-            self.metrics.packet_batch_filter_time_us += filter_time.as_us();
-            self.metrics.packet_batch_deserialize_time_us += deserialize_time.as_us();
-            self.metrics.packet_batch_insert_time_us += insert_time.as_us();
-        }
+            self.metrics.compeleted_batch_try_recv_time_us += recv_time.as_us();
+            self.metrics.completed_batch_handle_batch_time_us += handle_batch_time.as_us();
+        });
+        self.metrics.completed_transactions_time_us += completed_batch_time.as_us();
 
-        self.metrics.max_pending_transactions = self
-            .metrics
-            .max_pending_transactions
-            .max(self.pending_transactions.len());
+        // Scheduling time
+        let (_, scheduling_time) = measure!(self.do_scheduling());
+        self.metrics.scheduling_time_us += scheduling_time.as_us();
+
+        let (_, metrics_time) = measure!(self.metrics.report());
+        self.metrics.metrics_us += metrics_time.as_us();
     }
 
     /// Handle completed transaction batch
@@ -274,7 +352,7 @@ impl TransactionScheduler {
         // Push transactions blocked (by batch) back into the pending queue
         if let Some(blocked_transactions) = self.blocked_transactions_by_batch_id.remove(&batch_id)
         {
-            for tx in blocked_transactions {
+            let unblocked_transactions = blocked_transactions.into_iter().filter(|tx| {
                 let signature = tx.transaction.signature();
                 let blocked_batches_count = self
                     .blocked_transactions_batch_count
@@ -283,10 +361,16 @@ impl TransactionScheduler {
                 *blocked_batches_count -= 1;
                 if *blocked_batches_count == 0 {
                     self.blocked_transactions_batch_count.remove(signature);
-                    self.pending_transactions.push(tx);
                     self.num_blocked_transactions -= 1;
+                    true
+                } else {
+                    false
                 }
-            }
+            });
+            self.pending_transactions
+                .lock()
+                .unwrap()
+                .extend(unblocked_transactions);
         }
     }
 
@@ -320,9 +404,15 @@ impl TransactionScheduler {
         };
 
         // Try scheduling highest-priority transactions into the batch
-        while let Some(transaction) = self.pending_transactions.pop() {
-            self.try_schedule_transaction(&transaction, &mut batch_builder);
-            if batch_builder.transactions.len() == self.max_batch_size {
+        loop {
+            let mtx = self.pending_transactions.lock().unwrap().pop();
+            let mtx = mtx.map(|tx| tx.clone());
+            if let Some(tx) = mtx {
+                self.try_schedule_transaction(&tx, &mut batch_builder);
+                if batch_builder.transactions.len() == self.max_batch_size {
+                    break;
+                }
+            } else {
                 break;
             }
         }
@@ -486,6 +576,8 @@ impl TransactionScheduler {
         {
             self.num_blocked_transactions -= blocked_transactions.len();
             self.pending_transactions
+                .lock()
+                .unwrap()
                 .extend(blocked_transactions.into_iter());
         }
     }
@@ -499,30 +591,6 @@ impl TransactionScheduler {
                 .scheduled_lock
                 .lock_on_batch(batch.id, lock.is_write());
         }
-    }
-
-    /// Insert transaction into account queues and pending queue
-    fn insert_transaction(&mut self, transaction: TransactionRef) {
-        if let Ok(account_locks) = transaction.transaction.get_account_locks() {
-            // Insert into readonly queues
-            for account in account_locks.readonly {
-                self.transactions_by_account
-                    .entry(*account)
-                    .or_default()
-                    .reads
-                    .insert(transaction.clone());
-            }
-            // Insert into writeonly queues
-            for account in account_locks.writable {
-                self.transactions_by_account
-                    .entry(*account)
-                    .or_default()
-                    .writes
-                    .insert(transaction.clone());
-            }
-        }
-
-        self.pending_transactions.push(transaction);
     }
 
     /// Gets the lowest priority transaction that blocks this one
@@ -579,11 +647,11 @@ impl AccountTransactionQueue {
     }
 
     /// Find the minimum-priority transaction that blocks this transaction if there is one
-    fn get_min_blocking_transaction<'a>(
-        &'a self,
+    fn get_min_blocking_transaction(
+        &self,
         transaction: &TransactionRef,
         is_write: bool,
-    ) -> Option<&'a TransactionRef> {
+    ) -> Option<TransactionRef> {
         let mut min_blocking_transaction = None;
         // Write transactions will be blocked by higher-priority reads, but read transactions will not
         if is_write {
@@ -598,6 +666,7 @@ impl AccountTransactionQueue {
             min_blocking_transaction,
             upper_bound(&self.writes, transaction.clone()),
         )
+        .map(|txr| txr.clone())
     }
 }
 
@@ -727,18 +796,31 @@ struct SchedulerMetrics {
 
     /// Total time spent processing completed transactions in microseconds
     completed_transactions_time_us: u64,
+    /// Completed transactions - TryRecv time
+    compeleted_batch_try_recv_time_us: u64,
+    /// Completed transactions - Handle completed batch
+    completed_batch_handle_batch_time_us: u64,
 
-    /// Total time spent processing packet batches in microseconds
-    packet_batch_time_us: u64,
-    /// Packet Batch - Time spent filtering packets
-    packet_batch_filter_time_us: u64,
-    /// Packet Batch - Time spent deserializing packets
-    packet_batch_deserialize_time_us: u64,
-    /// Packet Batch - Time spent inserting transactions
-    packet_batch_insert_time_us: u64,
+    // /// Total time spent processing packet batches in microseconds
+    // packet_batch_time_us: u64,
+    // /// Packet Batch - Time spent filtering packets
+    // packet_batch_filter_time_us: u64,
+    // /// Packet Batch - Time spent deserializing packets
+    // packet_batch_deserialize_time_us: u64,
+    // /// Packet Batch - Time spent inserting transactions
+    // packet_batch_insert_time_us: u64,
+    /// Total time spent on new transactions
+    transactions_time_us: u64,
+    /// Transactions - TryRecv time
+    transactions_try_recv_us: u64,
+    /// Transactions - Insert time
+    transactions_insert_us: u64,
 
     /// Total time spent scheduling transactions in microseconds
     scheduling_time_us: u64,
+
+    /// Time spent checking and reporting metrics
+    metrics_us: u64,
 }
 
 impl Default for SchedulerMetrics {
@@ -750,11 +832,13 @@ impl Default for SchedulerMetrics {
             max_blocked_transactions: Default::default(),
             max_executing_transactions: Default::default(),
             completed_transactions_time_us: Default::default(),
-            packet_batch_time_us: Default::default(),
-            packet_batch_filter_time_us: Default::default(),
-            packet_batch_deserialize_time_us: Default::default(),
-            packet_batch_insert_time_us: Default::default(),
             scheduling_time_us: Default::default(),
+            compeleted_batch_try_recv_time_us: Default::default(),
+            completed_batch_handle_batch_time_us: Default::default(),
+            transactions_time_us: Default::default(),
+            transactions_try_recv_us: Default::default(),
+            transactions_insert_us: Default::default(),
+            metrics_us: Default::default(),
         }
     }
 }
@@ -794,26 +878,32 @@ impl SchedulerMetrics {
                     i64
                 ),
                 (
-                    "packet_batch_time_us",
-                    self.packet_batch_time_us as i64,
+                    "compeleted_batch_try_recv_time_us",
+                    self.compeleted_batch_try_recv_time_us as i64,
                     i64
                 ),
                 (
-                    "packet_batch_filter_time_us",
-                    self.packet_batch_filter_time_us as i64,
+                    "completed_batch_handle_batch_time_us",
+                    self.completed_batch_handle_batch_time_us as i64,
                     i64
                 ),
                 (
-                    "packet_batch_deserialize_time_us",
-                    self.packet_batch_deserialize_time_us as i64,
+                    "transactions_time_us",
+                    self.transactions_time_us as i64,
                     i64
                 ),
                 (
-                    "packet_batch_insert_time_us",
-                    self.packet_batch_insert_time_us as i64,
+                    "transactions_try_recv_us",
+                    self.transactions_try_recv_us as i64,
+                    i64
+                ),
+                (
+                    "transactions_insert_us",
+                    self.transactions_insert_us as i64,
                     i64
                 ),
                 ("scheduling_time_us", self.scheduling_time_us as i64, i64),
+                ("metrics_us", self.metrics_us as i64, i64),
             );
 
             *self = Self::default();
