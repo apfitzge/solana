@@ -90,8 +90,7 @@ impl TransactionPriority {
 }
 
 type PacketBatchMessage = Vec<PacketBatch>;
-type TransactionMessage = TransactionRef;
-type TransactionBatchMessage = (TransactionBatchId, Arc<Vec<TransactionMessage>>);
+type TransactionBatchMessage = (TransactionBatchId, Vec<SanitizedTransaction>);
 
 /// Separate packet deserialization and ordering
 struct PacketBatchHandler {
@@ -342,7 +341,7 @@ impl TransactionScheduler {
         let batch = self.transaction_batches.remove(&batch_id).unwrap();
 
         // Update number of executing transactions
-        self.num_executing_transactions -= batch.transactions.len();
+        self.num_executing_transactions -= batch.num_transactions;
 
         // Remove account locks
         for (account, _lock) in batch.account_locks {
@@ -418,8 +417,7 @@ impl TransactionScheduler {
         }
 
         // Build the batch
-        let batch = batch_builder.build(&self.bank);
-        let transactions = batch.transactions.clone();
+        let (batch, transactions) = batch_builder.build(&self.bank);
 
         // Add batch to account locks
         self.lock_accounts(&batch);
@@ -723,8 +721,8 @@ pub type TransactionBatchId = usize;
 struct TransactionBatch {
     /// Identifier
     id: TransactionBatchId,
-    /// Vector of transactions included in the batch
-    transactions: Arc<Vec<TransactionRef>>,
+    /// Number of transactions
+    num_transactions: usize,
     /// Locked Accounts and Kind Set
     account_locks: HashMap<Pubkey, AccountLockKind>,
     /// Thread it is scheduled on
@@ -741,7 +739,7 @@ struct TransactionBatchBuilder {
 }
 
 impl TransactionBatchBuilder {
-    fn build(self, bank: &Bank) -> TransactionBatch {
+    fn build(self, bank: &Bank) -> (TransactionBatch, Vec<SanitizedTransaction>) {
         let mut batch_account_locks = HashMap::default();
         for transaction in self.transactions.iter() {
             let account_locks = transaction.transaction.get_account_locks().unwrap();
@@ -756,12 +754,18 @@ impl TransactionBatchBuilder {
             }
         }
 
-        TransactionBatch {
-            id: self.id,
-            transactions: Arc::new(self.transactions),
-            account_locks: batch_account_locks,
-            execution_thread_index: self.execution_thread_index,
-        }
+        (
+            TransactionBatch {
+                id: self.id,
+                num_transactions: self.transactions.len(),
+                account_locks: batch_account_locks,
+                execution_thread_index: self.execution_thread_index,
+            },
+            self.transactions
+                .into_iter()
+                .map(|arc_tx| Arc::try_unwrap(arc_tx).unwrap().transaction)
+                .collect(),
+        )
     }
 }
 

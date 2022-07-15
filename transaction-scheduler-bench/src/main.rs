@@ -138,8 +138,6 @@ struct TransactionSchedulerMetrics {
     num_transactions_scheduled: AtomicUsize,
     /// Number of transactions completed
     num_transactions_completed: AtomicUsize,
-    /// Amount of priority collected
-    priority_collected: AtomicU64,
 }
 
 impl TransactionSchedulerMetrics {
@@ -149,12 +147,9 @@ impl TransactionSchedulerMetrics {
         let num_batches_scheduled = self.num_batches_scheduled.load(Ordering::Relaxed);
         let num_transactions_scheduled = self.num_transactions_scheduled.load(Ordering::Relaxed);
         let num_transactions_completed = self.num_transactions_completed.load(Ordering::Relaxed);
-        let priority_collected = self.priority_collected.load(Ordering::Relaxed);
 
         let num_transactions_pending = num_transactions_sent - num_transactions_scheduled;
-        info!("num_transactions_sent: {num_transactions_sent} num_transactions_pending: {num_transactions_pending} num_transactions_scheduled: {num_transactions_scheduled} num_transactions_completed: {num_transactions_completed} priority_collected: {priority_collected}");
-
-        // info!("num_batches_sent: {num_batches_sent} num_transactions_sent: {num_transactions_sent} num_batches_scheduled: {num_batches_scheduled} num_transactions_scheduled: {num_transactions_scheduled} num_transactions_completed: {num_transactions_completed}");
+        info!("num_transactions_sent: {num_transactions_sent} num_transactions_pending: {num_transactions_pending} num_transactions_scheduled: {num_transactions_scheduled} num_transactions_completed: {num_transactions_completed}");
     }
 }
 
@@ -347,9 +342,6 @@ fn handle_transaction_batch(
     metrics
         .num_transactions_completed
         .fetch_add(num_transactions as usize, Ordering::Relaxed);
-    metrics
-        .priority_collected
-        .fetch_add(priority_collected, Ordering::Relaxed);
 
     for transaction in transaction_batch {
         completed_transaction_sender.send(transaction).unwrap();
