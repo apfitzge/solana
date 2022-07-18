@@ -2609,6 +2609,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "metrics_reporter"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "metrics_reporter_derive",
+ "solana-metrics",
+]
+
+[[package]]
+name = "metrics_reporter_derive"
+version = "0.1.0"
+dependencies = [
+ "quote 1.0.18",
+ "syn 1.0.93",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
