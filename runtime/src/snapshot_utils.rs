@@ -1,7 +1,7 @@
 use {
     crate::{
         accounts_db::{
-            AccountShrinkThreshold, AccountsDbConfig, SnapshotStorage, SnapshotStorages,
+            AccountShrinkThreshold, AccountsDbConfig, SlotStores, SnapshotStorage, SnapshotStorages,
         },
         accounts_index::AccountSecondaryIndexes,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
@@ -18,15 +18,20 @@ use {
         snapshot_package::{
             AccountsPackage, PendingAccountsPackage, SnapshotPackage, SnapshotType,
         },
+        snapshot_utils::{
+            snapshot_storage_rebuilder::SnapshotStorageRebuilder,
+            snapshot_unpacker::SnapshotUnpacker,
+        },
     },
     bincode::{config::Options, serialize_into},
     bzip2::bufread::BzDecoder,
+    dashmap::DashMap,
     flate2::read::GzDecoder,
     lazy_static::lazy_static,
     log::*,
     rayon::prelude::*,
     regex::Regex,
-    solana_measure::measure::Measure,
+    solana_measure::{measure, measure::Measure},
     solana_sdk::{clock::Slot, genesis_config::GenesisConfig, hash::Hash, pubkey::Pubkey},
     std::{
         cmp::Ordering,
@@ -37,7 +42,7 @@ use {
         path::{Path, PathBuf},
         process::ExitStatus,
         str::FromStr,
-        sync::Arc,
+        sync::{atomic::AtomicU32, Arc},
     },
     tar::{self, Archive},
     tempfile::TempDir,
@@ -45,6 +50,8 @@ use {
 };
 
 mod archive_format;
+mod snapshot_storage_rebuilder;
+mod snapshot_unpacker;
 pub use archive_format::*;
 
 pub const SNAPSHOT_STATUS_CACHE_FILENAME: &str = "status_cache";
@@ -172,7 +179,7 @@ struct SnapshotRootPaths {
 struct UnarchivedSnapshot {
     #[allow(dead_code)]
     unpack_dir: TempDir,
-    unpacked_append_vec_map: UnpackedAppendVecMap,
+    storage: DashMap<Slot, SlotStores>,
     unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion,
     measure_untar: Measure,
 }
@@ -802,7 +809,7 @@ fn verify_and_unarchive_snapshots(
     full_snapshot_archive_info: &FullSnapshotArchiveInfo,
     incremental_snapshot_archive_info: Option<&IncrementalSnapshotArchiveInfo>,
     account_paths: &[PathBuf],
-) -> Result<(UnarchivedSnapshot, Option<UnarchivedSnapshot>)> {
+) -> Result<(UnarchivedSnapshot, Option<UnarchivedSnapshot>, AtomicU32)> {
     check_are_snapshots_compatible(
         full_snapshot_archive_info,
         incremental_snapshot_archive_info,
@@ -813,7 +820,8 @@ fn verify_and_unarchive_snapshots(
         std::cmp::max(1, num_cpus::get() / 4),
     );
 
-    let unarchived_full_snapshot = unarchive_snapshot(
+    let next_append_vec_id = AtomicU32::new(0);
+    let (unarchived_full_snapshot, mut next_append_vec_id) = unarchive_snapshot(
         &bank_snapshots_dir,
         TMP_SNAPSHOT_ARCHIVE_PREFIX,
         full_snapshot_archive_info.path(),
@@ -821,11 +829,12 @@ fn verify_and_unarchive_snapshots(
         account_paths,
         full_snapshot_archive_info.archive_format(),
         parallel_divisions,
+        next_append_vec_id,
     )?;
 
     let unarchived_incremental_snapshot =
         if let Some(incremental_snapshot_archive_info) = incremental_snapshot_archive_info {
-            let unarchived_incremental_snapshot = unarchive_snapshot(
+            let (unarchived_incremental_snapshot, new_next_append_vec_id) = unarchive_snapshot(
                 &bank_snapshots_dir,
                 TMP_SNAPSHOT_ARCHIVE_PREFIX,
                 incremental_snapshot_archive_info.path(),
@@ -833,13 +842,19 @@ fn verify_and_unarchive_snapshots(
                 account_paths,
                 incremental_snapshot_archive_info.archive_format(),
                 parallel_divisions,
+                next_append_vec_id,
             )?;
+            next_append_vec_id = new_next_append_vec_id;
             Some(unarchived_incremental_snapshot)
         } else {
             None
         };
 
-    Ok((unarchived_full_snapshot, unarchived_incremental_snapshot))
+    Ok((
+        unarchived_full_snapshot,
+        unarchived_incremental_snapshot,
+        next_append_vec_id,
+    ))
 }
 
 /// Utility for parsing out bank specific information from a snapshot archive. This utility can be used
@@ -864,7 +879,7 @@ pub fn bank_fields_from_snapshot_archives(
 
     let account_paths = vec![temp_dir.path().to_path_buf()];
 
-    let (unarchived_full_snapshot, unarchived_incremental_snapshot) =
+    let (unarchived_full_snapshot, unarchived_incremental_snapshot, _next_append_vec_id) =
         verify_and_unarchive_snapshots(
             &bank_snapshots_dir,
             &full_snapshot_archive_info,
@@ -903,7 +918,7 @@ pub fn bank_from_snapshot_archives(
     accounts_db_config: Option<AccountsDbConfig>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
 ) -> Result<(Bank, BankFromArchiveTimings)> {
-    let (unarchived_full_snapshot, mut unarchived_incremental_snapshot) =
+    let (unarchived_full_snapshot, mut unarchived_incremental_snapshot, next_append_vec_id) =
         verify_and_unarchive_snapshots(
             bank_snapshots_dir,
             full_snapshot_archive_info,
@@ -911,11 +926,11 @@ pub fn bank_from_snapshot_archives(
             account_paths,
         )?;
 
-    let mut unpacked_append_vec_map = unarchived_full_snapshot.unpacked_append_vec_map;
+    let mut storage = unarchived_full_snapshot.storage;
     if let Some(ref mut unarchive_preparation_result) = unarchived_incremental_snapshot {
-        let incremental_snapshot_unpacked_append_vec_map =
-            std::mem::take(&mut unarchive_preparation_result.unpacked_append_vec_map);
-        unpacked_append_vec_map.extend(incremental_snapshot_unpacked_append_vec_map.into_iter());
+        let incremental_snapshot_storages =
+            std::mem::take(&mut unarchive_preparation_result.storage);
+        storage.extend(incremental_snapshot_storages.into_iter());
     }
 
     let mut measure_rebuild = Measure::start("rebuild bank from snapshots");
@@ -927,7 +942,8 @@ pub fn bank_from_snapshot_archives(
                 &unarchive_preparation_result.unpacked_snapshots_dir_and_version
             }),
         account_paths,
-        unpacked_append_vec_map,
+        storage,
+        next_append_vec_id,
         genesis_config,
         debug_keys,
         additional_builtins,
@@ -1095,7 +1111,7 @@ fn verify_bank_against_expected_slot_hash(
 
 /// Perform the common tasks when unarchiving a snapshot.  Handles creating the temporary
 /// directories, untaring, reading the version file, and then returning those fields plus the
-/// unpacked append vec map.
+/// rebuilt storage and append_vec_id tracker
 fn unarchive_snapshot<P, Q>(
     bank_snapshots_dir: P,
     unpacked_snapshots_dir_prefix: &'static str,
@@ -1104,7 +1120,8 @@ fn unarchive_snapshot<P, Q>(
     account_paths: &[PathBuf],
     archive_format: ArchiveFormat,
     parallel_divisions: usize,
-) -> Result<UnarchivedSnapshot>
+    next_append_vec_id: AtomicU32,
+) -> Result<(UnarchivedSnapshot, AtomicU32)>
 where
     P: AsRef<Path>,
     Q: AsRef<Path>,
@@ -1113,30 +1130,39 @@ where
         .prefix(unpacked_snapshots_dir_prefix)
         .tempdir_in(bank_snapshots_dir)?;
     let unpacked_snapshots_dir = unpack_dir.path().join("snapshots");
+    let unpacked_version_file = unpack_dir.path().join("version");
 
-    let mut measure_untar = Measure::start(measure_name);
-    let unpacked_append_vec_map = untar_snapshot_in(
-        snapshot_archive_path,
-        unpack_dir.path(),
-        account_paths,
+    let file_receiver = SnapshotUnpacker::spawn_unpack_snapshot(
+        account_paths.to_vec(),
+        unpack_dir.path().to_path_buf(),
+        snapshot_archive_path.as_ref().to_path_buf(),
         archive_format,
         parallel_divisions,
-    )?;
-    measure_untar.stop();
+    );
+    let (result, measure_untar) = measure!(
+        SnapshotStorageRebuilder::rebuild_storage(
+            file_receiver,
+            std::cmp::max(1, num_cpus::get_physical() - parallel_divisions),
+            next_append_vec_id
+        ),
+        measure_name
+    );
     info!("{}", measure_untar);
 
-    let unpacked_version_file = unpack_dir.path().join("version");
     let snapshot_version = snapshot_version_from_file(&unpacked_version_file)?;
 
-    Ok(UnarchivedSnapshot {
-        unpack_dir,
-        unpacked_append_vec_map,
-        unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion {
-            unpacked_snapshots_dir,
-            snapshot_version,
+    Ok((
+        UnarchivedSnapshot {
+            unpack_dir,
+            storage: result.storage,
+            unpacked_snapshots_dir_and_version: UnpackedSnapshotsDirAndVersion {
+                unpacked_snapshots_dir,
+                snapshot_version,
+            },
+            measure_untar,
         },
-        measure_untar,
-    })
+        result.next_append_vec_id,
+    ))
 }
 
 /// Reads the `snapshot_version` from a file. Before opening the file, its size
@@ -1636,7 +1662,8 @@ fn rebuild_bank_from_snapshots(
         &UnpackedSnapshotsDirAndVersion,
     >,
     account_paths: &[PathBuf],
-    unpacked_append_vec_map: UnpackedAppendVecMap,
+    storage: DashMap<Slot, SlotStores>,
+    next_append_vec_id: AtomicU32,
     genesis_config: &GenesisConfig,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     additional_builtins: Option<&Builtins>,
@@ -1684,7 +1711,8 @@ fn rebuild_bank_from_snapshots(
                     SerdeStyle::Newer,
                     snapshot_streams,
                     account_paths,
-                    unpacked_append_vec_map,
+                    storage,
+                    next_append_vec_id,
                     genesis_config,
                     debug_keys,
                     additional_builtins,
