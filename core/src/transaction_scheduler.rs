@@ -65,6 +65,8 @@ impl Eq for TransactionPriority {}
 impl Hash for TransactionPriority {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.transaction.signature().hash(state);
+        self.timestamp.hash(state);
+        self.priority.hash(state);
     }
 }
 
@@ -194,9 +196,9 @@ pub struct TransactionScheduler {
     /// Map from transaction signature to transactions blocked by the signature
     blocked_transactions: HashMap<Signature, Vec<TransactionRef>>,
     /// Map from blocking BatchId to transactions
-    blocked_transactions_by_batch_id: HashMap<TransactionBatchId, Vec<TransactionRef>>,
+    blocked_transactions_by_batch_id: HashMap<TransactionBatchId, HashSet<TransactionRef>>,
     /// Transactions blocked by batches need to count how many they're blocked by
-    blocked_transactions_batch_count: HashMap<Signature, usize>,
+    blocked_transactions_batch_count: HashMap<TransactionRef, usize>,
     /// Tracks the current number of blocked transactions
     num_blocked_transactions: usize,
     /// Tracks the current number of executing transacitons
@@ -322,35 +324,44 @@ impl TransactionScheduler {
         let execution_thread_stats = &mut self.execution_thread_stats[batch.execution_thread_index];
         // TODO: actually track CUs instead of just num transacitons
         execution_thread_stats.queued_transactions -= batch.num_transactions;
+        execution_thread_stats.queued_compute_units -= batch.num_transactions;
 
         // Remove account locks
-        for (account, _lock) in batch.account_locks {
-            self.unlock_account(account, batch_id);
-        }
+        let (_, remove_account_locks_time) = measure!({
+            for (account, _lock) in batch.account_locks {
+                self.unlock_account(account, batch_id);
+            }
+        });
 
         // Push transactions blocked (by batch) back into the pending queue
-        if let Some(blocked_transactions) = self.blocked_transactions_by_batch_id.remove(&batch_id)
-        {
-            let unblocked_transactions = blocked_transactions.into_iter().filter(|tx| {
-                let signature = tx.transaction.signature();
-                let blocked_batches_count = self
-                    .blocked_transactions_batch_count
-                    .get_mut(signature)
-                    .unwrap();
-                *blocked_batches_count -= 1;
-                if *blocked_batches_count == 0 {
-                    self.blocked_transactions_batch_count.remove(signature);
-                    self.num_blocked_transactions -= 1;
-                    true
-                } else {
-                    false
-                }
-            });
-            self.pending_transactions
-                .lock()
-                .unwrap()
-                .extend(unblocked_transactions);
-        }
+        let (_, unblock_transactions_time) = measure!({
+            if let Some(blocked_transactions) =
+                self.blocked_transactions_by_batch_id.remove(&batch_id)
+            {
+                let unblocked_transactions = blocked_transactions.into_iter().filter(|tx| {
+                    let signature = tx.transaction.signature();
+                    let blocked_batches_count =
+                        self.blocked_transactions_batch_count.get_mut(tx).unwrap();
+                    *blocked_batches_count -= 1;
+                    if *blocked_batches_count == 0 {
+                        self.blocked_transactions_batch_count.remove(tx);
+                        self.num_blocked_transactions -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                self.pending_transactions
+                    .lock()
+                    .unwrap()
+                    .extend(unblocked_transactions);
+            }
+        });
+
+        self.metrics.completed_transactions_remove_account_locks_us +=
+            remove_account_locks_time.as_us();
+        self.metrics.completed_transactions_unblock_transactions_us +=
+            unblock_transactions_time.as_us();
     }
 
     /// Remove account locks for the batch id
@@ -363,90 +374,188 @@ impl TransactionScheduler {
 
     /// Performs scheduling operations on currently pending transactions
     fn do_scheduling(&mut self) {
-        // Find thread index to send on (first without enough queued up)
         const MAX_QUEUED_BATCHES_PER_THREAD: usize = 2;
-        let execution_thread_index = (0..self.transaction_batch_senders.len())
+
+        // Create batch builders for each currently open thread (not over the queued batch limit)
+        let mut all_batches = (0..self.num_execution_threads)
             .into_iter()
-            .find(|idx| self.transaction_batch_senders[*idx].len() < MAX_QUEUED_BATCHES_PER_THREAD);
-        if execution_thread_index.is_none() {
+            .filter_map(|execution_thread_index| {
+                (self.execution_thread_stats[execution_thread_index]
+                    .queued_batches
+                    .len()
+                    < MAX_QUEUED_BATCHES_PER_THREAD)
+                    .then(|| {
+                        let id = self.next_transaction_batch_id;
+                        self.next_transaction_batch_id += 1;
+                        TransactionBatchBuilder {
+                            id,
+                            transactions: Vec::with_capacity(self.max_batch_size),
+                            execution_thread_index,
+                        }
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        if all_batches.is_empty() {
             return;
         }
-        let execution_thread_index = execution_thread_index.unwrap();
 
-        // Get the batch id and create batch builder
-        let batch_id = self.next_transaction_batch_id;
-        self.next_transaction_batch_id += 1;
-        let mut batch_builder = TransactionBatchBuilder {
-            id: batch_id,
-            transactions: Vec::with_capacity(self.max_batch_size),
-            execution_thread_index,
-        };
-
-        // Try scheduling highest-priority transactions into the batch
+        // Try scheduling highest-priority transactions into a batch
+        let mut batches = all_batches
+            .iter_mut()
+            .map(|batch| (batch.execution_thread_index, batch))
+            .collect::<HashMap<_, _>>();
         loop {
+            if batches.is_empty() {
+                break;
+            }
             let mtx = self.pending_transactions.lock().unwrap().pop();
-            let mtx = mtx.map(|tx| tx.clone());
             if let Some(tx) = mtx {
-                self.try_schedule_transaction(&tx, &mut batch_builder);
-                if batch_builder.transactions.len() == self.max_batch_size {
-                    break;
-                }
+                let (_, try_schedule_time) =
+                    measure!(self.try_schedule_transaction(&tx, &mut batches));
+                self.metrics.scheduling_try_schedule_time_us += try_schedule_time.as_us();
             } else {
                 break;
             }
         }
+        drop(batches);
 
-        // Build the batch
-        let (batch, transactions) = batch_builder.build(&self.bank);
+        for batch_builder in all_batches {
+            if batch_builder.transactions.len() > 0 {
+                // Build the batch
+                let (batch, transactions) = batch_builder.build(&self.bank);
+                let batch_id = batch.id;
+                let execution_thread_index = batch.execution_thread_index;
 
-        // Update execution thread stats
-        let execution_thread_stats = &mut self.execution_thread_stats[batch.execution_thread_index];
-        execution_thread_stats.queued_batches.push_back(batch.id);
-        execution_thread_stats.queued_transactions += transactions.len();
+                // Update execution thread stats
+                let execution_thread_stats =
+                    &mut self.execution_thread_stats[execution_thread_index];
+                execution_thread_stats.queued_batches.push_back(batch_id);
+                execution_thread_stats.queued_transactions += transactions.len();
 
-        // Add batch to account locks
-        self.lock_accounts(&batch);
+                // Insert batch for tracking
+                self.transaction_batches.insert(batch_id, batch);
 
-        // Insert batch for tracking
-        self.transaction_batches.insert(batch_id, batch);
+                // Update metrics
+                self.num_executing_transactions += transactions.len();
+                self.metrics.num_transactions_scheduled += transactions.len();
+                self.metrics.max_blocked_transactions = self
+                    .metrics
+                    .max_blocked_transactions
+                    .max(self.num_blocked_transactions);
+                self.metrics.max_executing_transactions = self
+                    .num_executing_transactions
+                    .max(self.num_executing_transactions);
 
-        // Update metrics
-        self.num_executing_transactions += transactions.len();
-        self.metrics.num_transactions_scheduled += transactions.len();
-        self.metrics.max_blocked_transactions = self
-            .metrics
-            .max_blocked_transactions
-            .max(self.num_blocked_transactions);
-        self.metrics.max_executing_transactions = self
-            .num_executing_transactions
-            .max(self.num_executing_transactions);
-
-        // Send the batch
-        self.transaction_batch_senders[execution_thread_index].send((batch_id, transactions));
+                // Send the batch
+                self.transaction_batch_senders[execution_thread_index]
+                    .send((batch_id, transactions));
+            }
+        }
     }
 
     /// Try to schedule a transaction
     fn try_schedule_transaction(
         &mut self,
         transaction: &TransactionRef,
-        batch_builder: &mut TransactionBatchBuilder,
+        batches: &mut HashMap<usize, &mut TransactionBatchBuilder>,
     ) {
         // Check for blocking transactions in account queue - add lowest priority if blocked by higher priority tx
-        if self.check_blocking_transactions(transaction) {
+        let (has_blocking_transactions, check_blocking_transactions_time) =
+            measure!(self.check_blocking_transactions(transaction));
+        if has_blocking_transactions {
             self.num_blocked_transactions += 1;
             return;
         }
 
-        // Check for blocking transaction batches in scheduled locks
-        if self.check_blocking_batches(transaction, batch_builder.execution_thread_index) {
-            self.num_blocked_transactions += 1;
+        // Check for blocking transactions batches in scheduled locks (this includes batches currently being built)
+        let (conflicting_batches, get_conflicting_batches_time) =
+            measure!(self.get_conflicting_batches(transaction));
+
+        // Determine the thread index to schedule on (if any)
+        let (thread_index, find_thread_index_time) = measure!({
+            if let Some(conflicting_batches) = conflicting_batches.as_ref() {
+                let mut schedulable_thread_index = None;
+                for batch_id in conflicting_batches {
+                    let maybe_thread_index =
+                        if let Some(batch) = self.transaction_batches.get(batch_id) {
+                            Some(batch.execution_thread_index)
+                        } else {
+                            batches
+                                .values()
+                                .find(|b| b.id == *batch_id)
+                                .map(|b| b.execution_thread_index)
+                        };
+
+                    if maybe_thread_index.is_none() {
+                        schedulable_thread_index = None;
+                        break;
+                    } else if schedulable_thread_index.is_some()
+                        && maybe_thread_index != schedulable_thread_index
+                    {
+                        schedulable_thread_index = None;
+                        break;
+                    }
+                    schedulable_thread_index = maybe_thread_index;
+                }
+
+                schedulable_thread_index.filter(|thread_index| batches.contains_key(&thread_index))
+            } else {
+                batches
+                    .values()
+                    .map(|batch| {
+                        (
+                            self.execution_thread_stats[batch.execution_thread_index]
+                                .queued_compute_units,
+                            batch.execution_thread_index,
+                        )
+                    })
+                    .min()
+                    .map(|(_, execution_thread_index)| execution_thread_index)
+            }
+        });
+
+        self.metrics.check_blocking_transactions_time_us +=
+            check_blocking_transactions_time.as_us();
+        self.metrics.get_conflicting_batches_time += get_conflicting_batches_time.as_us();
+        self.metrics.find_thread_index_time += find_thread_index_time.as_us();
+
+        if thread_index.is_none() {
+            if let Some(conflicting_batches) = conflicting_batches {
+                self.num_blocked_transactions += 1;
+                self.blocked_transactions_batch_count
+                    .insert(transaction.clone(), conflicting_batches.len());
+                for batch_id in conflicting_batches {
+                    self.blocked_transactions_by_batch_id
+                        .entry(batch_id)
+                        .or_default()
+                        .insert(transaction.clone());
+                }
+            }
             return;
         }
 
-        // Schedule the transaction - remove from queues and add to batch_builder
-        self.remove_transaction_from_queues(transaction);
-        self.unblock_transactions(transaction);
-        batch_builder.transactions.push(transaction.clone());
+        let thread_index = thread_index.unwrap();
+        // Schedule the transaction:
+        let (_, batching_time) = measure!({
+            let batch = batches.get_mut(&thread_index).unwrap();
+            // 1. Add to Batch
+            batch.transactions.push(transaction.clone());
+            // 2. Add account locks with the batch id
+            self.lock_accounts_for_transaction(transaction, batch.id);
+            // 3. Update queued execution stats
+            self.execution_thread_stats[thread_index].queued_compute_units += 1; // TODO: actually use CU instead of # tx
+            self.execution_thread_stats[thread_index].queued_transactions += 1;
+            // 4. Remove transaction from account queues
+            self.remove_transaction_from_queues(transaction);
+            // 5. Unblock transactions that were blocked by this one - they can be scheduled on the same thread now
+            self.unblock_transactions(transaction);
+            // 6. Check if batch should be removed from schedulable batches
+            if batch.transactions.len() == self.max_batch_size {
+                batches.remove(&thread_index);
+            }
+        });
+        self.metrics.batching_time += batching_time.as_us();
     }
 
     /// Checks for blocking transactions in the account queues
@@ -465,14 +574,13 @@ impl TransactionScheduler {
         }
     }
 
-    /// Checks for blocking batches
-    ///     - If blocked, adds ALL blocking batches to the blocking map and count
-    fn check_blocking_batches(
-        &mut self,
+    /// Gets batches that conflict with the current transaction
+    ///     - Conflict does not necessarily mean block as they can be scheduled on the same thread
+    fn get_conflicting_batches(
+        &self,
         transaction: &TransactionRef,
-        execution_thread_index: usize,
-    ) -> bool {
-        let mut blocking_batches = Vec::default();
+    ) -> Option<Vec<TransactionBatchId>> {
+        let mut conflicting_batches = Vec::default();
 
         let account_locks = transaction.transaction.get_account_locks().unwrap();
 
@@ -486,10 +594,7 @@ impl TransactionScheduler {
                 .write_batches
                 .iter()
             {
-                let batch = self.transaction_batches.get(batch_id).unwrap();
-                if batch.execution_thread_index != execution_thread_index {
-                    blocking_batches.push(*batch_id);
-                }
+                conflicting_batches.push(*batch_id);
             }
         }
 
@@ -501,33 +606,14 @@ impl TransactionScheduler {
                 .unwrap()
                 .scheduled_lock;
             for batch_id in scheduled_lock.write_batches.iter() {
-                let batch = self.transaction_batches.get(batch_id).unwrap();
-                if batch.execution_thread_index != execution_thread_index {
-                    blocking_batches.push(*batch_id);
-                }
+                conflicting_batches.push(*batch_id);
             }
-
             for batch_id in scheduled_lock.read_batches.iter() {
-                let batch = self.transaction_batches.get(batch_id).unwrap();
-                if batch.execution_thread_index != execution_thread_index {
-                    blocking_batches.push(*batch_id);
-                }
+                conflicting_batches.push(*batch_id);
             }
         }
 
-        if blocking_batches.len() > 0 {
-            for blocking_batch in blocking_batches.iter() {
-                self.blocked_transactions_by_batch_id
-                    .entry(*blocking_batch)
-                    .or_default()
-                    .push(transaction.clone());
-            }
-            self.blocked_transactions_batch_count
-                .insert(*transaction.transaction.signature(), blocking_batches.len());
-            true
-        } else {
-            false
-        }
+        (conflicting_batches.len() > 0).then(|| conflicting_batches)
     }
 
     /// Removes transaction from the account queues since it's been scheduled
@@ -573,6 +659,32 @@ impl TransactionScheduler {
                 .unwrap()
                 .scheduled_lock
                 .lock_on_batch(batch.id, lock.is_write());
+        }
+    }
+
+    /// Lock accounts for a transaction by batch id
+    fn lock_accounts_for_transaction(
+        &mut self,
+        transaction: &TransactionRef,
+        batch_id: TransactionBatchId,
+    ) {
+        let accounts = transaction
+            .transaction
+            .get_account_locks(&self.bank.feature_set)
+            .unwrap();
+        for account in accounts.readonly {
+            self.transactions_by_account
+                .get_mut(account)
+                .unwrap()
+                .scheduled_lock
+                .lock_on_batch(batch_id, false);
+        }
+        for account in accounts.writable {
+            self.transactions_by_account
+                .get_mut(account)
+                .unwrap()
+                .scheduled_lock
+                .lock_on_batch(batch_id, true);
         }
     }
 
@@ -662,12 +774,16 @@ struct AccountLock {
 
 impl AccountLock {
     fn lock_on_batch(&mut self, batch_id: TransactionBatchId, is_write: bool) {
-        let batches = if is_write {
-            &mut self.write_batches
+        if is_write {
+            // override read lock
+            self.read_batches.remove(&batch_id);
+            self.write_batches.insert(batch_id);
         } else {
-            &mut self.read_batches
-        };
-        batches.insert(batch_id);
+            // underride write lock
+            if !self.write_batches.contains(&batch_id) {
+                self.read_batches.insert(batch_id);
+            }
+        }
     }
 
     fn unlock_on_batch(&mut self, batch_id: TransactionBatchId) {
@@ -702,7 +818,7 @@ impl AccountLockKind {
 pub type TransactionBatchId = usize;
 
 /// Transactions in a batch
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct TransactionBatch {
     /// Identifier
     id: TransactionBatchId,
@@ -714,6 +830,7 @@ struct TransactionBatch {
     execution_thread_index: usize,
 }
 
+#[derive(Debug)]
 struct TransactionBatchBuilder {
     /// Identifier
     id: TransactionBatchId,
@@ -800,24 +917,15 @@ struct SchedulerMetrics {
     compeleted_batch_try_recv_time_us: u64,
     /// Completed transactions - Handle completed batch
     completed_batch_handle_batch_time_us: u64,
-
-    // /// Total time spent processing packet batches in microseconds
-    // packet_batch_time_us: u64,
-    // /// Packet Batch - Time spent filtering packets
-    // packet_batch_filter_time_us: u64,
-    // /// Packet Batch - Time spent deserializing packets
-    // packet_batch_deserialize_time_us: u64,
-    // /// Packet Batch - Time spent inserting transactions
-    // packet_batch_insert_time_us: u64,
-    /// Total time spent on new transactions
-    transactions_time_us: u64,
-    /// Transactions - TryRecv time
-    transactions_try_recv_us: u64,
-    /// Transactions - Insert time
-    transactions_insert_us: u64,
-
+    completed_transactions_remove_account_locks_us: u64,
+    completed_transactions_unblock_transactions_us: u64,
     /// Total time spent scheduling transactions in microseconds
     scheduling_time_us: u64,
+    scheduling_try_schedule_time_us: u64,
+    check_blocking_transactions_time_us: u64,
+    get_conflicting_batches_time: u64,
+    find_thread_index_time: u64,
+    batching_time: u64,
 
     /// Time spent checking and reporting metrics
     metrics_us: u64,
@@ -835,10 +943,14 @@ impl Default for SchedulerMetrics {
             scheduling_time_us: Default::default(),
             compeleted_batch_try_recv_time_us: Default::default(),
             completed_batch_handle_batch_time_us: Default::default(),
-            transactions_time_us: Default::default(),
-            transactions_try_recv_us: Default::default(),
-            transactions_insert_us: Default::default(),
             metrics_us: Default::default(),
+            completed_transactions_remove_account_locks_us: Default::default(),
+            completed_transactions_unblock_transactions_us: Default::default(),
+            scheduling_try_schedule_time_us: Default::default(),
+            check_blocking_transactions_time_us: Default::default(),
+            get_conflicting_batches_time: Default::default(),
+            find_thread_index_time: Default::default(),
+            batching_time: Default::default(),
         }
     }
 }
@@ -888,21 +1000,37 @@ impl SchedulerMetrics {
                     i64
                 ),
                 (
-                    "transactions_time_us",
-                    self.transactions_time_us as i64,
+                    "completed_transactions_remove_account_locks_us",
+                    self.completed_transactions_remove_account_locks_us as i64,
                     i64
                 ),
                 (
-                    "transactions_try_recv_us",
-                    self.transactions_try_recv_us as i64,
-                    i64
-                ),
-                (
-                    "transactions_insert_us",
-                    self.transactions_insert_us as i64,
+                    "completed_transactions_unblock_transactions_us",
+                    self.completed_transactions_unblock_transactions_us as i64,
                     i64
                 ),
                 ("scheduling_time_us", self.scheduling_time_us as i64, i64),
+                (
+                    "scheduling_try_schedule_time_us",
+                    self.scheduling_try_schedule_time_us as i64,
+                    i64
+                ),
+                (
+                    "check_blocking_transactions_time_us",
+                    self.check_blocking_transactions_time_us as i64,
+                    i64
+                ),
+                (
+                    "get_conflicting_batches_time",
+                    self.get_conflicting_batches_time as i64,
+                    i64
+                ),
+                (
+                    "find_thread_index_time",
+                    self.find_thread_index_time as i64,
+                    i64
+                ),
+                ("batching_time", self.batching_time as i64, i64),
                 ("metrics_us", self.metrics_us as i64, i64),
             );
 
