@@ -463,6 +463,9 @@ impl TransactionScheduler {
         // Check for blocking transactions in account queue - add lowest priority if blocked by higher priority tx
         let (has_blocking_transactions, check_blocking_transactions_time) =
             measure!(self.check_blocking_transactions(transaction));
+        self.metrics.check_blocking_transactions_time_us +=
+            check_blocking_transactions_time.as_us();
+
         if has_blocking_transactions {
             self.num_blocked_transactions += 1;
             return;
@@ -471,6 +474,7 @@ impl TransactionScheduler {
         // Check for blocking transactions batches in scheduled locks (this includes batches currently being built)
         let (conflicting_batches, get_conflicting_batches_time) =
             measure!(self.get_conflicting_batches(transaction));
+        self.metrics.get_conflicting_batches_time += get_conflicting_batches_time.as_us();
 
         // Determine the thread index to schedule on (if any)
         let (thread_index, find_thread_index_time) = measure!({
@@ -514,10 +518,6 @@ impl TransactionScheduler {
                     .map(|(_, execution_thread_index)| execution_thread_index)
             }
         });
-
-        self.metrics.check_blocking_transactions_time_us +=
-            check_blocking_transactions_time.as_us();
-        self.metrics.get_conflicting_batches_time += get_conflicting_batches_time.as_us();
         self.metrics.find_thread_index_time += find_thread_index_time.as_us();
 
         if thread_index.is_none() {
