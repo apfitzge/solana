@@ -128,28 +128,25 @@ struct PacketSendingConfig {
 
 #[derive(Debug, Default)]
 struct TransactionSchedulerMetrics {
-    /// Number of batches sent to the scheduler
-    num_batches_sent: AtomicUsize,
     /// Number of transactions sent to the scheduler
     num_transactions_sent: AtomicUsize,
-    /// Number of transaction batches scheduled
-    num_batches_scheduled: AtomicUsize,
     /// Number of transactions scheduled
     num_transactions_scheduled: AtomicUsize,
     /// Number of transactions completed
     num_transactions_completed: AtomicUsize,
+    /// Priority collected
+    priority_collected: AtomicU64,
 }
 
 impl TransactionSchedulerMetrics {
     fn report(&self) {
-        let num_batches_sent = self.num_batches_sent.load(Ordering::Relaxed);
         let num_transactions_sent = self.num_transactions_sent.load(Ordering::Relaxed);
-        let num_batches_scheduled = self.num_batches_scheduled.load(Ordering::Relaxed);
         let num_transactions_scheduled = self.num_transactions_scheduled.load(Ordering::Relaxed);
         let num_transactions_completed = self.num_transactions_completed.load(Ordering::Relaxed);
+        let priority_collected = self.priority_collected.load(Ordering::Relaxed);
 
         let num_transactions_pending = num_transactions_sent - num_transactions_scheduled;
-        info!("num_transactions_sent: {num_transactions_sent} num_transactions_pending: {num_transactions_pending} num_transactions_scheduled: {num_transactions_scheduled} num_transactions_completed: {num_transactions_completed}");
+        info!("num_transactions_sent: {num_transactions_sent} num_transactions_pending: {num_transactions_pending} num_transactions_scheduled: {num_transactions_scheduled} num_transactions_completed: {num_transactions_completed} priority_collected: {priority_collected}");
     }
 }
 
@@ -342,6 +339,9 @@ fn handle_transaction_batch(
     metrics
         .num_transactions_completed
         .fetch_add(num_transactions as usize, Ordering::Relaxed);
+    metrics
+        .priority_collected
+        .fetch_add(priority_collected, Ordering::Relaxed);
 
     for transaction in transaction_batch {
         completed_transaction_sender.send(transaction).unwrap();
@@ -438,9 +438,6 @@ fn send_packets(
             packet_batches.iter().map(|pb| pb.len()).sum(),
             Ordering::Relaxed,
         );
-        metrics
-            .num_batches_sent
-            .fetch_add(packet_batches.len(), Ordering::Relaxed);
         metrics.num_transactions_sent.fetch_add(
             packet_batches.iter().map(|pb| pb.len()).sum(),
             Ordering::Relaxed,
