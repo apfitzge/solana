@@ -668,10 +668,7 @@ impl TransactionScheduler {
         transaction: &TransactionRef,
         batch_id: TransactionBatchId,
     ) {
-        let accounts = transaction
-            .transaction
-            .get_account_locks(&self.bank.feature_set)
-            .unwrap();
+        let accounts = transaction.transaction.get_account_locks().unwrap();
         for account in accounts.readonly {
             self.transactions_by_account
                 .get_mut(account)
