@@ -20,7 +20,7 @@ use {
     },
 };
 /// Wrapper to store a sanitized transaction and priority
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TransactionPriority {
     /// Transaction priority
     pub priority: u64,
@@ -70,7 +70,7 @@ impl Hash for TransactionPriority {
     }
 }
 
-type TransactionRef = Arc<TransactionPriority>;
+type TransactionRef = TransactionPriority;
 
 impl TransactionPriority {
     fn try_new(packet: &ImmutableDeserializedPacket, bank: &Bank) -> Option<TransactionRef> {
@@ -83,11 +83,11 @@ impl TransactionPriority {
         )
         .ok()?;
         transaction.verify_precompiles(&bank.feature_set).ok()?;
-        Some(Arc::new(Self {
+        Some(Self {
             transaction,
             priority,
             timestamp: Instant::now(),
-        }))
+        })
     }
 }
 
@@ -544,7 +544,7 @@ impl TransactionScheduler {
                     .blocked_transactions_by_batch_id
                     .entry(newest_conflicting_batch)
                     .or_default()
-                    .insert(transaction.clone()));
+                    .insert(transaction));
             }
             return;
         }
@@ -780,10 +780,7 @@ impl TransactionBatch {
         let mut transactions = Vec::new();
         std::mem::swap(&mut transactions, &mut self.transactions);
 
-        transactions
-            .into_iter()
-            .map(|arc_tx| Arc::try_unwrap(arc_tx).unwrap().transaction)
-            .collect()
+        transactions.into_iter().map(|tx| tx.transaction).collect()
     }
 }
 
