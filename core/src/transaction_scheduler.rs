@@ -153,19 +153,15 @@ impl PacketBatchHandler {
             // Get account locks
             let account_locks = tx.transaction.get_account_locks().unwrap();
             for account in account_locks.readonly.into_iter() {
-                self.transactions_by_account
-                    .entry(*account)
-                    .or_default()
-                    .reads
-                    .insert(tx.clone());
+                self.transactions_by_account.entry(*account).or_default();
+                // .reads
+                // .insert(tx.clone());
             }
 
             for account in account_locks.writable.into_iter() {
-                self.transactions_by_account
-                    .entry(*account)
-                    .or_default()
-                    .writes
-                    .insert(tx.clone());
+                self.transactions_by_account.entry(*account).or_default();
+                // .writes
+                // .insert(tx.clone());
             }
         }
         self.pending_transactions
@@ -194,7 +190,7 @@ pub struct TransactionScheduler {
     /// Transaction queues and locks by account key
     transactions_by_account: Arc<DashMap<Pubkey, AccountTransactionQueue>>,
     /// Map from transaction signature to transactions blocked by the signature
-    blocked_transactions: HashMap<Signature, Vec<TransactionRef>>,
+    // blocked_transactions: HashMap<Signature, Vec<TransactionRef>>,
     /// Map from blocking BatchId to transactions
     blocked_transactions_by_batch_id: HashMap<TransactionBatchId, HashSet<TransactionRef>>,
     /// Transactions blocked by batches need to count how many they're blocked by
@@ -254,7 +250,7 @@ impl TransactionScheduler {
             exit,
             pending_transactions,
             transactions_by_account,
-            blocked_transactions: HashMap::default(),
+            // blocked_transactions: HashMap::default(),
             blocked_transactions_by_batch_id: HashMap::default(),
             blocked_transactions_batch_count: HashMap::default(),
             num_blocked_transactions: 0,
@@ -303,6 +299,14 @@ impl TransactionScheduler {
         let (_, scheduling_time) = measure!(self.do_scheduling());
         self.metrics.scheduling_time_us += scheduling_time.as_us();
 
+        if self.metrics.last_reported.elapsed() >= std::time::Duration::from_millis(1000) {
+            error!(
+                "pending: {} blocked_tx: {} batches_blocking: {}",
+                self.pending_transactions.lock().unwrap().len(),
+                self.blocked_transactions_batch_count.len(),
+                self.blocked_transactions_by_batch_id.len()
+            );
+        }
         let (_, metrics_time) = measure!(self.metrics.report());
         self.metrics.metrics_us += metrics_time.as_us();
     }
@@ -339,7 +343,6 @@ impl TransactionScheduler {
                 self.blocked_transactions_by_batch_id.remove(&batch_id)
             {
                 let unblocked_transactions = blocked_transactions.into_iter().filter(|tx| {
-                    let signature = tx.transaction.signature();
                     let blocked_batches_count =
                         self.blocked_transactions_batch_count.get_mut(tx).unwrap();
                     *blocked_batches_count -= 1;
@@ -460,16 +463,16 @@ impl TransactionScheduler {
         transaction: &TransactionRef,
         batches: &mut HashMap<usize, &mut TransactionBatchBuilder>,
     ) {
-        // Check for blocking transactions in account queue - add lowest priority if blocked by higher priority tx
-        let (has_blocking_transactions, check_blocking_transactions_time) =
-            measure!(self.check_blocking_transactions(transaction));
-        self.metrics.check_blocking_transactions_time_us +=
-            check_blocking_transactions_time.as_us();
+        // // Check for blocking transactions in account queue - add lowest priority if blocked by higher priority tx
+        // let (has_blocking_transactions, check_blocking_transactions_time) =
+        //     measure!(self.check_blocking_transactions(transaction));
+        // self.metrics.check_blocking_transactions_time_us +=
+        //     check_blocking_transactions_time.as_us();
 
-        if has_blocking_transactions {
-            self.num_blocked_transactions += 1;
-            return;
-        }
+        // if has_blocking_transactions {
+        //     self.num_blocked_transactions += 1;
+        //     return;
+        // }
 
         // Check for blocking transactions batches in scheduled locks (this includes batches currently being built)
         let (conflicting_batches, get_conflicting_batches_time) =
@@ -526,10 +529,11 @@ impl TransactionScheduler {
                 self.blocked_transactions_batch_count
                     .insert(transaction.clone(), conflicting_batches.len());
                 for batch_id in conflicting_batches {
-                    self.blocked_transactions_by_batch_id
+                    assert!(self
+                        .blocked_transactions_by_batch_id
                         .entry(batch_id)
                         .or_default()
-                        .insert(transaction.clone());
+                        .insert(transaction.clone()));
                 }
             }
             return;
@@ -547,9 +551,9 @@ impl TransactionScheduler {
             self.execution_thread_stats[thread_index].queued_compute_units += 1; // TODO: actually use CU instead of # tx
             self.execution_thread_stats[thread_index].queued_transactions += 1;
             // 4. Remove transaction from account queues
-            self.remove_transaction_from_queues(transaction);
+            // self.remove_transaction_from_queues(transaction);
             // 5. Unblock transactions that were blocked by this one - they can be scheduled on the same thread now
-            self.unblock_transactions(transaction);
+            // self.unblock_transactions(transaction);
             // 6. Check if batch should be removed from schedulable batches
             if batch.transactions.len() == self.max_batch_size {
                 batches.remove(&thread_index);
@@ -560,27 +564,27 @@ impl TransactionScheduler {
 
     /// Checks for blocking transactions in the account queues
     ///     - If blocked, adds to `blocked_transactions`
-    fn check_blocking_transactions(&mut self, transaction: &TransactionRef) -> bool {
-        if let Some(blocking_transaction) =
-            self.get_lowest_priority_blocking_transaction(transaction)
-        {
-            self.blocked_transactions
-                .entry(*blocking_transaction.transaction.signature())
-                .or_default()
-                .push(transaction.clone());
-            true
-        } else {
-            false
-        }
-    }
+    // fn check_blocking_transactions(&mut self, transaction: &TransactionRef) -> bool {
+    //     if let Some(blocking_transaction) =
+    //         self.get_lowest_priority_blocking_transaction(transaction)
+    //     {
+    //         self.blocked_transactions
+    //             .entry(*blocking_transaction.transaction.signature())
+    //             .or_default()
+    //             .push(transaction.clone());
+    //         true
+    //     } else {
+    //         false
+    //     }
+    // }
 
     /// Gets batches that conflict with the current transaction
     ///     - Conflict does not necessarily mean block as they can be scheduled on the same thread
     fn get_conflicting_batches(
         &self,
         transaction: &TransactionRef,
-    ) -> Option<Vec<TransactionBatchId>> {
-        let mut conflicting_batches = Vec::default();
+    ) -> Option<HashSet<TransactionBatchId>> {
+        let mut conflicting_batches = HashSet::default();
 
         let account_locks = transaction.transaction.get_account_locks().unwrap();
 
@@ -594,7 +598,7 @@ impl TransactionScheduler {
                 .write_batches
                 .iter()
             {
-                conflicting_batches.push(*batch_id);
+                conflicting_batches.insert(*batch_id);
             }
         }
 
@@ -606,50 +610,50 @@ impl TransactionScheduler {
                 .unwrap()
                 .scheduled_lock;
             for batch_id in scheduled_lock.write_batches.iter() {
-                conflicting_batches.push(*batch_id);
+                conflicting_batches.insert(*batch_id);
             }
             for batch_id in scheduled_lock.read_batches.iter() {
-                conflicting_batches.push(*batch_id);
+                conflicting_batches.insert(*batch_id);
             }
         }
 
         (conflicting_batches.len() > 0).then(|| conflicting_batches)
     }
 
-    /// Removes transaction from the account queues since it's been scheduled
-    fn remove_transaction_from_queues(&mut self, transaction: &TransactionRef) {
-        let account_locks = transaction.transaction.get_account_locks().unwrap();
+    // /// Removes transaction from the account queues since it's been scheduled
+    // fn remove_transaction_from_queues(&mut self, transaction: &TransactionRef) {
+    //     let account_locks = transaction.transaction.get_account_locks().unwrap();
 
-        for account in account_locks.readonly.into_iter() {
-            self.transactions_by_account
-                .get_mut(account)
-                .unwrap()
-                .reads
-                .remove(transaction);
-        }
+    //     for account in account_locks.readonly.into_iter() {
+    //         self.transactions_by_account
+    //             .get_mut(account)
+    //             .unwrap()
+    //             .reads
+    //             .remove(transaction);
+    //     }
 
-        for account in account_locks.writable.into_iter() {
-            self.transactions_by_account
-                .get_mut(account)
-                .unwrap()
-                .writes
-                .remove(transaction);
-        }
-    }
+    //     for account in account_locks.writable.into_iter() {
+    //         self.transactions_by_account
+    //             .get_mut(account)
+    //             .unwrap()
+    //             .writes
+    //             .remove(transaction);
+    //     }
+    // }
 
     /// Unblock transactions blocked by a higher-priority transaction getting picked up for scheduling
-    fn unblock_transactions(&mut self, transaction: &TransactionRef) {
-        if let Some(blocked_transactions) = self
-            .blocked_transactions
-            .remove(transaction.transaction.signature())
-        {
-            self.num_blocked_transactions -= blocked_transactions.len();
-            self.pending_transactions
-                .lock()
-                .unwrap()
-                .extend(blocked_transactions.into_iter());
-        }
-    }
+    // fn unblock_transactions(&mut self, transaction: &TransactionRef) {
+    //     if let Some(blocked_transactions) = self
+    //         .blocked_transactions
+    //         .remove(transaction.transaction.signature())
+    //     {
+    //         self.num_blocked_transactions -= blocked_transactions.len();
+    //         self.pending_transactions
+    //             .lock()
+    //             .unwrap()
+    //             .extend(blocked_transactions.into_iter());
+    //     }
+    // }
 
     /// Locks accounts for a scheduled batch
     fn lock_accounts(&mut self, batch: &TransactionBatch) {
@@ -685,49 +689,49 @@ impl TransactionScheduler {
         }
     }
 
-    /// Gets the lowest priority transaction that blocks this one
-    fn get_lowest_priority_blocking_transaction(
-        &self,
-        transaction: &TransactionRef,
-    ) -> Option<TransactionRef> {
-        transaction
-            .transaction
-            .get_account_locks()
-            .ok()
-            .and_then(|account_locks| {
-                let min_blocking_transaction = account_locks
-                    .readonly
-                    .into_iter()
-                    .map(|account_key| {
-                        self.transactions_by_account
-                            .get(account_key)
-                            .unwrap()
-                            .get_min_blocking_transaction(transaction, false)
-                    })
-                    .fold(None, option_min);
+    // /// Gets the lowest priority transaction that blocks this one
+    // fn get_lowest_priority_blocking_transaction(
+    //     &self,
+    //     transaction: &TransactionRef,
+    // ) -> Option<TransactionRef> {
+    //     transaction
+    //         .transaction
+    //         .get_account_locks()
+    //         .ok()
+    //         .and_then(|account_locks| {
+    //             let min_blocking_transaction = account_locks
+    //                 .readonly
+    //                 .into_iter()
+    //                 .map(|account_key| {
+    //                     self.transactions_by_account
+    //                         .get(account_key)
+    //                         .unwrap()
+    //                         .get_min_blocking_transaction(transaction, false)
+    //                 })
+    //                 .fold(None, option_min);
 
-                account_locks
-                    .writable
-                    .into_iter()
-                    .map(|account_key| {
-                        self.transactions_by_account
-                            .get(account_key)
-                            .unwrap()
-                            .get_min_blocking_transaction(transaction, true)
-                    })
-                    .fold(min_blocking_transaction, option_min)
-                    .map(|tx| tx.clone())
-            })
-    }
+    //             account_locks
+    //                 .writable
+    //                 .into_iter()
+    //                 .map(|account_key| {
+    //                     self.transactions_by_account
+    //                         .get(account_key)
+    //                         .unwrap()
+    //                         .get_min_blocking_transaction(transaction, true)
+    //                 })
+    //                 .fold(min_blocking_transaction, option_min)
+    //                 .map(|tx| tx.clone())
+    //         })
+    // }
 }
 
 /// Tracks all pending and blocked transacitons, ordered by priority, for a single account
 #[derive(Default)]
 struct AccountTransactionQueue {
-    /// Tree of read transactions on the account ordered by fee-priority
-    reads: BTreeSet<TransactionRef>,
-    /// Tree of write transactions on the account ordered by fee-priority
-    writes: BTreeSet<TransactionRef>,
+    // /// Tree of read transactions on the account ordered by fee-priority
+    // reads: BTreeSet<TransactionRef>,
+    // /// Tree of write transactions on the account ordered by fee-priority
+    // writes: BTreeSet<TransactionRef>,
     /// Tracks currently scheduled transactions on the account
     scheduled_lock: AccountLock,
 }
@@ -738,28 +742,28 @@ impl AccountTransactionQueue {
         self.scheduled_lock.unlock_on_batch(batch_id);
     }
 
-    /// Find the minimum-priority transaction that blocks this transaction if there is one
-    fn get_min_blocking_transaction(
-        &self,
-        transaction: &TransactionRef,
-        is_write: bool,
-    ) -> Option<TransactionRef> {
-        let mut min_blocking_transaction = None;
-        // Write transactions will be blocked by higher-priority reads, but read transactions will not
-        if is_write {
-            min_blocking_transaction = option_min(
-                min_blocking_transaction,
-                upper_bound(&self.reads, transaction.clone()),
-            );
-        }
+    // /// Find the minimum-priority transaction that blocks this transaction if there is one
+    // fn get_min_blocking_transaction(
+    //     &self,
+    //     transaction: &TransactionRef,
+    //     is_write: bool,
+    // ) -> Option<TransactionRef> {
+    //     let mut min_blocking_transaction = None;
+    //     // Write transactions will be blocked by higher-priority reads, but read transactions will not
+    //     if is_write {
+    //         min_blocking_transaction = option_min(
+    //             min_blocking_transaction,
+    //             upper_bound(&self.reads, transaction.clone()),
+    //         );
+    //     }
 
-        // All transactions are blocked by higher-priority write-transactions
-        option_min(
-            min_blocking_transaction,
-            upper_bound(&self.writes, transaction.clone()),
-        )
-        .map(|txr| txr.clone())
-    }
+    //     // All transactions are blocked by higher-priority write-transactions
+    //     option_min(
+    //         min_blocking_transaction,
+    //         upper_bound(&self.writes, transaction.clone()),
+    //     )
+    //     .map(|txr| txr.clone())
+    // }
 }
 
 /// Tracks the lock status of an account by batch id
@@ -955,10 +959,9 @@ impl Default for SchedulerMetrics {
 impl SchedulerMetrics {
     /// Report metrics if the interval has passed and reset metrics
     fn report(&mut self) {
-        const REPORT_INTERVAL_MILLIS: u128 = 1000;
+        const REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 
-        let elapsed = self.last_reported.elapsed();
-        if elapsed.as_millis() >= REPORT_INTERVAL_MILLIS {
+        if self.last_reported.elapsed() >= REPORT_INTERVAL {
             datapoint_info!(
                 "transaction-scheduler",
                 (
