@@ -1,13 +1,20 @@
-//! Implements a transaction sche&duler
+//! Implements a transaction scheduler
 
 use {
-    crate::unprocessed_packet_batches::{self, ImmutableDeserializedPacket},
+    crate::{
+        transaction_priority_details::GetTransactionPriorityDetails,
+        unprocessed_packet_batches::{self, ImmutableDeserializedPacket},
+    },
     crossbeam_channel::{select, Receiver, Sender, TryRecvError},
     dashmap::DashMap,
     solana_measure::{measure, measure::Measure},
     solana_perf::packet::PacketBatch,
     solana_runtime::bank::Bank,
-    solana_sdk::{pubkey::Pubkey, signature::Signature, transaction::SanitizedTransaction},
+    solana_sdk::{
+        pubkey::Pubkey,
+        signature::Signature,
+        transaction::{SanitizedTransaction, TransactionError},
+    },
     std::{
         collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque},
         hash::Hash,
@@ -73,21 +80,42 @@ impl Hash for TransactionPriority {
 type TransactionRef = TransactionPriority;
 
 impl TransactionPriority {
-    fn try_new(packet: &ImmutableDeserializedPacket, bank: &Bank) -> Option<TransactionRef> {
-        let priority = packet.priority();
+    fn new(transaction: SanitizedTransaction, num_conflicts: u64) -> TransactionRef {
+        let packet_priority = transaction
+            .get_transaction_priority_details()
+            .unwrap()
+            .priority;
+        let priority = Self::modify_priority(packet_priority, num_conflicts);
+
+        Self {
+            transaction,
+            priority,
+            timestamp: Instant::now(),
+        }
+    }
+
+    fn build_and_verify_transaction(
+        packet: &ImmutableDeserializedPacket,
+        bank: &Bank,
+    ) -> Result<SanitizedTransaction, TransactionError> {
         let transaction = SanitizedTransaction::try_new(
             packet.transaction().clone(),
             *packet.message_hash(),
             packet.is_simple_vote(),
             bank,
-        )
-        .ok()?;
-        transaction.verify_precompiles(&bank.feature_set).ok()?;
-        Some(Self {
-            transaction,
-            priority,
-            timestamp: Instant::now(),
-        })
+        )?;
+        transaction.verify_precompiles(&bank.feature_set)?;
+        Ok(transaction)
+    }
+
+    fn modify_priority(packet_priority: u64, num_conflicts: u64) -> u64 {
+        if num_conflicts > 1000 {
+            (packet_priority * 1_000_000_000) / (1 + num_conflicts)
+        } else {
+            (packet_priority * 1_000_000_000)
+        }
+        // (packet_priority * 1_000_000_000) / (1 + num_conflicts)
+        // packet_priority
     }
 }
 
@@ -137,14 +165,41 @@ impl PacketBatchHandler {
             let transactions =
                 unprocessed_packet_batches::deserialize_packets(&packet_batch, &packet_indices)
                     .filter_map(|deserialized_packet| {
-                        TransactionPriority::try_new(
+                        TransactionPriority::build_and_verify_transaction(
                             deserialized_packet.immutable_section(),
                             &self.bank,
                         )
+                        .ok()
+                    })
+                    .map(|transaction| {
+                        let num_conflicts = self.get_num_conflicts(&transaction);
+                        TransactionPriority::new(transaction, num_conflicts)
                     })
                     .collect::<Vec<_>>();
             self.insert_transactions(transactions);
         }
+    }
+
+    /// Count conflicts
+    fn get_num_conflicts(&self, transaction: &SanitizedTransaction) -> u64 {
+        let account_locks = transaction.get_account_locks().unwrap();
+
+        // let mut read_conflicts = 0;
+        for account in account_locks.readonly.into_iter() {
+            let mut queue = self.transactions_by_account.entry(*account).or_default();
+            // read_conflicts += queue.writes;
+            queue.reads += 1;
+        }
+
+        let mut write_conflicts = 0;
+        for account in account_locks.writable.into_iter() {
+            let mut queue = self.transactions_by_account.entry(*account).or_default();
+            write_conflicts += queue.writes + queue.reads;
+            queue.writes += 1;
+        }
+
+        // read_conflicts + write_conflicts
+        write_conflicts
     }
 
     /// Insert transactions into queues and pending
@@ -632,18 +687,14 @@ impl TransactionScheduler {
     ) {
         let accounts = transaction.transaction.get_account_locks().unwrap();
         for account in accounts.readonly {
-            self.transactions_by_account
-                .get_mut(account)
-                .unwrap()
-                .scheduled_lock
-                .lock_on_batch(batch_id, false);
+            let mut queue = self.transactions_by_account.get_mut(account).unwrap();
+            queue.scheduled_lock.lock_on_batch(batch_id, false);
+            queue.reads -= 1;
         }
         for account in accounts.writable {
-            self.transactions_by_account
-                .get_mut(account)
-                .unwrap()
-                .scheduled_lock
-                .lock_on_batch(batch_id, true);
+            let mut queue = self.transactions_by_account.get_mut(account).unwrap();
+            queue.scheduled_lock.lock_on_batch(batch_id, true);
+            queue.writes -= 1;
         }
     }
 }
@@ -651,6 +702,9 @@ impl TransactionScheduler {
 /// Tracks all pending and blocked transacitons, ordered by priority, for a single account
 #[derive(Default)]
 struct AccountTransactionQueue {
+    reads: u64,  // unscheduled number of transactions reading
+    writes: u64, // unscheduled number of transactions writing
+
     // /// Tree of read transactions on the account ordered by fee-priority
     // reads: BTreeSet<TransactionRef>,
     // /// Tree of write transactions on the account ordered by fee-priority
