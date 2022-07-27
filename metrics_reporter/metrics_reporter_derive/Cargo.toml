@@ -1,6 +1,6 @@
 [package]
-name = "metrics_reporter_derive"
-version = "0.1.0"
+name = "solana-metrics-reporter-derive"
+version = "1.11.3"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -8,5 +8,6 @@ edition = "2021"
 proc_macro = true
 
 [dependencies]
-syn = "1.0"
+proc-macro2 = "1.0"
 quote = "1.0"
+syn = "1.0"
