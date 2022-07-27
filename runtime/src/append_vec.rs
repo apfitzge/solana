@@ -125,7 +125,12 @@ impl<'a> StoredAccountMeta<'a> {
 
     fn sanitize_lamports(&self) -> bool {
         // Sanitize 0 lamports to ensure to be same as AccountSharedData::default()
-        self.account_meta.lamports != 0 || self.clone_account() == AccountSharedData::default()
+        self.account_meta.lamports != 0
+            || (!self.account_meta.executable
+                && self.account_meta.rent_epoch == 0
+                && self.account_meta.lamports == 0
+                && self.data.len() == 0
+                && self.account_meta.owner == Pubkey::default())
     }
 
     fn ref_executable_byte(&self) -> &u8 {
