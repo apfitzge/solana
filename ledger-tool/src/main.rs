@@ -1573,6 +1573,7 @@ fn main() {
             .arg(&account_paths_arg)
             .arg(&skip_rewrites_arg)
             .arg(&accounts_db_skip_initial_hash_calc_arg)
+            .arg(&accountsdb_skip_shrink)
             .arg(&ancient_append_vecs)
             .arg(&hard_forks_arg)
             .arg(&max_genesis_archive_unpacked_size_arg)
@@ -2688,6 +2689,7 @@ fn main() {
                         .is_present("accounts_db_skip_initial_hash_calculation"),
                     ..AccountsDbConfig::default()
                 });
+                let accounts_db_skip_shrink = arg_matches.is_present("accounts_db_skip_shrink");
 
                 match load_bank_forks(
                     arg_matches,
@@ -2698,6 +2700,7 @@ fn main() {
                         halt_at_slot: Some(snapshot_slot),
                         poh_verify: false,
                         accounts_db_config,
+                        accounts_db_skip_shrink,
                         ..ProcessOptions::default()
                     },
                     snapshot_archive_path,
@@ -2915,6 +2918,8 @@ fn main() {
                                 snapshot_slot,
                                 ending_slot.unwrap(),
                             );
+                        } else if !accounts_db_skip_shrink {
+                            bank.shrink_candidate_slots();
                         }
 
                         println!(
