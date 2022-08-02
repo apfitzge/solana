@@ -233,7 +233,6 @@ impl SigVerifier for DisabledSigVerifier {
 }
 
 impl SigVerifyStage {
-    #[allow(clippy::new_ret_no_self)]
     pub fn new<T: SigVerifier + 'static + Send + Clone>(
         packet_receiver: find_packet_sender_stake_stage::FindPacketSenderStakeReceiver,
         verifier: T,

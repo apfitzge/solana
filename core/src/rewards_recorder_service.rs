@@ -22,7 +22,6 @@ pub struct RewardsRecorderService {
 }
 
 impl RewardsRecorderService {
-    #[allow(clippy::new_ret_no_self)]
     pub fn new(
         rewards_receiver: RewardsRecorderReceiver,
         blockstore: Arc<Blockstore>,

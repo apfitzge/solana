@@ -68,7 +68,6 @@ pub struct CostUpdateService {
 }
 
 impl CostUpdateService {
-    #[allow(clippy::new_ret_no_self)]
     pub fn new(
         blockstore: Arc<Blockstore>,
         cost_model: Arc<RwLock<CostModel>>,

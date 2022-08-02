@@ -385,7 +385,6 @@ pub struct FilterForwardingResults {
 
 impl BankingStage {
     /// Create the stage using `bank`. Exit when `verified_receiver` is dropped.
-    #[allow(clippy::new_ret_no_self)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cluster_info: &Arc<ClusterInfo>,
