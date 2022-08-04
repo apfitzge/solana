@@ -1,6 +1,7 @@
 //! The `banking_stage` processes Transaction messages. It is intended to be used
 //! to construct a software pipeline. The stage uses all available CPU cores and
 //! can do its processing in parallel with signature verification on the GPU.
+
 use {
     crate::{
         forward_packet_batches_by_accounts::ForwardPacketBatchesByAccounts,
@@ -9,6 +10,7 @@ use {
             LeaderExecuteAndCommitTimings, RecordTransactionsTimings,
         },
         qos_service::QosService,
+        scheduler_stage::SchedulerStageChannels,
         sigverify::SigverifyTracerPacketStats,
         tracer_packet_stats::TracerPacketStats,
         unprocessed_packet_batches::{self, *},
@@ -93,7 +95,7 @@ const UNPROCESSED_BUFFER_STEP_SIZE: usize = 128;
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
 pub type BankingPacketBatch = (Vec<PacketBatch>, Option<SigverifyTracerPacketStats>);
 pub type BankingPacketSender = CrossbeamSender<BankingPacketBatch>;
-pub type BankingPacketReceiver = CrossbeamReceiver<BankingPacketBatch>;
+pub type BankingPacketReceiver = CrossbeamReceiver<Vec<DeserializedPacket>>;
 
 pub struct ProcessTransactionBatchOutput {
     // The number of transactions filtered out by the cost model
@@ -389,9 +391,7 @@ impl BankingStage {
     pub fn new(
         cluster_info: &Arc<ClusterInfo>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
-        verified_receiver: BankingPacketReceiver,
-        tpu_verified_vote_receiver: BankingPacketReceiver,
-        verified_vote_receiver: BankingPacketReceiver,
+        scheduler_channels: SchedulerStageChannels,
         transaction_status_sender: Option<TransactionStatusSender>,
         gossip_vote_sender: ReplayVoteSender,
         cost_model: Arc<RwLock<CostModel>>,
@@ -402,9 +402,7 @@ impl BankingStage {
         Self::new_num_threads(
             cluster_info,
             poh_recorder,
-            verified_receiver,
-            tpu_verified_vote_receiver,
-            verified_vote_receiver,
+            scheduler_channels,
             Self::num_threads(),
             transaction_status_sender,
             gossip_vote_sender,
@@ -419,9 +417,7 @@ impl BankingStage {
     pub fn new_num_threads(
         cluster_info: &Arc<ClusterInfo>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
-        verified_receiver: BankingPacketReceiver,
-        tpu_verified_vote_receiver: BankingPacketReceiver,
-        verified_vote_receiver: BankingPacketReceiver,
+        scheduler_channels: SchedulerStageChannels,
         num_threads: u32,
         transaction_status_sender: Option<TransactionStatusSender>,
         gossip_vote_sender: ReplayVoteSender,
@@ -431,6 +427,7 @@ impl BankingStage {
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         assert!(num_threads >= MIN_TOTAL_THREADS);
+        assert!((num_threads - 2) as usize == scheduler_channels.verified_receivers.len());
         // Single thread to generate entries from many banks.
         // This thread talks to poh_service and broadcasts the entries once they have been recorded.
         // Once an entry has been recorded, its blockhash is registered with the bank.
@@ -440,17 +437,26 @@ impl BankingStage {
         // Many banks that process transactions in parallel.
         let bank_thread_hdls: Vec<JoinHandle<()>> = (0..num_threads)
             .map(|i| {
-                let (verified_receiver, forward_option) = match i {
+                let (verified_receiver, completed_sender, forward_option) = match i {
                     0 => {
                         // Disable forwarding of vote transactions
                         // from gossip. Note - votes can also arrive from tpu
-                        (verified_vote_receiver.clone(), ForwardOption::NotForward)
+                        (
+                            scheduler_channels.verified_vote_receiver.clone(),
+                            scheduler_channels.verified_vote_sender.clone(),
+                            ForwardOption::NotForward,
+                        )
                     }
                     1 => (
-                        tpu_verified_vote_receiver.clone(),
+                        scheduler_channels.tpu_verified_vote_receiverr.clone(),
+                        scheduler_channels.tpu_verified_vote_sender.clone(),
                         ForwardOption::ForwardTpuVote,
                     ),
-                    _ => (verified_receiver.clone(), ForwardOption::ForwardTransaction),
+                    _ => (
+                        scheduler_channels.verified_receivers[i.saturating_sub(2) as usize].clone(),
+                        scheduler_channels.completed_transaction_sender.clone(),
+                        ForwardOption::ForwardTransaction,
+                    ),
                 };
 
                 let poh_recorder = poh_recorder.clone();
@@ -467,6 +473,7 @@ impl BankingStage {
                     .spawn(move || {
                         Self::process_loop(
                             &verified_receiver,
+                            &completed_sender,
                             &poh_recorder,
                             &cluster_info,
                             &mut recv_start,
@@ -1076,7 +1083,8 @@ impl BankingStage {
 
     #[allow(clippy::too_many_arguments)]
     fn process_loop(
-        verified_receiver: &BankingPacketReceiver,
+        verified_receiver: &CrossbeamReceiver<Vec<DeserializedPacket>>,
+        completed_sender: &CrossbeamSender<(usize, DeserializedPacket)>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         cluster_info: &ClusterInfo,
         recv_start: &mut Instant,
@@ -1995,26 +2003,16 @@ impl BankingStage {
         verified_receiver: &BankingPacketReceiver,
         recv_timeout: Duration,
         packet_count_upperbound: usize,
-    ) -> Result<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>), RecvTimeoutError> {
+    ) -> Result<Vec<DeserializedPacket>, RecvTimeoutError> {
         let start = Instant::now();
         let mut aggregated_tracer_packet_stats_option: Option<SigverifyTracerPacketStats> = None;
-        let (mut packet_batches, new_tracer_packet_stats_option) =
-            verified_receiver.recv_timeout(recv_timeout)?;
+        let mut packet_batches = verified_receiver.recv_timeout(recv_timeout)?;
 
-        if let Some(new_tracer_packet_stats) = &new_tracer_packet_stats_option {
-            if let Some(aggregated_tracer_packet_stats) = &mut aggregated_tracer_packet_stats_option
-            {
-                aggregated_tracer_packet_stats.aggregate(new_tracer_packet_stats);
-            } else {
-                aggregated_tracer_packet_stats_option = new_tracer_packet_stats_option;
-            }
-        }
-
-        let mut num_packets_received: usize = packet_batches.iter().map(|batch| batch.len()).sum();
-        while let Ok((packet_batch, _tracer_packet_stats_option)) = verified_receiver.try_recv() {
+        let mut num_packets_received: usize = packet_batches.len();
+        while let Ok(packet_batch) = verified_receiver.try_recv() {
             trace!("got more packet batches in banking stage");
-            let (packets_received, packet_count_overflowed) = num_packets_received
-                .overflowing_add(packet_batch.iter().map(|batch| batch.len()).sum());
+            let (packets_received, packet_count_overflowed) =
+                num_packets_received.overflowing_add(packet_batch.len());
             packet_batches.extend(packet_batch);
 
             // Spend any leftover receive time budget to greedily receive more packet batches,
@@ -2027,7 +2025,7 @@ impl BankingStage {
             }
             num_packets_received = packets_received;
         }
-        Ok((packet_batches, aggregated_tracer_packet_stats_option))
+        Ok(packet_batches)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2043,18 +2041,13 @@ impl BankingStage {
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), RecvTimeoutError> {
         let mut recv_time = Measure::start("receive_and_buffer_packets_recv");
-        let (packet_batches, new_sigverify_tracer_packet_stats_option) = Self::receive_until(
+        let deserialized_packets = Self::receive_until(
             verified_receiver,
             recv_timeout,
             buffered_packet_batches.capacity() - buffered_packet_batches.len(),
         )?;
 
-        if let Some(new_sigverify_tracer_packet_stats) = &new_sigverify_tracer_packet_stats_option {
-            tracer_packet_stats
-                .aggregate_sigverify_tracer_packet_stats(new_sigverify_tracer_packet_stats);
-        }
-
-        let packet_count: usize = packet_batches.iter().map(|x| x.len()).sum();
+        let packet_count: usize = deserialized_packets.len();
         debug!(
             "@{:?} process start stalled for: {:?}ms txs: {} id: {}",
             timestamp(),
@@ -2063,28 +2056,17 @@ impl BankingStage {
             id,
         );
 
-        let packet_batch_iter = packet_batches.into_iter();
         let mut dropped_packets_count = 0;
         let mut newly_buffered_packets_count = 0;
-        for packet_batch in packet_batch_iter {
-            let packet_indexes = Self::generate_packet_indexes(&packet_batch);
-            // Track all the packets incoming from sigverify, both valid and invalid
-            slot_metrics_tracker.increment_total_new_valid_packets(packet_indexes.len() as u64);
-            slot_metrics_tracker.increment_newly_failed_sigverify_count(
-                packet_batch.len().saturating_sub(packet_indexes.len()) as u64,
-            );
-
-            Self::push_unprocessed(
-                buffered_packet_batches,
-                &packet_batch,
-                &packet_indexes,
-                &mut dropped_packets_count,
-                &mut newly_buffered_packets_count,
-                banking_stage_stats,
-                slot_metrics_tracker,
-                tracer_packet_stats,
-            )
-        }
+        Self::push_unprocessed(
+            buffered_packet_batches,
+            deserialized_packets,
+            &mut dropped_packets_count,
+            &mut newly_buffered_packets_count,
+            banking_stage_stats,
+            slot_metrics_tracker,
+            tracer_packet_stats,
+        );
         recv_time.stop();
 
         banking_stage_stats
@@ -2111,35 +2093,16 @@ impl BankingStage {
 
     fn push_unprocessed(
         unprocessed_packet_batches: &mut UnprocessedPacketBatches,
-        packet_batch: &PacketBatch,
-        packet_indexes: &[usize],
+        deserialized_packets: Vec<DeserializedPacket>,
         dropped_packets_count: &mut usize,
         newly_buffered_packets_count: &mut usize,
         banking_stage_stats: &mut BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         tracer_packet_stats: &mut TracerPacketStats,
     ) {
-        if !packet_indexes.is_empty() {
-            let _ = banking_stage_stats
-                .batch_packet_indexes_len
-                .increment(packet_indexes.len() as u64);
-
-            *newly_buffered_packets_count += packet_indexes.len();
-            slot_metrics_tracker
-                .increment_newly_buffered_packets_count(packet_indexes.len() as u64);
-
+        if !deserialized_packets.is_empty() {
             let (number_of_dropped_packets, number_of_dropped_tracer_packets) =
-                unprocessed_packet_batches.insert_batch(
-                    unprocessed_packet_batches::deserialize_packets(packet_batch, packet_indexes),
-                );
-
-            saturating_add_assign!(*dropped_packets_count, number_of_dropped_packets);
-            slot_metrics_tracker.increment_exceeded_buffer_limit_dropped_packets_count(
-                number_of_dropped_packets as u64,
-            );
-
-            tracer_packet_stats
-                .increment_total_exceeded_banking_stage_buffer(number_of_dropped_tracer_packets);
+                unprocessed_packet_batches.insert_batch(deserialized_packets.into_iter());
         }
     }
 
