@@ -65,7 +65,6 @@ use {
         collections::HashMap,
         env,
         net::{SocketAddr, UdpSocket},
-        rc::Rc,
         sync::{
             atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
@@ -489,7 +488,7 @@ impl BankingStage {
         Self { bank_thread_hdls }
     }
 
-    // filter forwardable Rc<immutable_deserialized_packet>s that:
+    // filter forwardable Arc<immutable_deserialized_packet>s that:
     // 1. are not forwarded, and
     // 2. in priority order from max to min, and
     // 3. not exceeding account bucket limit
@@ -672,7 +671,7 @@ impl BankingStage {
                 MinMaxHeap::with_capacity(capacity),
             )
         };
-        let retryable_packets: MinMaxHeap<Rc<ImmutableDeserializedPacket>> = retryable_packets
+        let retryable_packets: MinMaxHeap<Arc<ImmutableDeserializedPacket>> = retryable_packets
             .drain_desc()
             .chunks(num_packets_to_process_per_iteration)
             .into_iter()

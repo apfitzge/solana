@@ -20,7 +20,6 @@ use {
         cmp::Ordering,
         collections::{hash_map::Entry, HashMap},
         mem::size_of,
-        rc::Rc,
         sync::Arc,
     },
     thiserror::Error,
@@ -80,7 +79,7 @@ impl ImmutableDeserializedPacket {
 /// SanitizedTransaction
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeserializedPacket {
-    immutable_section: Rc<ImmutableDeserializedPacket>,
+    immutable_section: Arc<ImmutableDeserializedPacket>,
     pub forwarded: bool,
 }
 
@@ -113,7 +112,7 @@ impl DeserializedPacket {
             .ok_or(DeserializedPacketError::PrioritizationFailure)?;
 
         Ok(Self {
-            immutable_section: Rc::new(ImmutableDeserializedPacket {
+            immutable_section: Arc::new(ImmutableDeserializedPacket {
                 original_packet: packet,
                 transaction: sanitized_transaction,
                 message_hash,
@@ -124,7 +123,7 @@ impl DeserializedPacket {
         })
     }
 
-    pub fn immutable_section(&self) -> &Rc<ImmutableDeserializedPacket> {
+    pub fn immutable_section(&self) -> &Arc<ImmutableDeserializedPacket> {
         &self.immutable_section
     }
 }
@@ -160,7 +159,7 @@ impl Ord for ImmutableDeserializedPacket {
 /// to pick proper packets to add to the block.
 #[derive(Default)]
 pub struct UnprocessedPacketBatches {
-    pub packet_priority_queue: MinMaxHeap<Rc<ImmutableDeserializedPacket>>,
+    pub packet_priority_queue: MinMaxHeap<Arc<ImmutableDeserializedPacket>>,
     pub message_hash_to_transaction: HashMap<Hash, DeserializedPacket>,
     batch_limit: usize,
 }
@@ -274,7 +273,7 @@ impl UnprocessedPacketBatches {
     {
         // TODO: optimize this only when number of packets
         // with outdated blockhash is high
-        let new_packet_priority_queue: MinMaxHeap<Rc<ImmutableDeserializedPacket>> = self
+        let new_packet_priority_queue: MinMaxHeap<Arc<ImmutableDeserializedPacket>> = self
             .packet_priority_queue
             .drain()
             .filter(|immutable_packet| {
