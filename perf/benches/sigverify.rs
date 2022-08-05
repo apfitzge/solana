@@ -6,7 +6,7 @@ use {
     log::*,
     rand::{thread_rng, Rng},
     solana_perf::{
-        packet::{to_packet_batches, Packet, PacketBatch},
+        packet::{to_deserialized_packets, Packet, PacketBatch},
         recycler::Recycler,
         sigverify,
         test_tx::{test_multisig_tx, test_tx},
@@ -23,7 +23,7 @@ fn bench_sigverify_simple(bencher: &mut Bencher) {
     let num_packets = NUM;
 
     // generate packet vector
-    let mut batches = to_packet_batches(
+    let mut batches = to_deserialized_packets(
         &std::iter::repeat(tx).take(num_packets).collect::<Vec<_>>(),
         128,
     );
@@ -43,12 +43,12 @@ fn gen_batches(
 ) -> Vec<PacketBatch> {
     if use_same_tx {
         let tx = test_tx();
-        to_packet_batches(&vec![tx; total_packets], packets_per_batch)
+        to_deserialized_packets(&vec![tx; total_packets], packets_per_batch)
     } else {
         let txs: Vec<_> = std::iter::repeat_with(test_tx)
             .take(total_packets)
             .collect();
-        to_packet_batches(&txs, packets_per_batch)
+        to_deserialized_packets(&txs, packets_per_batch)
     }
 }
 
@@ -178,7 +178,7 @@ fn bench_get_offsets(bencher: &mut Bencher) {
 
     // generate packet vector
     let mut batches =
-        to_packet_batches(&std::iter::repeat(tx).take(1024).collect::<Vec<_>>(), 1024);
+        to_deserialized_packets(&std::iter::repeat(tx).take(1024).collect::<Vec<_>>(), 1024);
 
     let recycler = Recycler::default();
     // verify packets

@@ -809,7 +809,9 @@ mod tests {
     use {
         super::*,
         crate::{
-            packet::{to_packet_batches, Packet, PacketBatch, PACKETS_PER_BATCH, PACKET_DATA_SIZE},
+            packet::{
+                to_deserialized_packets, Packet, PacketBatch, PACKETS_PER_BATCH, PACKET_DATA_SIZE,
+            },
             sigverify::{self, PacketOffsets},
             test_tx::{new_test_vote_tx, test_multisig_tx, test_tx},
         },
@@ -1507,7 +1509,7 @@ mod tests {
         let tx = test_tx();
 
         let mut batches =
-            to_packet_batches(&std::iter::repeat(tx).take(1024).collect::<Vec<_>>(), 128);
+            to_deserialized_packets(&std::iter::repeat(tx).take(1024).collect::<Vec<_>>(), 128);
         let packet_count = sigverify::count_packets_in_batches(&batches);
         let filter = Deduper::new(1_000_000, Duration::from_millis(0));
         let mut num_deduped = 0;
@@ -1524,7 +1526,8 @@ mod tests {
     #[test]
     fn test_dedup_diff() {
         let mut filter = Deduper::new(1_000_000, Duration::from_millis(0));
-        let mut batches = to_packet_batches(&(0..1024).map(|_| test_tx()).collect::<Vec<_>>(), 128);
+        let mut batches =
+            to_deserialized_packets(&(0..1024).map(|_| test_tx()).collect::<Vec<_>>(), 128);
         let discard = filter.dedup_packets_and_count_discards(&mut batches, |_, _, _| ()) as usize;
         // because dedup uses a threadpool, there maybe up to N threads of txs that go through
         assert_eq!(discard, 0);
@@ -1542,7 +1545,7 @@ mod tests {
         assert!(!filter.saturated.load(Ordering::Relaxed));
         for i in 0..1000 {
             let mut batches =
-                to_packet_batches(&(0..1000).map(|_| test_tx()).collect::<Vec<_>>(), 128);
+                to_deserialized_packets(&(0..1000).map(|_| test_tx()).collect::<Vec<_>>(), 128);
             discard += filter.dedup_packets_and_count_discards(&mut batches, |_, _, _| ()) as usize;
             trace!("{} {}", i, discard);
             if filter.saturated.load(Ordering::Relaxed) {
@@ -1558,7 +1561,7 @@ mod tests {
         let mut discard = 0;
         for i in 0..10 {
             let mut batches =
-                to_packet_batches(&(0..1024).map(|_| test_tx()).collect::<Vec<_>>(), 128);
+                to_deserialized_packets(&(0..1024).map(|_| test_tx()).collect::<Vec<_>>(), 128);
             discard += filter.dedup_packets_and_count_discards(&mut batches, |_, _, _| ()) as usize;
             debug!("false positive rate: {}/{}", discard, i * 1024);
         }
@@ -1569,7 +1572,7 @@ mod tests {
     #[test]
     fn test_shrink_fuzz() {
         for _ in 0..5 {
-            let mut batches = to_packet_batches(
+            let mut batches = to_deserialized_packets(
                 &(0..PACKETS_PER_BATCH * 3)
                     .map(|_| test_tx())
                     .collect::<Vec<_>>(),
@@ -1758,7 +1761,7 @@ mod tests {
         let test_cases = set_discards.iter().zip(&expect_valids).enumerate();
         for (i, (set_discard, (expect_batch_count, expect_valid_packets))) in test_cases {
             debug!("test_shrink case: {}", i);
-            let mut batches = to_packet_batches(
+            let mut batches = to_deserialized_packets(
                 &(0..PACKET_COUNT).map(|_| test_tx()).collect::<Vec<_>>(),
                 PACKETS_PER_BATCH,
             );

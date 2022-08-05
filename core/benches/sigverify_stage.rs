@@ -17,7 +17,7 @@ use {
     },
     solana_measure::measure::Measure,
     solana_perf::{
-        packet::{to_packet_batches, PacketBatch},
+        packet::{to_deserialized_packets, PacketBatch},
         test_tx::test_tx,
     },
     solana_sdk::{
@@ -35,7 +35,7 @@ fn run_bench_packet_discard(num_ips: usize, bencher: &mut Bencher) {
     let len = 30 * 1000;
     let chunk_size = 1024;
     let tx = test_tx();
-    let mut batches = to_packet_batches(&vec![tx; len], chunk_size);
+    let mut batches = to_deserialized_packets(&vec![tx; len], chunk_size);
 
     let mut total = 0;
 
@@ -92,7 +92,7 @@ fn bench_packet_discard_mixed_senders(bencher: &mut Bencher) {
         std::net::IpAddr::from(addr)
     }
     let mut rng = thread_rng();
-    let mut batches = to_packet_batches(&vec![test_tx(); SIZE], CHUNK_SIZE);
+    let mut batches = to_deserialized_packets(&vec![test_tx(); SIZE], CHUNK_SIZE);
     let spam_addr = new_rand_addr(&mut rng);
     for batch in batches.iter_mut() {
         for packet in batch.iter_mut() {
@@ -124,7 +124,7 @@ fn gen_batches(use_same_tx: bool) -> Vec<PacketBatch> {
     let chunk_size = 1024;
     if use_same_tx {
         let tx = test_tx();
-        to_packet_batches(&vec![tx; len], chunk_size)
+        to_deserialized_packets(&vec![tx; len], chunk_size)
     } else {
         let from_keypair = Keypair::new();
         let to_keypair = Keypair::new();
@@ -139,7 +139,7 @@ fn gen_batches(use_same_tx: bool) -> Vec<PacketBatch> {
                 )
             })
             .collect();
-        to_packet_batches(&txs, chunk_size)
+        to_deserialized_packets(&txs, chunk_size)
     }
 }
 
@@ -205,7 +205,7 @@ fn prepare_batches(discard_factor: i32) -> (Vec<PacketBatch>, usize) {
             )
         })
         .collect();
-    let mut batches = to_packet_batches(&txs, chunk_size);
+    let mut batches = to_deserialized_packets(&txs, chunk_size);
 
     let mut rng = rand::thread_rng();
     let die = Uniform::<i32>::from(1..100);

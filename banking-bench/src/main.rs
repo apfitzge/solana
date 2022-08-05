@@ -1,4 +1,5 @@
 #![allow(clippy::integer_arithmetic)]
+
 use {
     clap::{crate_description, crate_name, Arg, ArgEnum, Command},
     crossbeam_channel::{unbounded, Receiver},
@@ -6,7 +7,9 @@ use {
     rand::{thread_rng, Rng},
     rayon::prelude::*,
     solana_client::connection_cache::{ConnectionCache, DEFAULT_TPU_CONNECTION_POOL_SIZE},
-    solana_core::banking_stage::BankingStage,
+    solana_core::{
+        banking_stage::BankingStage, immutable_deserialized_packet::ImmutableDeserializedPacket,
+    },
     solana_gossip::cluster_info::{ClusterInfo, Node},
     solana_ledger::{
         blockstore::Blockstore,
@@ -122,7 +125,7 @@ fn make_accounts_txs(
 }
 
 struct PacketsPerIteration {
-    packet_batches: Vec<PacketBatch>,
+    packets: Vec<Box<ImmutableDeserializedPacket>>,
     transactions: Vec<Transaction>,
     packets_per_batch: usize,
 }
@@ -143,9 +146,10 @@ impl PacketsPerIteration {
         );
 
         let packet_batches: Vec<PacketBatch> = to_packet_batches(&transactions, packets_per_batch);
-        assert_eq!(packet_batches.len(), batches_per_iteration);
+        let packets = Self::packet_batches_to_deserialized_packets(packet_batches);
+        assert_eq!(packets.len(), batches_per_iteration * packets_per_batch);
         Self {
-            packet_batches,
+            packets,
             transactions,
             packets_per_batch,
         }
@@ -157,7 +161,26 @@ impl PacketsPerIteration {
             let sig: Vec<u8> = (0..64).map(|_| thread_rng().gen::<u8>()).collect();
             tx.signatures[0] = Signature::new(&sig[0..64]);
         }
-        self.packet_batches = to_packet_batches(&self.transactions, self.packets_per_batch);
+        self.packets = Self::packet_batches_to_deserialized_packets(to_packet_batches(
+            &self.transactions,
+            self.packets_per_batch,
+        ));
+    }
+
+    fn packet_batches_to_deserialized_packets(
+        packet_batches: Vec<PacketBatch>,
+    ) -> Vec<Box<ImmutableDeserializedPacket>> {
+        packet_batches
+            .iter()
+            .flat_map(|packet_batch| {
+                packet_batch
+                    .into_iter()
+                    .filter_map(|packet| {
+                        ImmutableDeserializedPacket::from_packet(packet.clone()).ok()
+                    })
+                    .map(|packet| Box::new(packet))
+            })
+            .collect()
     }
 }
 
@@ -378,19 +401,13 @@ fn main() {
             let now = Instant::now();
             let mut sent = 0;
 
-            let packets_for_this_iteration = &all_packets[current_iteration_index % num_chunks];
-            for (packet_batch_index, packet_batch) in
-                packets_for_this_iteration.packet_batches.iter().enumerate()
-            {
-                sent += packet_batch.len();
-                trace!(
-                    "Sending PacketBatch index {}, {}",
-                    packet_batch_index,
-                    timestamp(),
-                );
-                verified_sender
-                    .send((vec![packet_batch.clone()], None))
-                    .unwrap();
+            let packets_for_this_iteration = &mut all_packets[current_iteration_index % num_chunks];
+            let mut packets = Vec::new();
+            std::mem::swap(&mut packets_for_this_iteration.packets, &mut packets);
+            for (packet_index, packet) in packets.into_iter().enumerate() {
+                sent += 1;
+                trace!("Sending packet index {}, {}", packet_index, timestamp(),);
+                verified_sender.send(packet).unwrap();
             }
 
             for tx in &packets_for_this_iteration.transactions {

@@ -11,6 +11,7 @@ use {
         },
         fetch_stage::FetchStage,
         find_packet_sender_stake_stage::FindPacketSenderStakeStage,
+        packet_deserializer_stage::PacketDeserializerStage,
         sigverify::TransactionSigVerifier,
         sigverify_stage::SigVerifyStage,
         staked_nodes_updater_service::StakedNodesUpdaterService,
@@ -59,6 +60,7 @@ pub struct Tpu {
     fetch_stage: FetchStage,
     sigverify_stage: SigVerifyStage,
     vote_sigverify_stage: SigVerifyStage,
+    packet_deserializer_stage: PacketDeserializerStage,
     banking_stage: BankingStage,
     cluster_info_vote_listener: ClusterInfoVoteListener,
     broadcast_stage: BroadcastStage,
@@ -221,12 +223,28 @@ impl Tpu {
             cluster_confirmed_slot_sender,
         );
 
+        let (transaction_deserialized_packet_sender, transaction_deserialized_packet_receiver) =
+            crossbeam_channel::unbounded();
+        let (tpu_vote_deserialized_packet_sender, tpu_vote_deserialized_packet_receiver) =
+            crossbeam_channel::unbounded();
+        let (vote_deserialized_packet_sender, vote_deserialized_packet_receiver) =
+            crossbeam_channel::unbounded();
+        let packet_deserializer_stage = PacketDeserializerStage::new(
+            verified_receiver,
+            transaction_deserialized_packet_sender,
+            verified_tpu_vote_packets_receiver,
+            tpu_vote_deserialized_packet_sender,
+            verified_gossip_vote_packets_receiver,
+            vote_deserialized_packet_sender,
+            exit.clone(),
+        );
+
         let banking_stage = BankingStage::new(
             cluster_info,
             poh_recorder,
-            verified_receiver,
-            verified_tpu_vote_packets_receiver,
-            verified_gossip_vote_packets_receiver,
+            transaction_deserialized_packet_receiver,
+            tpu_vote_deserialized_packet_receiver,
+            vote_deserialized_packet_receiver,
             transaction_status_sender,
             replay_vote_sender,
             cost_model.clone(),
@@ -250,6 +268,7 @@ impl Tpu {
             fetch_stage,
             sigverify_stage,
             vote_sigverify_stage,
+            packet_deserializer_stage,
             banking_stage,
             cluster_info_vote_listener,
             broadcast_stage,
@@ -267,6 +286,7 @@ impl Tpu {
             self.sigverify_stage.join(),
             self.vote_sigverify_stage.join(),
             self.cluster_info_vote_listener.join(),
+            self.packet_deserializer_stage.join(),
             self.banking_stage.join(),
             self.find_packet_sender_stake_stage.join(),
             self.vote_find_packet_sender_stake_stage.join(),

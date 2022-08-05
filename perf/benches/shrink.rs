@@ -6,7 +6,7 @@ extern crate test;
 use {
     rand::prelude::*,
     solana_perf::{
-        packet::{to_packet_batches, PacketBatch, PACKETS_PER_BATCH},
+        packet::{to_deserialized_packets, PacketBatch, PACKETS_PER_BATCH},
         sigverify,
     },
     test::Bencher,
@@ -37,7 +37,7 @@ fn do_bench_shrink_packets(bencher: &mut Bencher, mut batches: Vec<PacketBatch>)
 fn bench_shrink_diff_small_packets(bencher: &mut Bencher) {
     let mut rng = rand::thread_rng();
 
-    let batches = to_packet_batches(
+    let batches = to_deserialized_packets(
         &(0..NUM_PACKETS)
             .map(|_| test_packet_with_size(128, &mut rng))
             .collect::<Vec<_>>(),
@@ -52,7 +52,7 @@ fn bench_shrink_diff_small_packets(bencher: &mut Bencher) {
 fn bench_shrink_diff_big_packets(bencher: &mut Bencher) {
     let mut rng = rand::thread_rng();
 
-    let batches = to_packet_batches(
+    let batches = to_deserialized_packets(
         &(0..NUM_PACKETS)
             .map(|_| test_packet_with_size(1024, &mut rng))
             .collect::<Vec<_>>(),
@@ -67,7 +67,7 @@ fn bench_shrink_diff_big_packets(bencher: &mut Bencher) {
 fn bench_shrink_count_packets(bencher: &mut Bencher) {
     let mut rng = rand::thread_rng();
 
-    let mut batches = to_packet_batches(
+    let mut batches = to_deserialized_packets(
         &(0..NUM_PACKETS)
             .map(|_| test_packet_with_size(128, &mut rng))
             .collect::<Vec<_>>(),

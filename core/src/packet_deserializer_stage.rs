@@ -5,11 +5,13 @@ use {
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         sigverify::SigverifyTracerPacketStats, tracer_packet_stats::TracerPacketStats,
     },
-    crossbeam_channel::{
-        Receiver as CrossbeamReceiver, RecvTimeoutError, Sender as CrossbeamSender,
-    },
+    crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender},
     solana_perf::packet::PacketBatch,
-    std::{thread::Builder, time::Duration},
+    std::{
+        sync::{atomic::AtomicBool, Arc},
+        thread::Builder,
+        time::Duration,
+    },
 };
 
 pub type BankingPacketBatch = (Vec<PacketBatch>, Option<SigverifyTracerPacketStats>);
@@ -21,10 +23,50 @@ pub struct PacketDeserializerStage {
 }
 
 impl PacketDeserializerStage {
-    pub fn new() -> Self {
+    pub fn new(
+        transaction_packet_receiver: BankingPacketReceiver,
+        transaction_deserialized_packet_sender: BankingTransactionSender,
+        tpu_vote_packet_receiver: BankingPacketReceiver,
+        tpu_vote_deserialized_packet_sender: BankingTransactionSender,
+        vote_packet_receiver: BankingPacketReceiver,
+        vote_deserialized_packet_sender: BankingTransactionSender,
+        exit_signal: Arc<AtomicBool>,
+    ) -> Self {
+        let transaction_deserializer = PacketDeserializer::new(
+            transaction_packet_receiver,
+            transaction_deserialized_packet_sender,
+            0,
+        );
+        let tpu_vote_deserializer = PacketDeserializer::new(
+            tpu_vote_packet_receiver,
+            tpu_vote_deserialized_packet_sender,
+            1,
+        );
+        let vote_deserializer =
+            PacketDeserializer::new(vote_packet_receiver, vote_deserialized_packet_sender, 2);
+
+        let mut packet_deserializer_service = PacketDeserializerService {
+            transaction_deserializer,
+            tpu_vote_deserializer,
+            vote_deserializer,
+        };
+
         let deserializer_thread_hdl = Builder::new()
             .name("solana-packet-deserializer".to_string())
-            .spawn(move || todo!())
+            .spawn(move || loop {
+                if exit_signal.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                packet_deserializer_service
+                    .transaction_deserializer
+                    .receive_packets();
+                packet_deserializer_service
+                    .tpu_vote_deserializer
+                    .receive_packets();
+                packet_deserializer_service
+                    .vote_deserializer
+                    .receive_packets();
+            })
             .unwrap();
 
         Self {
@@ -82,9 +124,6 @@ impl PacketDeserializer {
                     .aggregate_sigverify_tracer_packet_stats(new_sigverify_tracer_packet_stats);
             }
 
-            let packet_count: usize = packet_batches.iter().map(|x| x.len()).sum();
-            let mut dropped_packets_count = 0;
-            let mut newly_buffered_packets_count = 0;
             for packet_batch in packet_batches {
                 let packet_indexes = Self::generate_packet_indexes(&packet_batch);
 
@@ -115,13 +154,13 @@ impl PacketDeserializer {
         packet_indexes
             .iter()
             .filter_map(move |packet_index| {
-                ImmutableDeserializedPacket::from_packet(packet_batch[*packet_index].clone()).ok()
+                ImmutableDeserializedPacket::new(packet_batch[*packet_index].clone(), None).ok()
             })
             .map(Box::new)
     }
 
     fn send_deserialized_packet(&self, packet: Box<ImmutableDeserializedPacket>) {
-        let _ = self.send_deserialized_packet(packet);
+        let _ = self.deserialized_packet_sender.send(packet);
     }
 
     fn generate_packet_indexes(packet_batch: &PacketBatch) -> Vec<usize> {

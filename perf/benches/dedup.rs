@@ -6,7 +6,7 @@ extern crate test;
 use {
     rand::prelude::*,
     solana_perf::{
-        packet::{to_packet_batches, PacketBatch},
+        packet::{to_deserialized_packets, PacketBatch},
         sigverify,
     },
     std::time::Duration,
@@ -40,7 +40,7 @@ fn bench_dedup_same_small_packets(bencher: &mut Bencher) {
     let mut rng = rand::thread_rng();
     let small_packet = test_packet_with_size(128, &mut rng);
 
-    let batches = to_packet_batches(
+    let batches = to_deserialized_packets(
         &std::iter::repeat(small_packet)
             .take(NUM)
             .collect::<Vec<_>>(),
@@ -56,7 +56,7 @@ fn bench_dedup_same_big_packets(bencher: &mut Bencher) {
     let mut rng = rand::thread_rng();
     let big_packet = test_packet_with_size(1024, &mut rng);
 
-    let batches = to_packet_batches(
+    let batches = to_deserialized_packets(
         &std::iter::repeat(big_packet).take(NUM).collect::<Vec<_>>(),
         128,
     );
@@ -69,7 +69,7 @@ fn bench_dedup_same_big_packets(bencher: &mut Bencher) {
 fn bench_dedup_diff_small_packets(bencher: &mut Bencher) {
     let mut rng = rand::thread_rng();
 
-    let batches = to_packet_batches(
+    let batches = to_deserialized_packets(
         &(0..NUM)
             .map(|_| test_packet_with_size(128, &mut rng))
             .collect::<Vec<_>>(),
@@ -84,7 +84,7 @@ fn bench_dedup_diff_small_packets(bencher: &mut Bencher) {
 fn bench_dedup_diff_big_packets(bencher: &mut Bencher) {
     let mut rng = rand::thread_rng();
 
-    let batches = to_packet_batches(
+    let batches = to_deserialized_packets(
         &(0..NUM)
             .map(|_| test_packet_with_size(1024, &mut rng))
             .collect::<Vec<_>>(),
@@ -99,7 +99,7 @@ fn bench_dedup_diff_big_packets(bencher: &mut Bencher) {
 fn bench_dedup_baseline(bencher: &mut Bencher) {
     let mut rng = rand::thread_rng();
 
-    let batches = to_packet_batches(
+    let batches = to_deserialized_packets(
         &(0..0)
             .map(|_| test_packet_with_size(128, &mut rng))
             .collect::<Vec<_>>(),
