@@ -64,6 +64,34 @@ impl ImmutableDeserializedPacket {
         })
     }
 
+    pub fn from_packet(packet: Packet) -> Result<Self, DeserializedPacketError> {
+        Self::from_packet_and_priority_details(packet, None)
+    }
+
+    pub fn from_packet_and_priority_details(
+        packet: Packet,
+        priority_details: Option<TransactionPriorityDetails>,
+    ) -> Result<Self, DeserializedPacketError> {
+        let versioned_transaction: VersionedTransaction = packet.deserialize_slice(..)?;
+        let sanitized_transaction = SanitizedVersionedTransaction::try_from(versioned_transaction)?;
+        let message_bytes = packet_message(&packet)?;
+        let message_hash = Message::hash_raw_message(message_bytes);
+        let is_simple_vote = packet.meta.is_simple_vote_tx();
+
+        // drop transaction if prioritization fails.
+        let priority_details = priority_details
+            .or_else(|| sanitized_transaction.get_transaction_priority_details())
+            .ok_or(DeserializedPacketError::PrioritizationFailure)?;
+
+        Ok(ImmutableDeserializedPacket::new(
+            packet,
+            sanitized_transaction,
+            message_hash,
+            is_simple_vote,
+            priority_details,
+        ))
+    }
+
     pub fn original_packet(&self) -> &Packet {
         &self.original_packet
     }
