@@ -96,6 +96,7 @@ impl PacketDeserializer {
 
     fn do_work(&mut self) {
         self.receive_packets();
+        self.tracer_packet_stats.report(1000);
         self.deserializer_metrics.report();
     }
 
