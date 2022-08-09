@@ -90,7 +90,7 @@ impl PacketDeserializer {
             packet_receiver,
             deserialized_packet_sender,
             tracer_packet_stats: TracerPacketStats::new(tracer_packet_stats_id),
-            deserializer_metrics: PacketDeserializerMetrics::new(),
+            deserializer_metrics: PacketDeserializerMetrics::new(tracer_packet_stats_id),
         }
     }
 
@@ -167,6 +167,8 @@ impl PacketDeserializer {
 }
 
 struct PacketDeserializerMetrics {
+    /// Id for reporting
+    id: u32,
     /// Last time reported
     last_report: Instant,
     /// Number of valid packets
@@ -182,8 +184,9 @@ struct PacketDeserializerMetrics {
 }
 
 impl PacketDeserializerMetrics {
-    fn new() -> Self {
+    fn new(id: u32) -> Self {
         Self {
+            id,
             last_report: Instant::now(),
             num_valid_packets: 0,
             num_failed_sigverify: 0,
@@ -198,6 +201,7 @@ impl PacketDeserializerMetrics {
         if self.last_report.elapsed() > REPORTING_INTERVAL {
             datapoint_info!(
                 "packet_deserializer",
+                ("id", self.id, i64),
                 ("num_valid_packets", self.num_valid_packets, i64),
                 ("num_failed_sigverify", self.num_failed_sigverify, i64),
                 ("generate_index_time_us", self.generate_index_time_us, i64),
@@ -205,7 +209,7 @@ impl PacketDeserializerMetrics {
                 ("sending_time_us", self.sending_time_us, i64),
             );
 
-            *self = Self::new();
+            *self = Self::new(self.id);
         }
     }
 }
