@@ -55,12 +55,6 @@ pub(crate) struct ProcessTransactionsSummary {
 // validator's leader slot
 #[derive(Debug, Default)]
 struct LeaderSlotPacketCountMetrics {
-    // total number of live packets TPU received from verified receiver for processing.
-    total_new_valid_packets: u64,
-
-    // total number of packets TPU received from sigverify that failed signature verification.
-    newly_failed_sigverify_count: u64,
-
     // total number of dropped packet due to the thread's buffered packets capacity being reached.
     exceeded_buffer_limit_dropped_packets_count: u64,
 
@@ -137,16 +131,6 @@ impl LeaderSlotPacketCountMetrics {
             "banking_stage-leader_slot_packet_counts",
             ("id", id as i64, i64),
             ("slot", slot as i64, i64),
-            (
-                "total_new_valid_packets",
-                self.total_new_valid_packets as i64,
-                i64
-            ),
-            (
-                "newly_failed_sigverify_count",
-                self.newly_failed_sigverify_count as i64,
-                i64
-            ),
             (
                 "exceeded_buffer_limit_dropped_packets_count",
                 self.exceeded_buffer_limit_dropped_packets_count as i64,
@@ -473,52 +457,6 @@ impl LeaderSlotMetricsTracker {
                 .accumulate(error_metrics);
         }
     }
-
-    // Packet inflow/outflow/processing metrics
-    pub(crate) fn increment_total_new_valid_packets(&mut self, count: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .total_new_valid_packets,
-                count
-            );
-        }
-    }
-
-    pub(crate) fn increment_newly_failed_sigverify_count(&mut self, count: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .newly_failed_sigverify_count,
-                count
-            );
-        }
-    }
-
-    pub(crate) fn increment_exceeded_buffer_limit_dropped_packets_count(&mut self, count: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .exceeded_buffer_limit_dropped_packets_count,
-                count
-            );
-        }
-    }
-
-    pub(crate) fn increment_newly_buffered_packets_count(&mut self, count: u64) {
-        if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
-            saturating_add_assign!(
-                leader_slot_metrics
-                    .packet_count_metrics
-                    .newly_buffered_packets_count,
-                count
-            );
-        }
-    }
-
     pub(crate) fn increment_retryable_packets_filtered_count(&mut self, count: u64) {
         if let Some(leader_slot_metrics) = &mut self.leader_slot_metrics {
             saturating_add_assign!(

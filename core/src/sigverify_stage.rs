@@ -463,7 +463,7 @@ mod tests {
         crate::{sigverify::TransactionSigVerifier, sigverify_stage::timing::duration_as_ms},
         crossbeam_channel::unbounded,
         solana_perf::{
-            packet::{to_deserialized_packets, Packet},
+            packet::{to_packet_batches, Packet},
             test_tx::test_tx,
         },
         solana_sdk::packet::PacketFlags,
@@ -524,10 +524,10 @@ mod tests {
     ) -> Vec<PacketBatch> {
         if use_same_tx {
             let tx = test_tx();
-            to_deserialized_packets(&vec![tx; total_packets], packets_per_batch)
+            to_packet_batches(&vec![tx; total_packets], packets_per_batch)
         } else {
             let txs: Vec<_> = (0..total_packets).map(|_| test_tx()).collect();
-            to_deserialized_packets(&txs, packets_per_batch)
+            to_packet_batches(&txs, packets_per_batch)
         }
     }
 

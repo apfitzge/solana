@@ -6,11 +6,12 @@ use {
         sigverify::SigverifyTracerPacketStats, tracer_packet_stats::TracerPacketStats,
     },
     crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender},
+    solana_measure::measure,
     solana_perf::packet::PacketBatch,
     std::{
         sync::{atomic::AtomicBool, Arc},
         thread::Builder,
-        time::Duration,
+        time::{Duration, Instant},
     },
 };
 
@@ -59,13 +60,9 @@ impl PacketDeserializerStage {
                 }
                 packet_deserializer_service
                     .transaction_deserializer
-                    .receive_packets();
-                packet_deserializer_service
-                    .tpu_vote_deserializer
-                    .receive_packets();
-                packet_deserializer_service
-                    .vote_deserializer
-                    .receive_packets();
+                    .do_work();
+                packet_deserializer_service.tpu_vote_deserializer.do_work();
+                packet_deserializer_service.vote_deserializer.do_work();
             })
             .unwrap();
 
@@ -93,9 +90,10 @@ struct PacketDeserializer {
     packet_receiver: BankingPacketReceiver,
     /// Sender for deserialized packets to banking stage
     deserialized_packet_sender: BankingTransactionSender,
-
     /// Tracer packet stats from sigverify
     tracer_packet_stats: TracerPacketStats,
+    /// Metrics for deserializer
+    deserializer_metrics: PacketDeserializerMetrics,
 }
 
 impl PacketDeserializer {
@@ -108,7 +106,13 @@ impl PacketDeserializer {
             packet_receiver,
             deserialized_packet_sender,
             tracer_packet_stats: TracerPacketStats::new(tracer_packet_stats_id),
+            deserializer_metrics: PacketDeserializerMetrics::new(),
         }
+    }
+
+    fn do_work(&mut self) {
+        self.receive_packets();
+        self.deserializer_metrics.report();
     }
 
     fn receive_packets(&mut self) {
@@ -125,23 +129,27 @@ impl PacketDeserializer {
             }
 
             for packet_batch in packet_batches {
-                let packet_indexes = Self::generate_packet_indexes(&packet_batch);
+                let (packet_indexes, generate_index_time) =
+                    measure!(Self::generate_packet_indexes(&packet_batch));
 
-                // // Track all the packets incoming from sigverify, both valid and invalid
-                // slot_metrics_tracker.increment_total_new_valid_packets(packet_indexes.len() as u64);
-                // slot_metrics_tracker.increment_newly_failed_sigverify_count(
-                //     packet_batch.len().saturating_sub(packet_indexes.len()) as u64,
-                // );
+                self.deserializer_metrics.generate_index_time_us += generate_index_time.as_us();
+                self.deserializer_metrics.num_valid_packets += packet_indexes.len();
+                self.deserializer_metrics.num_failed_sigverify +=
+                    packet_batch.len().saturating_sub(packet_indexes.len());
 
                 if !packet_indexes.is_empty() {
-                    // TODO: track metrics
+                    let (deserialized_packets, deserialize_packets_time) =
+                        measure!(Self::deserialize_packets(&packet_batch, &packet_indexes));
 
-                    let deserialized_packets =
-                        Self::deserialize_packets(&packet_batch, &packet_indexes);
-
-                    deserialized_packets.for_each(|deserialized_packet| {
-                        self.send_deserialized_packet(deserialized_packet)
+                    let (_, send_packets_time) = measure!({
+                        deserialized_packets.for_each(|deserialized_packet| {
+                            self.send_deserialized_packet(deserialized_packet)
+                        })
                     });
+
+                    self.deserializer_metrics.deserialize_time_us +=
+                        deserialize_packets_time.as_us();
+                    self.deserializer_metrics.sending_time_us += send_packets_time.as_us();
                 }
             }
         }
@@ -170,5 +178,49 @@ impl PacketDeserializer {
             .filter(|(_, pkt)| !pkt.meta.discard())
             .map(|(index, _)| index)
             .collect()
+    }
+}
+
+struct PacketDeserializerMetrics {
+    /// Last time reported
+    last_report: Instant,
+    /// Number of valid packets
+    num_valid_packets: usize,
+    /// Number of failed sigverify packets
+    num_failed_sigverify: usize,
+    /// Time spent generating packet indexes
+    generate_index_time_us: u64,
+    /// Time spent deserializing packets
+    deserialize_time_us: u64,
+    /// Time spent sending packets to banking stage
+    sending_time_us: u64,
+}
+
+impl PacketDeserializerMetrics {
+    fn new() -> Self {
+        Self {
+            last_report: Instant::now(),
+            num_valid_packets: 0,
+            num_failed_sigverify: 0,
+            generate_index_time_us: 0,
+            deserialize_time_us: 0,
+            sending_time_us: 0,
+        }
+    }
+
+    fn report(&mut self) {
+        const REPORTING_INTERVAL: Duration = Duration::from_secs(1);
+        if self.last_report.elapsed() > REPORTING_INTERVAL {
+            datapoint_info!(
+                "packet_deserializer",
+                ("num_valid_packets", self.num_valid_packets, i64),
+                ("num_failed_sigverify", self.num_failed_sigverify, i64),
+                ("generate_index_time_us", self.generate_index_time_us, i64),
+                ("deserialize_time_us", self.deserialize_time_us, i64),
+                ("sending_time_us", self.sending_time_us, i64),
+            );
+
+            *self = Self::new();
+        }
     }
 }

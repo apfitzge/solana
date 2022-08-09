@@ -2141,7 +2141,7 @@ mod tests {
             get_tmp_ledger_path_auto_delete,
             leader_schedule_cache::LeaderScheduleCache,
         },
-        solana_perf::packet::{to_deserialized_packets, PacketFlags},
+        solana_perf::packet::{to_packet_batches, PacketFlags},
         solana_poh::{
             poh_recorder::{create_test_recorder, Record, WorkingBankEntry},
             poh_service::PohService,
@@ -2303,6 +2303,22 @@ mod tests {
         with_vers.into_iter().map(|(b, _)| b).collect()
     }
 
+    pub fn packet_batches_to_packets(
+        packet_batches: Vec<PacketBatch>,
+    ) -> Vec<Box<ImmutableDeserializedPacket>> {
+        packet_batches
+            .iter()
+            .flat_map(|packet_batch| {
+                packet_batch
+                    .into_iter()
+                    .filter_map(|packet| {
+                        ImmutableDeserializedPacket::from_packet(packet.clone()).ok()
+                    })
+                    .map(Box::new)
+            })
+            .collect()
+    }
+
     #[test]
     fn test_banking_stage_entries_only() {
         solana_logger::setup();
@@ -2370,7 +2386,7 @@ mod tests {
             let tx_anf = system_transaction::transfer(&keypair, &to3, 1, start_hash);
 
             // send 'em over
-            let packet_batches = to_deserialized_packets(&[tx_no_ver, tx_anf, tx], 3);
+            let packet_batches = to_packet_batches(&[tx_no_ver, tx_anf, tx], 3);
 
             // glad they all fit
             assert_eq!(packet_batches.len(), 1);
@@ -2380,9 +2396,12 @@ mod tests {
                 .map(|batch| (batch, vec![0u8, 1u8, 1u8]))
                 .collect();
             let packet_batches = convert_from_old_verified(packet_batches);
-            verified_sender // no_ver, anf, tx
-                .send((packet_batches, None))
-                .unwrap();
+            let packets = packet_batches_to_packets(packet_batches);
+            for packet in packets {
+                verified_sender // no_ver, anf, tx
+                    .send(packet)
+                    .unwrap();
+            }
 
             drop(verified_sender);
             drop(tpu_vote_sender);
@@ -2447,24 +2466,30 @@ mod tests {
         let tx =
             system_transaction::transfer(&mint_keypair, &alice.pubkey(), 2, genesis_config.hash());
 
-        let packet_batches = to_deserialized_packets(&[tx], 1);
+        let packet_batches = to_packet_batches(&[tx], 1);
         let packet_batches = packet_batches
             .into_iter()
             .map(|batch| (batch, vec![1u8]))
             .collect();
         let packet_batches = convert_from_old_verified(packet_batches);
-        verified_sender.send((packet_batches, None)).unwrap();
+        let packets = packet_batches_to_packets(packet_batches);
+        for packet in packets {
+            verified_sender.send(packet).unwrap();
+        }
 
         // Process a second batch that uses the same from account, so conflicts with above TX
         let tx =
             system_transaction::transfer(&mint_keypair, &alice.pubkey(), 1, genesis_config.hash());
-        let packet_batches = to_deserialized_packets(&[tx], 1);
+        let packet_batches = to_packet_batches(&[tx], 1);
         let packet_batches = packet_batches
             .into_iter()
             .map(|batch| (batch, vec![1u8]))
             .collect();
         let packet_batches = convert_from_old_verified(packet_batches);
-        verified_sender.send((packet_batches, None)).unwrap();
+        let packets = packet_batches_to_packets(packet_batches);
+        for packet in packets {
+            verified_sender.send(packet).unwrap();
+        }
 
         let (vote_sender, vote_receiver) = unbounded();
         let (tpu_vote_sender, tpu_vote_receiver) = unbounded();
