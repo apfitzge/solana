@@ -33,24 +33,18 @@ impl PacketDeserializerStage {
         vote_deserialized_packet_sender: BankingTransactionSender,
         exit_signal: Arc<AtomicBool>,
     ) -> Self {
-        let transaction_deserializer = PacketDeserializer::new(
+        let mut transaction_deserializer = PacketDeserializer::new(
             transaction_packet_receiver,
             transaction_deserialized_packet_sender,
             0,
         );
-        let tpu_vote_deserializer = PacketDeserializer::new(
+        let mut tpu_vote_deserializer = PacketDeserializer::new(
             tpu_vote_packet_receiver,
             tpu_vote_deserialized_packet_sender,
             1,
         );
-        let vote_deserializer =
+        let mut vote_deserializer =
             PacketDeserializer::new(vote_packet_receiver, vote_deserialized_packet_sender, 2);
-
-        let mut packet_deserializer_service = PacketDeserializerService {
-            transaction_deserializer,
-            tpu_vote_deserializer,
-            vote_deserializer,
-        };
 
         let deserializer_thread_hdl = Builder::new()
             .name("solana-packet-deserializer".to_string())
@@ -58,11 +52,10 @@ impl PacketDeserializerStage {
                 if exit_signal.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
-                packet_deserializer_service
-                    .transaction_deserializer
-                    .do_work();
-                packet_deserializer_service.tpu_vote_deserializer.do_work();
-                packet_deserializer_service.vote_deserializer.do_work();
+
+                transaction_deserializer.do_work();
+                tpu_vote_deserializer.do_work();
+                vote_deserializer.do_work();
             })
             .unwrap();
 
@@ -74,15 +67,6 @@ impl PacketDeserializerStage {
     pub fn join(self) -> std::thread::Result<()> {
         self.deserializer_thread_hdl.join()
     }
-}
-
-struct PacketDeserializerService {
-    /// Packet deserializer for regular transactions
-    transaction_deserializer: PacketDeserializer,
-    /// Packet deserializer for TPU vote transactions
-    tpu_vote_deserializer: PacketDeserializer,
-    /// Packet deserializer for non-TPU vote transactions
-    vote_deserializer: PacketDeserializer,
 }
 
 struct PacketDeserializer {
