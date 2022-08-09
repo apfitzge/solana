@@ -9,7 +9,10 @@ use {
     solana_measure::measure,
     solana_perf::packet::PacketBatch,
     std::{
-        sync::{atomic::AtomicBool, Arc},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
         thread::Builder,
         time::{Duration, Instant},
     },
@@ -46,16 +49,15 @@ impl PacketDeserializerStage {
         let mut vote_deserializer =
             PacketDeserializer::new(vote_packet_receiver, vote_deserialized_packet_sender, 2);
 
+        info!("starting solana-packet-deserializer");
         let deserializer_thread_hdl = Builder::new()
             .name("solana-packet-deserializer".to_string())
-            .spawn(move || loop {
-                if exit_signal.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
+            .spawn(move || {
+                while exit_signal.load(Ordering::Relaxed) {
+                    transaction_deserializer.do_work();
+                    tpu_vote_deserializer.do_work();
+                    vote_deserializer.do_work();
                 }
-
-                transaction_deserializer.do_work();
-                tpu_vote_deserializer.do_work();
-                vote_deserializer.do_work();
             })
             .unwrap();
 
