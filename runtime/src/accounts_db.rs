@@ -6661,6 +6661,7 @@ impl AccountsDb {
             let acceptable_straggler_slot_count = 100; // do nothing special for these old stores which will likely get cleaned up shortly
             let sub = slots_per_epoch + acceptable_straggler_slot_count;
             let in_epoch_range_start = max.saturating_sub(sub);
+            error!("max slot_inclusive: {max} in_epoch_range_start: {in_epoch_range_start}");
             for (slot, storages) in storages.iter_range(..in_epoch_range_start) {
                 if let Some(storages) = storages {
                     error!("slot: {} num_storages={}", slot, storages.len());
