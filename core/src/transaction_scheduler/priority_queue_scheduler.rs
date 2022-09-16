@@ -17,7 +17,6 @@ use {
     crossbeam_channel::RecvTimeoutError,
     solana_runtime::bank_forks::BankForks,
     std::{
-        rc::Rc,
         sync::{Arc, RwLock},
         time::Duration,
     },
@@ -31,7 +30,7 @@ pub struct PriorityQueueScheduler<D: DeserializedPacketBatchGetter> {
     /// Priority queue of transactions with a map from message hash to the deserialized packet.
     unprocessed_packets: UnprocessedPacketBatches,
     /// Packets to be held after forwarding.
-    held_packets: Vec<Rc<ImmutableDeserializedPacket>>,
+    held_packets: Vec<Arc<ImmutableDeserializedPacket>>,
     /// Bank forks to be used to create the forward filter
     bank_forks: Arc<RwLock<BankForks>>,
     /// Forward packet filter
@@ -39,7 +38,7 @@ pub struct PriorityQueueScheduler<D: DeserializedPacketBatchGetter> {
     /// Determines how the scheduler should handle packets currently.
     banking_decision_maker: Arc<BankingDecisionMaker>,
     /// Scheduled batch currently being processed.
-    current_batch: Option<(Rc<ScheduledPacketBatch>, BankPacketProcessingDecision)>,
+    current_batch: Option<(Arc<ScheduledPacketBatch>, BankPacketProcessingDecision)>,
     /// Generator for unique batch identifiers.
     batch_id_generator: ScheduledPacketBatchIdGenerator,
 }
@@ -51,7 +50,7 @@ where
     fn get_next_transaction_batch(
         &mut self,
         timeout: Duration,
-    ) -> Result<Rc<ScheduledPacketBatch>, RecvTimeoutError> {
+    ) -> Result<Arc<ScheduledPacketBatch>, RecvTimeoutError> {
         assert!(self.current_batch.is_none());
 
         // If there are no packets, wait for some (timeout)
@@ -85,7 +84,7 @@ where
                     );
                 }
                 self.current_batch = Some((
-                    Rc::new(ScheduledPacketBatch {
+                    Arc::new(ScheduledPacketBatch {
                         id: self.batch_id_generator.generate_id(),
                         processing_instruction: decision.clone().into(),
                         deserialized_packets,
@@ -134,7 +133,7 @@ where
                 self.forward_filter = Some(forward_filter);
 
                 self.current_batch = Some((
-                    Rc::new(ScheduledPacketBatch {
+                    Arc::new(ScheduledPacketBatch {
                         id: self.batch_id_generator.generate_id(),
                         processing_instruction: decision.clone().into(),
                         deserialized_packets: forwardable_packets,

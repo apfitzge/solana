@@ -13,7 +13,6 @@ use {
     std::{
         collections::HashMap,
         ops::DerefMut,
-        rc::Rc,
         sync::{Arc, RwLock},
     },
 };
@@ -29,7 +28,7 @@ pub enum VoteSource {
 pub struct LatestValidatorVotePacket {
     vote_source: VoteSource,
     pubkey: Pubkey,
-    vote: Option<Rc<ImmutableDeserializedPacket>>,
+    vote: Option<Arc<ImmutableDeserializedPacket>>,
     slot: Slot,
     forwarded: bool,
 }
@@ -43,12 +42,12 @@ impl LatestValidatorVotePacket {
             return Err(DeserializedPacketError::VoteTransactionError);
         }
 
-        let vote = Rc::new(ImmutableDeserializedPacket::new(packet, None)?);
+        let vote = Arc::new(ImmutableDeserializedPacket::new(packet, None)?);
         Self::new_from_immutable(vote, vote_source)
     }
 
     pub fn new_from_immutable(
-        vote: Rc<ImmutableDeserializedPacket>,
+        vote: Arc<ImmutableDeserializedPacket>,
         vote_source: VoteSource,
     ) -> Result<Self, DeserializedPacketError> {
         let message = vote.transaction().get_message();
@@ -79,7 +78,7 @@ impl LatestValidatorVotePacket {
         }
     }
 
-    pub fn get_vote_packet(&self) -> Rc<ImmutableDeserializedPacket> {
+    pub fn get_vote_packet(&self) -> Arc<ImmutableDeserializedPacket> {
         self.vote.as_ref().unwrap().clone()
     }
 
@@ -100,7 +99,7 @@ impl LatestValidatorVotePacket {
         self.vote.is_none()
     }
 
-    pub fn take_vote(&mut self) -> Option<Rc<ImmutableDeserializedPacket>> {
+    pub fn take_vote(&mut self) -> Option<Arc<ImmutableDeserializedPacket>> {
         self.vote.take()
     }
 }
@@ -278,7 +277,7 @@ impl LatestUnprocessedVotes {
     }
 
     /// Drains all votes yet to be processed sorted by a weighted random ordering by stake
-    pub fn drain_unprocessed(&self, bank: Arc<Bank>) -> Vec<Rc<ImmutableDeserializedPacket>> {
+    pub fn drain_unprocessed(&self, bank: Arc<Bank>) -> Vec<Arc<ImmutableDeserializedPacket>> {
         let pubkeys_by_stake = weighted_random_order_by_stake(
             &bank,
             self.latest_votes_per_pubkey.read().unwrap().keys(),

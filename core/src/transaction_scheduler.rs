@@ -7,7 +7,7 @@ use {
         immutable_deserialized_packet::ImmutableDeserializedPacket,
     },
     crossbeam_channel::RecvTimeoutError,
-    std::{rc::Rc, time::Duration},
+    std::{sync::Arc, time::Duration},
 };
 
 pub mod priority_queue_scheduler;
@@ -17,7 +17,7 @@ pub trait TransactionSchedulerBankingHandle {
     fn get_next_transaction_batch(
         &mut self,
         timeout: Duration,
-    ) -> Result<Rc<ScheduledPacketBatch>, RecvTimeoutError>;
+    ) -> Result<Arc<ScheduledPacketBatch>, RecvTimeoutError>;
 
     /// Signal that the current batch of transactions has been processed.
     fn complete_batch(&mut self, batch: ProcessedPacketBatch);
@@ -34,7 +34,7 @@ pub struct ScheduledPacketBatch {
     /// Instruction for processing packets
     pub processing_instruction: BankingProcessingInstruction,
     /// Deserialized packets to process.
-    pub deserialized_packets: Vec<Rc<ImmutableDeserializedPacket>>,
+    pub deserialized_packets: Vec<Arc<ImmutableDeserializedPacket>>,
 }
 
 /// Message: [BankingStage -> Scheduler]

@@ -79,7 +79,6 @@ use {
         collections::HashMap,
         env,
         net::{SocketAddr, UdpSocket},
-        rc::Rc,
         sync::{
             atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
@@ -762,7 +761,7 @@ impl BankingStage {
                 MinMaxHeap::with_capacity(capacity),
             )
         };
-        let retryable_packets: MinMaxHeap<Rc<ImmutableDeserializedPacket>> = retryable_packets
+        let retryable_packets: MinMaxHeap<Arc<ImmutableDeserializedPacket>> = retryable_packets
             .drain_desc()
             .chunks(num_packets_to_process_per_iteration)
             .into_iter()
