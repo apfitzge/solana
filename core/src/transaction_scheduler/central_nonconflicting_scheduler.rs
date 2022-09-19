@@ -129,17 +129,27 @@ where
     batch_id_generator: ScheduledPacketBatchIdGenerator,
 }
 
-/// A handle to the central scheduler thread
-pub struct CentralNonConflictingSchedulerHandle {
-    /// Handle to the scheduler thread
-    scheduler_thread: std::thread::JoinHandle<()>,
+#[derive(Clone)]
+/// A handle to the central scheduler channels
+pub struct CentralNonConflictingSchedulerBankingHandle {
     /// Receiver for getting batches of transactions from the scheduler
     scheduled_packet_batch_receiver: Receiver<Arc<ScheduledPacketBatch>>,
     /// Sender for sending processed batches of transactions to the scheduler
     processed_packet_batch_sender: Sender<ProcessedPacketBatch>,
 }
 
-impl TransactionSchedulerBankingHandle for CentralNonConflictingSchedulerHandle {
+/// Handle to the scheduler thread
+pub struct CentralNonConflictingSchedulerThreadHandle {
+    scheduler_thread: std::thread::JoinHandle<()>,
+}
+
+impl CentralNonConflictingSchedulerThreadHandle {
+    pub fn join(self) -> std::thread::Result<()> {
+        self.scheduler_thread.join()
+    }
+}
+
+impl TransactionSchedulerBankingHandle for CentralNonConflictingSchedulerBankingHandle {
     fn get_next_transaction_batch(
         &mut self,
         timeout: Duration,
@@ -152,7 +162,7 @@ impl TransactionSchedulerBankingHandle for CentralNonConflictingSchedulerHandle 
     }
 
     fn join(self) -> std::thread::Result<()> {
-        self.scheduler_thread.join()
+        Ok(())
     }
 }
 
@@ -166,7 +176,10 @@ where
         bank_forks: Arc<RwLock<BankForks>>,
         banking_decision_maker: Arc<BankingDecisionMaker>,
         capacity: usize,
-    ) -> CentralNonConflictingSchedulerHandle {
+    ) -> (
+        CentralNonConflictingSchedulerBankingHandle,
+        CentralNonConflictingSchedulerThreadHandle,
+    ) {
         let (scheduled_packet_batch_sender, scheduled_packet_batch_receiver) =
             crossbeam_channel::unbounded();
         let (processed_packet_batch_sender, processed_packet_batch_receiver) =
@@ -187,11 +200,13 @@ where
             })
             .unwrap();
 
-        CentralNonConflictingSchedulerHandle {
-            scheduler_thread,
-            scheduled_packet_batch_receiver,
-            processed_packet_batch_sender,
-        }
+        (
+            CentralNonConflictingSchedulerBankingHandle {
+                scheduled_packet_batch_receiver,
+                processed_packet_batch_sender,
+            },
+            CentralNonConflictingSchedulerThreadHandle { scheduler_thread },
+        )
     }
 
     /// Create a new scheduler

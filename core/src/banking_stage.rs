@@ -22,8 +22,12 @@ use {
         qos_service::QosService,
         sigverify::SigverifyTracerPacketStats,
         transaction_scheduler::{
-            priority_queue_scheduler::PriorityQueueScheduler, BankingProcessingInstruction,
-            ProcessedPacketBatch, ScheduledPacketBatch, TransactionSchedulerBankingHandle,
+            central_nonconflicting_scheduler::{
+                CentralNonConflictingScheduler, CentralNonConflictingSchedulerThreadHandle,
+            },
+            priority_queue_scheduler::PriorityQueueScheduler,
+            BankingProcessingInstruction, ProcessedPacketBatch, ScheduledPacketBatch,
+            TransactionSchedulerBankingHandle,
         },
         unprocessed_packet_batches::{self, *},
     },
@@ -368,6 +372,7 @@ pub struct BatchedTransactionErrorDetails {
 /// Stores the stage's thread handle and output receiver.
 pub struct BankingStage {
     bank_thread_hdls: Vec<JoinHandle<()>>,
+    scheduler_thread_handle: CentralNonConflictingSchedulerThreadHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -452,7 +457,12 @@ impl BankingStage {
         bank_thread_hdls.push(Self::spawn_banking_stage_thread(
             id,
             ForwardOption::NotForward,
-            InlinePacketDeserializer::new(verified_vote_receiver, id),
+            PriorityQueueScheduler::new(
+                InlinePacketDeserializer::new(verified_vote_receiver, id),
+                banking_decision_maker.clone(),
+                bank_forks.clone(),
+                batch_limit,
+            ),
             banking_decision_maker.clone(),
             cluster_info.clone(),
             poh_recorder.clone(),
@@ -471,7 +481,12 @@ impl BankingStage {
         bank_thread_hdls.push(Self::spawn_banking_stage_thread(
             id,
             ForwardOption::ForwardTpuVote,
-            InlinePacketDeserializer::new(tpu_verified_vote_receiver, id),
+            PriorityQueueScheduler::new(
+                InlinePacketDeserializer::new(tpu_verified_vote_receiver, id),
+                banking_decision_maker.clone(),
+                bank_forks.clone(),
+                batch_limit,
+            ),
             banking_decision_maker.clone(),
             cluster_info.clone(),
             poh_recorder.clone(),
@@ -485,11 +500,19 @@ impl BankingStage {
             bank_forks.clone(),
         ));
 
+        let (scheduler_banking_handle, scheduler_thread_handle) =
+            CentralNonConflictingScheduler::spawn(
+                InlinePacketDeserializer::new(verified_receiver, 3),
+                bank_forks.clone(),
+                banking_decision_maker.clone(),
+                TOTAL_BUFFERED_PACKETS,
+            );
+
         bank_thread_hdls.extend((2..num_threads).map(|id| {
             Self::spawn_banking_stage_thread(
                 id,
                 ForwardOption::ForwardTransaction,
-                PacketDeserializerHandle::new(verified_receiver.clone(), id),
+                scheduler_banking_handle.clone(),
                 banking_decision_maker.clone(),
                 cluster_info.clone(),
                 poh_recorder.clone(),
@@ -504,15 +527,18 @@ impl BankingStage {
             )
         }));
 
-        Self { bank_thread_hdls }
+        Self {
+            bank_thread_hdls,
+            scheduler_thread_handle,
+        }
     }
 
     /// Spawn a banking stage thread
     #[allow(clippy::too_many_arguments)]
-    fn spawn_banking_stage_thread<D>(
+    fn spawn_banking_stage_thread<S>(
         id: u32,
         forward_option: ForwardOption,
-        mut deserialized_packet_batch_getter: D,
+        mut transaction_scheduler_handle: S,
         banking_decision_maker: Arc<BankingDecisionMaker>,
         cluster_info: Arc<ClusterInfo>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -526,18 +552,12 @@ impl BankingStage {
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> JoinHandle<()>
     where
-        D: DeserializedPacketBatchGetter + std::marker::Send + 'static,
+        S: TransactionSchedulerBankingHandle + std::marker::Send + 'static,
     {
         Builder::new()
             .name(format!("solBanknStgTx{:02}", id))
             .spawn(move || {
                 let mut recv_start = Instant::now();
-                let mut transaction_scheduler_handle = PriorityQueueScheduler::new(
-                    deserialized_packet_batch_getter,
-                    banking_decision_maker,
-                    bank_forks.clone(),
-                    batch_limit,
-                );
                 Self::new_process_loop(
                     id,
                     &mut transaction_scheduler_handle,
@@ -2330,6 +2350,7 @@ impl BankingStage {
         for bank_thread_hdl in self.bank_thread_hdls {
             bank_thread_hdl.join()?;
         }
+        self.scheduler_thread_handle.join()?;
         Ok(())
     }
 }
