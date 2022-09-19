@@ -97,7 +97,7 @@ where
             BankPacketProcessingDecision::Forward
             | BankPacketProcessingDecision::ForwardAndHold => {
                 // Take the forwarding filter (will replace at the end of the function)
-                let current_bank = self.bank_forks.read().unwrap().root_bank();
+                let current_bank = self.bank_forks.read().unwrap().working_bank();
                 let mut forward_filter = match self.forward_filter.take() {
                     Some(mut forward_filter) => {
                         forward_filter.current_bank = current_bank;

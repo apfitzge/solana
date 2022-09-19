@@ -10,6 +10,7 @@ use {
     std::{sync::Arc, time::Duration},
 };
 
+pub mod central_nonconflicting_scheduler;
 pub mod priority_queue_scheduler;
 
 pub trait TransactionSchedulerBankingHandle {

@@ -89,6 +89,10 @@ impl ImmutableDeserializedPacket {
     pub fn compute_unit_limit(&self) -> u64 {
         self.priority_details.compute_unit_limit
     }
+
+    pub fn is_tracer_packet(&self) -> bool {
+        self.original_packet.meta.is_tracer_packet()
+    }
 }
 
 impl PartialOrd for ImmutableDeserializedPacket {
