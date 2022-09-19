@@ -27,6 +27,7 @@ use {
     },
     std::{
         collections::{BTreeSet, HashMap},
+        fmt::Display,
         rc::Rc,
         sync::{Arc, RwLock},
         thread::{current, Builder},
@@ -43,11 +44,14 @@ struct SanitizedTransactionPriority {
     priority: u64,
     /// Sanitized transaction
     transaction: SanitizedTransaction,
+    /// Timestamp of when the transaction came into the scheduler
+    timestamp: Instant,
 }
 
 impl PartialEq for SanitizedTransactionPriority {
     fn eq(&self, other: &Self) -> bool {
         self.priority == other.priority
+            && self.timestamp == other.timestamp
             && self.transaction.message_hash() == other.transaction.message_hash()
     }
 }
@@ -62,7 +66,14 @@ impl PartialOrd for SanitizedTransactionPriority {
 
 impl Ord for SanitizedTransactionPriority {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| self.timestamp.cmp(&other.timestamp))
+            .then_with(|| {
+                self.transaction
+                    .message_hash()
+                    .cmp(&other.transaction.message_hash())
+            })
     }
 }
 
@@ -78,6 +89,7 @@ impl SanitizedTransactionPriority {
         Some(Self {
             priority: packet.priority(),
             transaction,
+            timestamp: Instant::now(),
         })
     }
 
@@ -574,7 +586,7 @@ impl TransactionQueue {
                 *packet.immutable_section().message_hash(),
                 (transaction.clone(), packet),
             )
-            .is_none();
+            .is_some();
         assert!(!already_exists);
 
         self.insert_transaction_into_account_queues(&transaction, bank);
@@ -590,17 +602,13 @@ impl TransactionQueue {
         let account_locks = transaction.get_account_locks().unwrap();
 
         for account in account_locks.readonly {
-            self.account_queues
-                .entry(*account)
-                .or_default()
-                .insert_transaction(transaction.clone(), false);
+            let account_queue = self.account_queues.entry(*account).or_default();
+            account_queue.insert_transaction(transaction.clone(), false);
         }
 
         for account in account_locks.writable {
-            self.account_queues
-                .entry(*account)
-                .or_default()
-                .insert_transaction(transaction.clone(), true);
+            let account_queue = self.account_queues.entry(*account).or_default();
+            account_queue.insert_transaction(transaction.clone(), true);
         }
     }
 
@@ -676,7 +684,7 @@ impl TransactionQueue {
         let transaction = transaction.clone();
 
         if retry {
-            panic!("There shouldn't be any retryable transactions");
+            self.remove_transaction_from_account_queues(&transaction);
         } else {
             self.remove_transaction(&transaction);
         }
@@ -743,7 +751,11 @@ impl AccountTransactionQueue {
         self.scheduled_lock
             .unlock_on_transaction(transaction, is_write);
 
-        self.writes.len() == 0 && self.reads.len() == 0
+        // No remaining locks, nothing in the trees
+        !self.scheduled_lock.write_locked()
+            && !self.scheduled_lock.read_locked()
+            && self.writes.len() == 0
+            && self.reads.len() == 0
     }
 
     /// Find the minimum priority transaction that blocks this transaction if there is one.
