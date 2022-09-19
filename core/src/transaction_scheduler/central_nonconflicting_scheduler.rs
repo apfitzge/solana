@@ -356,8 +356,20 @@ where
                         self.transaction_queue.complete_or_retry(packet, retry);
                     });
             }
-            BankPacketProcessingDecision::ForwardAndHold => todo!(),
-            BankPacketProcessingDecision::Hold => todo!(),
+            BankPacketProcessingDecision::ForwardAndHold => {
+                current_batch
+                    .deserialized_packets
+                    .iter()
+                    .zip(batch.retryable_packets)
+                    .for_each(|(packet, retry)| {
+                        if !retry {
+                            self.transaction_queue.mark_forwarded(packet);
+                        }
+                    });
+            }
+            BankPacketProcessingDecision::Hold => {
+                panic!("Should never have a Hold batch complete");
+            }
         }
     }
 
@@ -526,7 +538,27 @@ impl TransactionQueue {
         &mut self,
         forward_filter: &mut ForwardPacketBatchesByAccounts,
     ) -> Option<Vec<Arc<ImmutableDeserializedPacket>>> {
-        todo!()
+        // Get batch of transaction simply by priority, and insert into the forwarding filter
+        let mut batch = Vec::with_capacity(self.pending_transactions.len().min(MAX_BATCH_SIZE));
+        while let Some(transaction) = self.pending_transactions.pop_max() {
+            let packet = self
+                .tracking_map
+                .get(transaction.message_hash())
+                .unwrap()
+                .1
+                .immutable_section()
+                .clone();
+            if forward_filter.add_packet(packet.clone()) {
+                batch.push(packet);
+                if batch.len() == MAX_BATCH_SIZE {
+                    break;
+                }
+            } else {
+                // drop it?
+                panic!("forwarding filter is full - probably should drop, not sure yet.");
+            }
+        }
+        (batch.len() > 0).then(|| batch)
     }
 
     /// Insert a new transaction into the queue(s) and maps
@@ -648,6 +680,16 @@ impl TransactionQueue {
         } else {
             self.remove_transaction(&transaction);
         }
+    }
+
+    /// Mark a transaction as forwarded
+    fn mark_forwarded(&mut self, packet: &ImmutableDeserializedPacket) {
+        let message_hash = packet.message_hash();
+        let (_, deserialized_packet) = self
+            .tracking_map
+            .get_mut(message_hash)
+            .expect("forwarded packet should exist in tracking map");
+        deserialized_packet.forwarded = true;
     }
 
     /// Returns the remaining capacity of the pending queue
