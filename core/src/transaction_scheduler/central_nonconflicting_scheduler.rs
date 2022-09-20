@@ -373,7 +373,10 @@ where
                     .for_each(|(index, packet)| {
                         let retry = (batch.retryable_packets & (1 << index)) == 1;
                         if !retry {
-                            self.transaction_queue.mark_forwarded(packet);
+                            self.transaction_queue
+                                .mark_forwarded(packet, &mut self.held_packets);
+                        } else {
+                            panic!("shouldn't fail to forward");
                         }
                     });
             }
@@ -707,13 +710,18 @@ impl TransactionQueue {
     }
 
     /// Mark a transaction as forwarded
-    fn mark_forwarded(&mut self, packet: &ImmutableDeserializedPacket) {
+    fn mark_forwarded(
+        &mut self,
+        packet: &ImmutableDeserializedPacket,
+        held_packets: &mut Vec<Rc<SanitizedTransactionPriority>>,
+    ) {
         let message_hash = packet.message_hash();
-        let (_, deserialized_packet) = self
+        let (transaction, deserialized_packet) = self
             .tracking_map
             .get_mut(message_hash)
             .expect("forwarded packet should exist in tracking map");
         deserialized_packet.forwarded = true;
+        held_packets.push(transaction.clone());
     }
 
     /// Returns the remaining capacity of the pending queue
