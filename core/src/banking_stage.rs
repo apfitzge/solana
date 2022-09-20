@@ -1177,7 +1177,7 @@ impl BankingStage {
             let mut retryable_packets = 0;
             for retryable_transaction_index in retryable_transaction_indexes {
                 // retryable_packets[retryable_transaction_index] = true;
-                retryable_packets |= 1 << retryable_transaction_index;
+                retryable_packets |= (1 << retryable_transaction_index);
             }
 
             retryable_packets
