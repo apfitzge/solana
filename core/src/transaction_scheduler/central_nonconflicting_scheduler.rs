@@ -21,6 +21,8 @@ use {
         feature_set::FeatureSet,
         hash::Hash,
         pubkey::Pubkey,
+        saturating_add_assign,
+        timing::AtomicInterval,
         transaction::{
             SanitizedTransaction, TransactionAccountLocks, TransactionError, MAX_TX_ACCOUNT_LOCKS,
         },
@@ -139,6 +141,7 @@ where
         HashMap<ScheduledPacketBatchId, (Arc<ScheduledPacketBatch>, BankPacketProcessingDecision)>,
     /// Generator for unique batch identifiers.
     batch_id_generator: ScheduledPacketBatchIdGenerator,
+    metrics: SchedulerMetrics,
 }
 
 #[derive(Clone)]
@@ -241,14 +244,48 @@ where
             transaction_queue: TransactionQueue::with_capacity(capacity),
             current_batches: HashMap::new(),
             batch_id_generator: ScheduledPacketBatchIdGenerator::default(),
+            metrics: SchedulerMetrics::default(),
         }
     }
 
     /// Run the scheduler loop
     fn run(&mut self) {
         const RECV_TIMEOUT: Duration = Duration::from_millis(10);
-
+        let start = Instant::now();
         loop {
+            if start.elapsed() > Duration::from_secs(60) {
+                error!("Scheduler has been running for over 60 seconds");
+                error!(
+                    "Let's wait for outstanding batches: {} with {} txs",
+                    self.current_batches.len(),
+                    self.current_batches
+                        .iter()
+                        .map(|(_, (batch, _))| batch.deserialized_packets.len())
+                        .sum::<usize>()
+                );
+                while !self.current_batches.is_empty() {
+                    let processed_batches =
+                        drain_channel(&self.processed_packet_batch_receiver, RECV_TIMEOUT);
+                    for processed_batch in processed_batches {
+                        self.complete_batch(processed_batch);
+                    }
+                    error!("remaining batches: {}", self.current_batches.len());
+                }
+
+                self.metrics.report(
+                    1,
+                    self.transaction_queue.pending_transactions.len(),
+                    self.transaction_queue.blocked_transactions.iter(),
+                );
+                error!(
+                    "{} txs in tracking map, {} txs in held map",
+                    self.transaction_queue.tracking_map.len(),
+                    self.held_packets.len(),
+                );
+
+                panic!("stopping scheduler");
+            }
+
             // Potentially receive packets
             let bank = self.bank_forks.read().unwrap().working_bank();
             let recv_result = self.receive_and_buffer_packets(RECV_TIMEOUT, &bank);
@@ -269,6 +306,12 @@ where
                     return;
                 }
             }
+
+            self.metrics.report(
+                1000,
+                self.transaction_queue.pending_transactions.len(),
+                self.transaction_queue.blocked_transactions.iter(),
+            );
         }
     }
 
@@ -323,6 +366,19 @@ where
         deserialized_packets: Vec<Arc<ImmutableDeserializedPacket>>,
         decision: BankPacketProcessingDecision,
     ) -> Arc<ScheduledPacketBatch> {
+        match decision {
+            BankPacketProcessingDecision::Consume(_) => saturating_add_assign!(
+                self.metrics.num_packets_scheduled_consume,
+                deserialized_packets.len()
+            ),
+            BankPacketProcessingDecision::Forward
+            | BankPacketProcessingDecision::ForwardAndHold => saturating_add_assign!(
+                self.metrics.num_packets_scheduled_forward,
+                deserialized_packets.len()
+            ),
+            BankPacketProcessingDecision::Hold => panic!("shouldn't happen"),
+        }
+
         let id = self.batch_id_generator.generate_id();
         let scheduled_batch = Arc::new(ScheduledPacketBatch {
             id,
@@ -350,6 +406,24 @@ where
             .remove(&batch.id)
             .expect("completed batch was not in current batches map");
 
+        let num_retries = batch.retryable_packets.count_ones() as usize;
+        match decision {
+            BankPacketProcessingDecision::Consume(_) => {
+                saturating_add_assign!(
+                    self.metrics.num_packets_scheduled_consume_retries,
+                    num_retries
+                );
+            }
+            BankPacketProcessingDecision::Forward
+            | BankPacketProcessingDecision::ForwardAndHold => {
+                saturating_add_assign!(
+                    self.metrics.num_packets_scheduled_forward_retries,
+                    num_retries
+                );
+            }
+            BankPacketProcessingDecision::Hold => panic!("shouldn't happen"),
+        }
+
         match decision {
             BankPacketProcessingDecision::Consume(_) | BankPacketProcessingDecision::Forward => {
                 let bank = self.bank_forks.read().unwrap().working_bank();
@@ -362,8 +436,6 @@ where
                         self.transaction_queue
                             .complete_or_retry(packet, retry, &bank)
                     });
-                let num_retries = batch.retryable_packets.count_ones();
-                error!("completed batch {} with {} retries", batch.id, num_retries);
             }
             BankPacketProcessingDecision::ForwardAndHold => {
                 current_batch
@@ -395,6 +467,7 @@ where
         let deserialized_packets = self
             .deserialized_packet_batch_getter
             .get_deserialized_packets(timeout, self.transaction_queue.remaining_capacity())?;
+        saturating_add_assign!(self.metrics.num_packets_seen, deserialized_packets.len());
         for packet in deserialized_packets {
             self.insert_new_packet(packet, bank);
         }
@@ -685,6 +758,27 @@ impl TransactionQueue {
         }
     }
 
+    /// Unlocks all accounts for a transaction
+    fn remove_account_locks_transaction(&mut self, transaction: &TransactionRef) {
+        let account_locks = transaction.transaction.get_account_locks_unchecked();
+
+        for account in account_locks.readonly {
+            self.account_queues
+                .get_mut(account)
+                .unwrap()
+                .scheduled_lock
+                .unlock_on_transaction(transaction, false);
+        }
+
+        for account in account_locks.writable {
+            self.account_queues
+                .get_mut(account)
+                .unwrap()
+                .scheduled_lock
+                .unlock_on_transaction(transaction, true);
+        }
+    }
+
     /// Mark a transaction as complete or retry
     fn complete_or_retry(
         &mut self,
@@ -700,10 +794,9 @@ impl TransactionQueue {
         let transaction = transaction.clone();
 
         if retry {
-            // TODO: make this more efficient/supported rather than completely remove and re-insert
-            let deserialized_packet = deserialized_packet.clone();
-            self.remove_transaction(&transaction);
-            self.insert_transaction(transaction, deserialized_packet, bank);
+            self.remove_account_locks_transaction(&transaction);
+            self.unblock_transaction(&transaction);
+            self.insert_transaction_into_pending_queue(&transaction);
         } else {
             self.remove_transaction(&transaction);
         }
@@ -905,4 +998,54 @@ fn drain_channel<T>(channel: &Receiver<T>, timeout: Duration) -> Vec<T> {
         }
     }
     vec
+}
+
+#[derive(Default)]
+struct SchedulerMetrics {
+    last_report: AtomicInterval,
+    num_packets_seen: usize,
+    num_packets_scheduled_consume: usize,
+    num_packets_scheduled_consume_retries: usize,
+    num_packets_scheduled_forward: usize,
+    num_packets_scheduled_forward_retries: usize,
+}
+
+impl SchedulerMetrics {
+    fn report<'a>(
+        &mut self,
+        interval_ms: u64,
+        currently_pending: usize,
+        blocked: impl Iterator<Item = (&'a Hash, &'a Vec<TransactionRef>)>,
+    ) {
+        if self.last_report.should_update(interval_ms) {
+            let num_blocked = blocked.map(|(_, txs)| txs.len()).sum::<usize>();
+            datapoint_info!(
+                "tx-scheduler",
+                ("num_packets_seen", self.num_packets_seen, i64),
+                (
+                    "num_packets_scheduled_consume",
+                    self.num_packets_scheduled_consume,
+                    i64
+                ),
+                (
+                    "num_packets_scheduled_consume_retries",
+                    self.num_packets_scheduled_consume_retries,
+                    i64
+                ),
+                (
+                    "num_packets_scheduled_forward",
+                    self.num_packets_scheduled_forward,
+                    i64
+                ),
+                (
+                    "num_packets_scheduled_forward_retries",
+                    self.num_packets_scheduled_forward_retries,
+                    i64
+                ),
+                ("currently_pending", currently_pending, i64),
+                ("num_blocked", num_blocked, i64),
+            );
+            // *self = Self::default();
+        }
+    }
 }
