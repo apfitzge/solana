@@ -1145,6 +1145,13 @@ impl BankingStage {
             bank_creation_time,
         }) = bank_start
         {
+            if !Bank::should_bank_still_be_processing_txs(
+                &bank_creation_time,
+                working_bank.ns_per_slot,
+            ) {
+                return u128::MAX;
+            }
+
             let process_transactions_summary = Self::process_packets_transactions(
                 &working_bank,
                 &bank_creation_time,
@@ -1167,11 +1174,6 @@ impl BankingStage {
                 ..
             } = process_transactions_summary;
 
-            // let _reached_end_of_slot = reached_max_poh_height
-            //     || !Bank::should_bank_still_be_processing_txs(
-            //         &bank_creation_time,
-            //         max_tx_ingestion_ns,
-            //     );
             let mut retryable_packets = 0;
             for retryable_transaction_index in retryable_transaction_indexes {
                 // retryable_packets[retryable_transaction_index] = true;
