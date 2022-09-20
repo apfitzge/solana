@@ -373,12 +373,18 @@ where
             .remove(&batch.id)
             .expect("completed batch was not in current batches map");
 
-        let num_retries = batch.retryable_packets.count_ones() as usize;
+        let num_packets = current_batch.deserialized_packets.len();
+        let num_retries = (batch.retryable_packets.count_ones() as usize).min(num_packets);
+        let num_success = num_packets - num_retries;
         match decision {
             BankPacketProcessingDecision::Consume(_) => {
                 saturating_add_assign!(
                     self.metrics.num_packets_scheduled_consume_retries,
                     num_retries
+                );
+                saturating_add_assign!(
+                    self.metrics.num_packets_scheduled_consume_success,
+                    num_success
                 );
             }
             BankPacketProcessingDecision::Forward
@@ -386,6 +392,10 @@ where
                 saturating_add_assign!(
                     self.metrics.num_packets_scheduled_forward_retries,
                     num_retries
+                );
+                saturating_add_assign!(
+                    self.metrics.num_packets_scheduled_forward_success,
+                    num_success
                 );
             }
             BankPacketProcessingDecision::Hold => panic!("shouldn't happen"),
@@ -453,6 +463,7 @@ where
                 "ignoring packet already in tracking map: {:?}",
                 packet.message_hash()
             );
+            panic!("packet already in tracking map");
             return;
         }
 
@@ -973,8 +984,10 @@ struct SchedulerMetrics {
     num_packets_seen: usize,
     num_packets_scheduled_consume: usize,
     num_packets_scheduled_consume_retries: usize,
+    num_packets_scheduled_consume_success: usize,
     num_packets_scheduled_forward: usize,
     num_packets_scheduled_forward_retries: usize,
+    num_packets_scheduled_forward_success: usize,
 }
 
 impl SchedulerMetrics {
@@ -1001,6 +1014,11 @@ impl SchedulerMetrics {
                     i64
                 ),
                 (
+                    "num_packets_scheduled_consume_success",
+                    self.num_packets_scheduled_consume_success,
+                    i64
+                ),
+                (
                     "num_packets_scheduled_forward",
                     self.num_packets_scheduled_forward,
                     i64
@@ -1008,6 +1026,11 @@ impl SchedulerMetrics {
                 (
                     "num_packets_scheduled_forward_retries",
                     self.num_packets_scheduled_forward_retries,
+                    i64
+                ),
+                (
+                    "num_packets_scheduled_forward_success",
+                    self.num_packets_scheduled_forward_success,
                     i64
                 ),
                 ("currently_pending", currently_pending, i64),
