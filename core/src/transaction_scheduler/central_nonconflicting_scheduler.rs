@@ -276,6 +276,7 @@ where
             self.metrics.report(
                 1000,
                 self.transaction_queue.pending_transactions.len(),
+                self.transaction_queue.tracking_map.len(),
                 self.transaction_queue.blocked_transactions.iter(),
             );
         }
@@ -981,6 +982,7 @@ impl SchedulerMetrics {
         &mut self,
         interval_ms: u64,
         currently_pending: usize,
+        currently_tracked: usize,
         blocked: impl Iterator<Item = (&'a Hash, &'a Vec<TransactionRef>)>,
     ) {
         if self.last_report.should_update(interval_ms) {
@@ -1009,6 +1011,7 @@ impl SchedulerMetrics {
                     i64
                 ),
                 ("currently_pending", currently_pending, i64),
+                ("currently_tracked", currently_tracked, i64),
                 ("num_blocked", num_blocked, i64),
             );
             // *self = Self::default();
