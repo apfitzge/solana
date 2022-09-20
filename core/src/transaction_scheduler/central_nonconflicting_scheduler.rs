@@ -432,7 +432,7 @@ where
                     .iter()
                     .enumerate()
                     .for_each(|(index, packet)| {
-                        let retry = (batch.retryable_packets & (1 << index)) == 1;
+                        let retry = (batch.retryable_packets & (1 << index)) != 0;
                         self.transaction_queue
                             .complete_or_retry(packet, retry, &bank)
                     });
@@ -443,7 +443,7 @@ where
                     .iter()
                     .enumerate()
                     .for_each(|(index, packet)| {
-                        let retry = (batch.retryable_packets & (1 << index)) == 1;
+                        let retry = (batch.retryable_packets & (1 << index)) != 0;
                         if !retry {
                             self.transaction_queue
                                 .mark_forwarded(packet, &mut self.held_packets);
