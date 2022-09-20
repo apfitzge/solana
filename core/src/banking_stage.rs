@@ -1127,6 +1127,7 @@ impl BankingStage {
         }
     }
 
+    /// Returns bitset of retryable transactions
     fn consume_scheduled_packet_batch(
         scheduled_packet_batch: &ScheduledPacketBatch,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
@@ -1137,7 +1138,7 @@ impl BankingStage {
         qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         log_messages_bytes_limit: Option<usize>,
-    ) -> Vec<bool> {
+    ) -> u128 {
         let bank_start = poh_recorder.read().unwrap().bank_start();
         if let Some(BankStart {
             working_bank,
@@ -1171,20 +1172,21 @@ impl BankingStage {
             //         &bank_creation_time,
             //         max_tx_ingestion_ns,
             //     );
-            let mut retryable_packets =
-                vec![false; scheduled_packet_batch.deserialized_packets.len()];
+            let mut retryable_packets = 0;
             for retryable_transaction_index in retryable_transaction_indexes {
-                retryable_packets[retryable_transaction_index] = true;
+                // retryable_packets[retryable_transaction_index] = true;
+                retryable_packets |= 1 << retryable_transaction_index;
             }
 
             retryable_packets
         } else {
             // If we don't have a bank, we can't process the packets. Just mark them all as retryable
             // so they get put back into the scheduler.
-            vec![true; scheduled_packet_batch.deserialized_packets.len()]
+            u128::MAX
         }
     }
 
+    /// Returns bitset of retryable transactions
     fn forward_scheduled_packet_batch(
         scheduled_packet_batch: &ScheduledPacketBatch,
         forward_option: &ForwardOption,
@@ -1197,7 +1199,7 @@ impl BankingStage {
         connection_cache: &ConnectionCache,
         banking_tracer_packet_stats: &mut IntervalBankingStageTracerPacketStats,
         bank_forks: &Arc<RwLock<BankForks>>,
-    ) -> Vec<bool> {
+    ) -> u128 {
         match forward_option {
             ForwardOption::NotForward => {}
             _ => {
@@ -1217,7 +1219,7 @@ impl BankingStage {
             }
         }
 
-        vec![false; scheduled_packet_batch.deserialized_packets.len()]
+        0
     }
 
     #[allow(clippy::too_many_arguments)]

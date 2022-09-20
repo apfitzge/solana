@@ -157,9 +157,9 @@ where
                 current_batch
                     .deserialized_packets
                     .iter()
-                    .zip(batch.retryable_packets)
-                    .for_each(|(packet, retry)| {
-                        if retry {
+                    .enumerate()
+                    .for_each(|(index, packet)| {
+                        if batch.retryable_packets & (1 << index) == 1 {
                             // This scheduler is run inside banking stage, we just popped these packets
                             // off the queue, so we can push them back in and know we won't need to pop
                             // to keep under the max capacity.
@@ -179,9 +179,9 @@ where
                 current_batch
                     .deserialized_packets
                     .iter()
-                    .zip(batch.retryable_packets)
-                    .for_each(|(packet, retry)| {
-                        if retry {
+                    .enumerate()
+                    .for_each(|(index, packet)| {
+                        if batch.retryable_packets & (1 << index) == 1 {
                             // This indicates that the packet exceeded the forward buffer size. Drop it.
                             self.unprocessed_packets
                                 .message_hash_to_transaction

@@ -46,7 +46,8 @@ pub struct ProcessedPacketBatch {
     pub id: ScheduledPacketBatchId,
     /// Transactions that need to be retried, i.e. added back to the scheduler.
     // TODO: This should be a bitset, and go away entirely once we have a better scheduler
-    pub retryable_packets: Vec<bool>,
+    // pub retryable_packets: Vec<bool>,
+    pub retryable_packets: u128,
 }
 
 #[derive(Clone, Copy, Debug)]

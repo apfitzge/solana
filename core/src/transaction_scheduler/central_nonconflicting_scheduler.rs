@@ -353,24 +353,25 @@ where
         match decision {
             BankPacketProcessingDecision::Consume(_) | BankPacketProcessingDecision::Forward => {
                 let bank = self.bank_forks.read().unwrap().working_bank();
-                let num_retries: u32 = current_batch
+                current_batch
                     .deserialized_packets
                     .iter()
-                    .zip(batch.retryable_packets)
-                    .filter_map(|(packet, retry)| {
+                    .enumerate()
+                    .for_each(|(index, packet)| {
+                        let retry = (batch.retryable_packets & (1 << index)) == 1;
                         self.transaction_queue
-                            .complete_or_retry(packet, retry, &bank);
-                        retry.then(|| 1)
-                    })
-                    .sum();
+                            .complete_or_retry(packet, retry, &bank)
+                    });
+                let num_retries = batch.retryable_packets.count_ones();
                 error!("completed batch {} with {} retries", batch.id, num_retries);
             }
             BankPacketProcessingDecision::ForwardAndHold => {
                 current_batch
                     .deserialized_packets
                     .iter()
-                    .zip(batch.retryable_packets)
-                    .for_each(|(packet, retry)| {
+                    .enumerate()
+                    .for_each(|(index, packet)| {
+                        let retry = (batch.retryable_packets & (1 << index)) == 1;
                         if !retry {
                             self.transaction_queue.mark_forwarded(packet);
                         }
