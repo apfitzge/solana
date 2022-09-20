@@ -257,25 +257,17 @@ where
             }
 
             // Potentially receive processed batches
-            let recv_result = self
-                .processed_packet_batch_receiver
-                .recv_timeout(RECV_TIMEOUT);
-            if matches!(recv_result, Err(RecvTimeoutError::Disconnected)) {
-                break;
-            }
-            if let Ok(processed_batch) = recv_result {
+            let recv_results = drain_channel(&self.processed_packet_batch_receiver, RECV_TIMEOUT);
+            for processed_batch in recv_results {
                 self.complete_batch(processed_batch);
             }
 
-            // Get the next transaction batch
-            let next_batch = self.get_next_transaction_batch();
-            if next_batch.is_none() {
-                continue;
-            }
-
-            let send_result = self.scheduled_packet_batch_sender.send(next_batch.unwrap());
-            if send_result.is_err() {
-                break;
+            // Get the next transaction batches
+            while let Some(batch) = self.get_next_transaction_batch() {
+                let send_result = self.scheduled_packet_batch_sender.send(batch);
+                if send_result.is_err() {
+                    return;
+                }
             }
         }
     }
@@ -360,13 +352,18 @@ where
 
         match decision {
             BankPacketProcessingDecision::Consume(_) | BankPacketProcessingDecision::Forward => {
-                current_batch
+                let bank = self.bank_forks.read().unwrap().working_bank();
+                let num_retries: u32 = current_batch
                     .deserialized_packets
                     .iter()
                     .zip(batch.retryable_packets)
-                    .for_each(|(packet, retry)| {
-                        self.transaction_queue.complete_or_retry(packet, retry);
-                    });
+                    .filter_map(|(packet, retry)| {
+                        self.transaction_queue
+                            .complete_or_retry(packet, retry, &bank);
+                        retry.then(|| 1)
+                    })
+                    .sum();
+                error!("completed batch {} with {} retries", batch.id, num_retries);
             }
             BankPacketProcessingDecision::ForwardAndHold => {
                 current_batch
@@ -408,6 +405,10 @@ where
             .tracking_map
             .contains_key(packet.message_hash())
         {
+            error!(
+                "ignoring packet already in tracking map: {:?}",
+                packet.message_hash()
+            );
             return;
         }
 
@@ -416,6 +417,11 @@ where
                 Rc::new(transaction),
                 DeserializedPacket::from_immutable_section(packet),
                 bank,
+            );
+        } else {
+            error!(
+                "ignoring packet that failed sanitization: {:?}",
+                packet.message_hash()
             );
         }
     }
@@ -618,6 +624,7 @@ impl TransactionQueue {
             self.pending_transactions.push(transaction.clone());
         } else {
             let dropped_packet = self.pending_transactions.push_pop_min(transaction.clone());
+            error!("dropping packet: {:?}", dropped_packet.message_hash());
             self.remove_transaction(&dropped_packet);
         }
     }
@@ -675,16 +682,24 @@ impl TransactionQueue {
     }
 
     /// Mark a transaction as complete or retry
-    fn complete_or_retry(&mut self, packet: &ImmutableDeserializedPacket, retry: bool) {
+    fn complete_or_retry(
+        &mut self,
+        packet: &ImmutableDeserializedPacket,
+        retry: bool,
+        bank: &Bank,
+    ) {
         let message_hash = packet.message_hash();
-        let (transaction, _) = self
+        let (transaction, deserialized_packet) = self
             .tracking_map
             .get(message_hash)
             .expect("Transaction should exist in tracking map");
         let transaction = transaction.clone();
 
         if retry {
-            self.remove_transaction_from_account_queues(&transaction);
+            // TODO: make this more efficient/supported rather than completely remove and re-insert
+            let deserialized_packet = deserialized_packet.clone();
+            self.remove_transaction(&transaction);
+            self.insert_transaction(transaction, deserialized_packet, bank);
         } else {
             self.remove_transaction(&transaction);
         }
@@ -868,4 +883,17 @@ fn option_min<T: Ord>(lhs: Option<T>, rhs: Option<T>) -> Option<T> {
         (lhs, None) => lhs,
         (None, rhs) => rhs,
     }
+}
+
+/// Helper function to drain a channel into a vector
+fn drain_channel<T>(channel: &Receiver<T>, timeout: Duration) -> Vec<T> {
+    let start = Instant::now();
+    let mut vec = vec![];
+    while let Ok(item) = channel.try_recv() {
+        vec.push(item);
+        if start.elapsed() >= timeout {
+            break;
+        }
+    }
+    vec
 }

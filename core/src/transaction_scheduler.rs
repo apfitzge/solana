@@ -7,7 +7,7 @@ use {
         immutable_deserialized_packet::ImmutableDeserializedPacket,
     },
     crossbeam_channel::RecvTimeoutError,
-    std::{sync::Arc, time::Duration},
+    std::{fmt::Display, sync::Arc, time::Duration},
 };
 
 pub mod central_nonconflicting_scheduler;
@@ -97,5 +97,11 @@ impl ScheduledPacketBatchIdGenerator {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         ScheduledPacketBatchId::new(id)
+    }
+}
+
+impl Display for ScheduledPacketBatchId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }

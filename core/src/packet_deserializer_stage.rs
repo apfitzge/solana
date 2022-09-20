@@ -189,11 +189,10 @@ impl InlinePacketDeserializer {
         })
     }
 }
-
-/// Packet deserializer that deserializes packets in a separate thread
+/// Packet deserializer that deserializes packets in separate thread(s)
 pub struct PacketDeserializerHandle {
     deserialized_packets_receiver: DeserializedPacketBatchReceiver,
-    thread_hdl: JoinHandle<()>,
+    thread_hdls: Vec<JoinHandle<()>>,
 }
 
 impl DeserializedPacketBatchGetter for PacketDeserializerHandle {
@@ -202,19 +201,19 @@ impl DeserializedPacketBatchGetter for PacketDeserializerHandle {
         timeout: Duration,
         packet_limit: usize,
     ) -> Result<DeserializedPacketBatch, RecvTimeoutError> {
+        // NOTE: NO BLOCKING
         let start = Instant::now();
-        let mut deserialized_packets = self.deserialized_packets_receiver.recv_timeout(timeout)?;
-
-        let mut num_packets_received: usize = deserialized_packets.len();
+        let mut deserialized_packets = Vec::new();
+        let mut num_packets_received: usize = 0;
         let mut packet_count_overflow = false;
         while start.elapsed() < timeout
             && num_packets_received < packet_limit
             && !packet_count_overflow
         {
-            if let Ok(new_deserialized_packets) = self.deserialized_packets_receiver.try_recv() {
+            if let Ok(packets) = self.deserialized_packets_receiver.try_recv() {
                 let (packets_received, new_packet_count_overflowed) =
-                    num_packets_received.overflowing_add(new_deserialized_packets.len());
-                deserialized_packets.extend(new_deserialized_packets);
+                    num_packets_received.overflowing_add(packets.len());
+                deserialized_packets.extend(packets);
                 packet_count_overflow = new_packet_count_overflowed;
                 num_packets_received = packets_received;
             } else {
@@ -223,45 +222,80 @@ impl DeserializedPacketBatchGetter for PacketDeserializerHandle {
         }
 
         Ok(deserialized_packets)
+
+        // let start = Instant::now();
+        // let mut deserialized_packets = self.deserialized_packets_receiver.recv_timeout(timeout)?;
+
+        // let mut num_packets_received: usize = deserialized_packets.len();
+        // let mut packet_count_overflow = false;
+        // while start.elapsed() < timeout
+        //     && num_packets_received < packet_limit
+        //     && !packet_count_overflow
+        // {
+        //     if let Ok(new_deserialized_packets) = self.deserialized_packets_receiver.try_recv() {
+        //         let (packets_received, new_packet_count_overflowed) =
+        //             num_packets_received.overflowing_add(new_deserialized_packets.len());
+        //         deserialized_packets.extend(new_deserialized_packets);
+        //         packet_count_overflow = new_packet_count_overflowed;
+        //         num_packets_received = packets_received;
+        //     } else {
+        //         break;
+        //     }
+        // }
+
+        // Ok(deserialized_packets)
     }
 
     fn join(self) -> std::thread::Result<()> {
-        self.thread_hdl.join()
+        for thread_hdl in self.thread_hdls {
+            thread_hdl.join()?;
+        }
+        Ok(())
     }
 }
 
 impl PacketDeserializerHandle {
-    pub fn new(packet_batch_receiver: BankingPacketReceiver, id: u32) -> Self {
-        let mut packet_deserializer = InlinePacketDeserializer::new(packet_batch_receiver, id);
+    pub fn new(
+        packet_batch_receiver: BankingPacketReceiver,
+        base_id: u32,
+        num_threads: u32,
+    ) -> Self {
         let (deserialized_packets_sender, deserialized_packets_receiver) = unbounded();
-        let thread_hdl = Builder::new()
-            .name(format!("solPktDesr{id:02}"))
-            .spawn(move || {
-                const RECV_TIMEOUT: Duration = Duration::from_millis(10);
-                const PACKET_BATCHES_SIZE_LIMIT: usize = 1024 * 1024;
-                loop {
-                    match packet_deserializer
-                        .get_deserialized_packets(RECV_TIMEOUT, PACKET_BATCHES_SIZE_LIMIT)
-                    {
-                        Ok(deserialized_packets) => {
-                            if deserialized_packets_sender
-                                .send(deserialized_packets)
-                                .is_err()
+        let thread_hdls = (base_id..(base_id + num_threads))
+            .map(|id| {
+                let deserialized_packets_sender = deserialized_packets_sender.clone();
+                let mut packet_deserializer =
+                    InlinePacketDeserializer::new(packet_batch_receiver.clone(), id);
+                Builder::new()
+                    .name(format!("solPktDesr{id:02}"))
+                    .spawn(move || {
+                        const RECV_TIMEOUT: Duration = Duration::from_millis(10);
+                        const PACKET_BATCHES_SIZE_LIMIT: usize = 1024 * 1024;
+                        loop {
+                            match packet_deserializer
+                                .get_deserialized_packets(RECV_TIMEOUT, PACKET_BATCHES_SIZE_LIMIT)
                             {
-                                // break if the receiver is dropped
-                                break;
+                                Ok(deserialized_packets) => {
+                                    if deserialized_packets_sender
+                                        .send(deserialized_packets)
+                                        .is_err()
+                                    {
+                                        // break if the receiver is dropped
+                                        break;
+                                    }
+                                }
+                                Err(RecvTimeoutError::Disconnected) => break, // break if sender is dropped
+                                Err(RecvTimeoutError::Timeout) => {}          // do nothing
                             }
                         }
-                        Err(RecvTimeoutError::Disconnected) => break, // break if sender is dropped
-                        Err(RecvTimeoutError::Timeout) => {}          // do nothing
-                    }
-                }
+                    })
+                    .unwrap()
             })
-            .unwrap();
+            .collect();
 
         Self {
             deserialized_packets_receiver,
-            thread_hdl,
+            thread_hdls,
         }
     }
 }

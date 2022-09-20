@@ -502,7 +502,7 @@ impl BankingStage {
 
         let (scheduler_banking_handle, scheduler_thread_handle) =
             CentralNonConflictingScheduler::spawn(
-                InlinePacketDeserializer::new(verified_receiver, 3),
+                PacketDeserializerHandle::new(verified_receiver, 3, num_threads - 2),
                 bank_forks.clone(),
                 banking_decision_maker.clone(),
                 TOTAL_BUFFERED_PACKETS,
