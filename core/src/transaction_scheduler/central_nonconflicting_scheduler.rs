@@ -251,41 +251,7 @@ where
     /// Run the scheduler loop
     fn run(&mut self) {
         const RECV_TIMEOUT: Duration = Duration::from_millis(10);
-        let start = Instant::now();
         loop {
-            if start.elapsed() > Duration::from_secs(60) {
-                error!("Scheduler has been running for over 60 seconds");
-                error!(
-                    "Let's wait for outstanding batches: {} with {} txs",
-                    self.current_batches.len(),
-                    self.current_batches
-                        .iter()
-                        .map(|(_, (batch, _))| batch.deserialized_packets.len())
-                        .sum::<usize>()
-                );
-                while !self.current_batches.is_empty() {
-                    let processed_batches =
-                        drain_channel(&self.processed_packet_batch_receiver, RECV_TIMEOUT);
-                    for processed_batch in processed_batches {
-                        self.complete_batch(processed_batch);
-                    }
-                    error!("remaining batches: {}", self.current_batches.len());
-                }
-
-                self.metrics.report(
-                    1,
-                    self.transaction_queue.pending_transactions.len(),
-                    self.transaction_queue.blocked_transactions.iter(),
-                );
-                error!(
-                    "{} txs in tracking map, {} txs in held map",
-                    self.transaction_queue.tracking_map.len(),
-                    self.held_packets.len(),
-                );
-
-                panic!("stopping scheduler");
-            }
-
             // Potentially receive packets
             let bank = self.bank_forks.read().unwrap().working_bank();
             let recv_result = self.receive_and_buffer_packets(RECV_TIMEOUT, &bank);
