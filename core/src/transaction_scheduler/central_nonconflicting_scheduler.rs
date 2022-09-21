@@ -16,6 +16,7 @@ use {
     },
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     min_max_heap::MinMaxHeap,
+    solana_measure::measure,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_sdk::{
         feature_set::FeatureSet,
@@ -254,24 +255,41 @@ where
         loop {
             // Potentially receive packets
             let bank = self.bank_forks.read().unwrap().working_bank();
+
             let recv_result = self.receive_and_buffer_packets(RECV_TIMEOUT, &bank);
             if matches!(recv_result, Err(RecvTimeoutError::Disconnected)) {
                 break;
             }
 
             // Potentially receive processed batches
-            let recv_results = drain_channel(&self.processed_packet_batch_receiver, RECV_TIMEOUT);
-            for processed_batch in recv_results {
-                self.complete_batch(processed_batch);
-            }
+            let (recv_results, receive_completed_batches_time) = measure!(drain_channel(
+                &self.processed_packet_batch_receiver,
+                RECV_TIMEOUT
+            ));
+            let (_, complete_batches_time) = measure!({
+                for processed_batch in recv_results {
+                    self.complete_batch(processed_batch);
+                }
+            });
+            saturating_add_assign!(
+                self.metrics.receive_completed_batch_time_us,
+                receive_completed_batches_time.as_us()
+            );
+            saturating_add_assign!(
+                self.metrics.complete_batches_time_us,
+                complete_batches_time.as_us()
+            );
 
             // Get the next transaction batches
-            while let Some(batch) = self.get_next_transaction_batch() {
-                let send_result = self.scheduled_packet_batch_sender.send(batch);
-                if send_result.is_err() {
-                    return;
+            let (_, scheduling_time) = measure!({
+                while let Some(batch) = self.get_next_transaction_batch() {
+                    let send_result = self.scheduled_packet_batch_sender.send(batch);
+                    if send_result.is_err() {
+                        return;
+                    }
                 }
-            }
+            });
+            saturating_add_assign!(self.metrics.scheduling_time_us, scheduling_time.as_us());
 
             self.metrics.report(1000);
         }
@@ -409,13 +427,25 @@ where
         timeout: Duration,
         bank: &Bank,
     ) -> Result<(), RecvTimeoutError> {
-        let deserialized_packets = self
+        let (deserialized_packets, receive_packet_batches_time) = measure!(self
             .deserialized_packet_batch_getter
-            .get_deserialized_packets(timeout, self.transaction_queue.remaining_capacity())?;
+            .get_deserialized_packets(timeout, self.transaction_queue.remaining_capacity())?);
+
         saturating_add_assign!(self.metrics.num_packets_seen, deserialized_packets.len());
-        for packet in deserialized_packets {
-            self.insert_new_packet(packet, bank);
-        }
+        saturating_add_assign!(
+            self.metrics.receive_packet_batches_time_us,
+            receive_packet_batches_time.as_us()
+        );
+
+        let (_, insert_new_packets_time) = measure!({
+            for packet in deserialized_packets {
+                self.insert_new_packet(packet, bank);
+            }
+        });
+        saturating_add_assign!(
+            self.metrics.insert_new_packets_time_us,
+            insert_new_packets_time.as_us()
+        );
 
         Ok(())
     }
@@ -959,12 +989,18 @@ struct SchedulerMetrics {
     // Batch-wise metrics
     num_batches_scheduled: usize,
     num_batches_completed: usize,
+
+    // Timing metrics
+    receive_packet_batches_time_us: u64,
+    insert_new_packets_time_us: u64,
+    receive_completed_batch_time_us: u64,
+    complete_batches_time_us: u64,
+    scheduling_time_us: u64,
 }
 
 impl SchedulerMetrics {
     fn report<'a>(&mut self, interval_ms: u64) {
         if self.last_report.should_update(interval_ms) {
-            let num_blocked = blocked.map(|(_, txs)| txs.len()).sum::<usize>();
             datapoint_info!(
                 "tx-scheduler",
                 ("num_packets_seen", self.num_packets_seen, i64),
@@ -973,6 +1009,27 @@ impl SchedulerMetrics {
                 ("num_packets_success", self.num_packets_success, i64),
                 ("num_batches_scheduled", self.num_batches_scheduled, i64),
                 ("num_batches_completed", self.num_batches_completed, i64),
+                (
+                    "recieve_packet_batches_time_us",
+                    self.receive_packet_batches_time_us,
+                    i64
+                ),
+                (
+                    "insert_new_packets_time_us",
+                    self.insert_new_packets_time_us,
+                    i64
+                ),
+                (
+                    "receive_completed_batch_time_us",
+                    self.receive_completed_batch_time_us,
+                    i64
+                ),
+                (
+                    "complete_batches_time_us",
+                    self.complete_batches_time_us,
+                    i64
+                ),
+                ("scheduling_time_us", self.scheduling_time_us, i64),
             );
             *self = Self::default();
         }
