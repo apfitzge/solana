@@ -12,12 +12,25 @@ use {
     std::{
         collections::{hash_map::Entry, HashMap, HashSet},
         ops::Index,
-        sync::{atomic::AtomicBool, Arc},
+        sync::{
+            atomic::{AtomicBool, AtomicU64},
+            Arc,
+        },
         time::Instant,
     },
 };
 
 pub const MAX_ROOT_DISTANCE_FOR_VOTE_ONLY: Slot = 400;
+pub type AtomicSlot = AtomicU64;
+pub struct ReadOnlyAtomicSlot {
+    slot: Arc<AtomicSlot>,
+}
+
+impl ReadOnlyAtomicSlot {
+    pub fn get(&self) -> Slot {
+        self.slot.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
 
 #[derive(Debug, Default, Copy, Clone)]
 struct SetRootMetrics {
@@ -46,11 +59,15 @@ pub struct BankForks {
     banks: HashMap<Slot, Arc<Bank>>,
     descendants: HashMap<Slot, HashSet<Slot>>,
     root: Slot,
+
     pub snapshot_config: Option<SnapshotConfig>,
 
     pub accounts_hash_interval_slots: Slot,
     last_accounts_hash_slot: Slot,
     in_vote_only_mode: Arc<AtomicBool>,
+
+    // this can be cloned by other threads to watch (and cache) the root slot *without* locking the BankForks
+    atomic_root: Arc<AtomicSlot>,
 }
 
 impl Index<u64> for BankForks {
@@ -80,6 +97,13 @@ impl BankForks {
 
     pub fn is_empty(&self) -> bool {
         self.banks.is_empty()
+    }
+
+    /// Gets a read-only wrapper to an atomic slot holding the root slot.
+    pub fn get_atomic_root(&self) -> ReadOnlyAtomicSlot {
+        ReadOnlyAtomicSlot {
+            slot: self.atomic_root.clone(),
+        }
     }
 
     /// Create a map of bank slot id to the set of ancestors for the bank slot.
@@ -167,6 +191,7 @@ impl BankForks {
             accounts_hash_interval_slots: std::u64::MAX,
             last_accounts_hash_slot: root,
             in_vote_only_mode: Arc::new(AtomicBool::new(false)),
+            atomic_root: Arc::new(AtomicSlot::new(root)),
         }
     }
 
@@ -220,6 +245,9 @@ impl BankForks {
     ) -> (Vec<Arc<Bank>>, SetRootMetrics) {
         let old_epoch = self.root_bank().epoch();
         self.root = root;
+        self.atomic_root
+            .store(root, std::sync::atomic::Ordering::Release);
+
         let root_bank = self
             .banks
             .get(&root)
