@@ -37,7 +37,7 @@ use {
     },
 };
 
-const MAX_BATCH_SIZE: usize = 128;
+const MAX_BATCH_SIZE: usize = 64;
 
 #[derive(Debug)]
 /// A sanitized transaction with the packet priority
@@ -273,12 +273,7 @@ where
                 }
             }
 
-            self.metrics.report(
-                1000,
-                self.transaction_queue.pending_transactions.len(),
-                self.transaction_queue.tracking_map.len(),
-                self.transaction_queue.blocked_transactions.iter(),
-            );
+            self.metrics.report(1000);
         }
     }
 
@@ -333,18 +328,11 @@ where
         deserialized_packets: Vec<Arc<ImmutableDeserializedPacket>>,
         decision: BankPacketProcessingDecision,
     ) -> Arc<ScheduledPacketBatch> {
-        match decision {
-            BankPacketProcessingDecision::Consume(_) => saturating_add_assign!(
-                self.metrics.num_packets_scheduled_consume,
-                deserialized_packets.len()
-            ),
-            BankPacketProcessingDecision::Forward
-            | BankPacketProcessingDecision::ForwardAndHold => saturating_add_assign!(
-                self.metrics.num_packets_scheduled_forward,
-                deserialized_packets.len()
-            ),
-            BankPacketProcessingDecision::Hold => panic!("shouldn't happen"),
-        }
+        saturating_add_assign!(self.metrics.num_batches_scheduled, 1);
+        saturating_add_assign!(
+            self.metrics.num_packets_scheduled,
+            deserialized_packets.len()
+        );
 
         let id = self.batch_id_generator.generate_id();
         let scheduled_batch = Arc::new(ScheduledPacketBatch {
@@ -376,30 +364,10 @@ where
         let num_packets = current_batch.deserialized_packets.len();
         let num_retries = (batch.retryable_packets.count_ones() as usize).min(num_packets);
         let num_success = num_packets - num_retries;
-        match decision {
-            BankPacketProcessingDecision::Consume(_) => {
-                saturating_add_assign!(
-                    self.metrics.num_packets_scheduled_consume_retries,
-                    num_retries
-                );
-                saturating_add_assign!(
-                    self.metrics.num_packets_scheduled_consume_success,
-                    num_success
-                );
-            }
-            BankPacketProcessingDecision::Forward
-            | BankPacketProcessingDecision::ForwardAndHold => {
-                saturating_add_assign!(
-                    self.metrics.num_packets_scheduled_forward_retries,
-                    num_retries
-                );
-                saturating_add_assign!(
-                    self.metrics.num_packets_scheduled_forward_success,
-                    num_success
-                );
-            }
-            BankPacketProcessingDecision::Hold => panic!("shouldn't happen"),
-        }
+
+        saturating_add_assign!(self.metrics.num_batches_completed, 1);
+        saturating_add_assign!(self.metrics.num_packets_retried, num_retries);
+        saturating_add_assign!(self.metrics.num_packets_success, num_success);
 
         match decision {
             BankPacketProcessingDecision::Consume(_) | BankPacketProcessingDecision::Forward => {
@@ -981,63 +949,32 @@ fn drain_channel<T>(channel: &Receiver<T>, timeout: Duration) -> Vec<T> {
 #[derive(Default)]
 struct SchedulerMetrics {
     last_report: AtomicInterval,
+
+    // Packet-wise metrics
     num_packets_seen: usize,
-    num_packets_scheduled_consume: usize,
-    num_packets_scheduled_consume_retries: usize,
-    num_packets_scheduled_consume_success: usize,
-    num_packets_scheduled_forward: usize,
-    num_packets_scheduled_forward_retries: usize,
-    num_packets_scheduled_forward_success: usize,
+    num_packets_scheduled: usize,
+    num_packets_retried: usize,
+    num_packets_success: usize,
+
+    // Batch-wise metrics
+    num_batches_scheduled: usize,
+    num_batches_completed: usize,
 }
 
 impl SchedulerMetrics {
-    fn report<'a>(
-        &mut self,
-        interval_ms: u64,
-        currently_pending: usize,
-        currently_tracked: usize,
-        blocked: impl Iterator<Item = (&'a Hash, &'a Vec<TransactionRef>)>,
-    ) {
+    fn report<'a>(&mut self, interval_ms: u64) {
         if self.last_report.should_update(interval_ms) {
             let num_blocked = blocked.map(|(_, txs)| txs.len()).sum::<usize>();
             datapoint_info!(
                 "tx-scheduler",
                 ("num_packets_seen", self.num_packets_seen, i64),
-                (
-                    "num_packets_scheduled_consume",
-                    self.num_packets_scheduled_consume,
-                    i64
-                ),
-                (
-                    "num_packets_scheduled_consume_retries",
-                    self.num_packets_scheduled_consume_retries,
-                    i64
-                ),
-                (
-                    "num_packets_scheduled_consume_success",
-                    self.num_packets_scheduled_consume_success,
-                    i64
-                ),
-                (
-                    "num_packets_scheduled_forward",
-                    self.num_packets_scheduled_forward,
-                    i64
-                ),
-                (
-                    "num_packets_scheduled_forward_retries",
-                    self.num_packets_scheduled_forward_retries,
-                    i64
-                ),
-                (
-                    "num_packets_scheduled_forward_success",
-                    self.num_packets_scheduled_forward_success,
-                    i64
-                ),
-                ("currently_pending", currently_pending, i64),
-                ("currently_tracked", currently_tracked, i64),
-                ("num_blocked", num_blocked, i64),
+                ("num_packets_scheduled", self.num_packets_scheduled, i64),
+                ("num_packets_retried", self.num_packets_retried, i64),
+                ("num_packets_success", self.num_packets_success, i64),
+                ("num_batches_scheduled", self.num_batches_scheduled, i64),
+                ("num_batches_completed", self.num_batches_completed, i64),
             );
-            // *self = Self::default();
+            *self = Self::default();
         }
     }
 }
