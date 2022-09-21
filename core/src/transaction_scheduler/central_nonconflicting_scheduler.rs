@@ -17,7 +17,10 @@ use {
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     min_max_heap::MinMaxHeap,
     solana_measure::measure,
-    solana_runtime::{bank::Bank, bank_forks::BankForks},
+    solana_runtime::{
+        bank::Bank,
+        bank_forks::{BankForks, ReadOnlyAtomicSlot},
+    },
     solana_sdk::{
         feature_set::FeatureSet,
         hash::Hash,
@@ -32,13 +35,13 @@ use {
         collections::{BTreeSet, HashMap},
         fmt::Display,
         rc::Rc,
-        sync::{Arc, RwLock},
+        sync::{atomic::Ordering, Arc, RwLock},
         thread::{current, Builder},
         time::{Duration, Instant},
     },
 };
 
-const MAX_BATCH_SIZE: usize = 64;
+const MAX_BATCH_SIZE: usize = 128;
 
 #[derive(Debug)]
 /// A sanitized transaction with the packet priority
@@ -128,8 +131,8 @@ where
 
     /// Packets to be held after forwarding
     held_packets: Vec<TransactionRef>,
-    /// Bank forks to be used to create the forward filter
-    bank_forks: Arc<RwLock<BankForks>>,
+    /// Caching root bank
+    root_bank_cache: RootBankCache,
     /// Forward packet filter
     forward_filter: Option<ForwardPacketBatchesByAccounts>,
     /// Determines how the scheduler should handle packets currently.
@@ -239,7 +242,7 @@ where
             scheduled_packet_batch_sender,
             processed_packet_batch_receiver,
             held_packets: Vec::new(),
-            bank_forks,
+            root_bank_cache: RootBankCache::new(bank_forks),
             forward_filter: None,
             banking_decision_maker: banking_decision_maker,
             transaction_queue: TransactionQueue::with_capacity(capacity),
@@ -254,9 +257,7 @@ where
         const RECV_TIMEOUT: Duration = Duration::from_millis(10);
         loop {
             // Potentially receive packets
-            let bank = self.bank_forks.read().unwrap().working_bank();
-
-            let recv_result = self.receive_and_buffer_packets(RECV_TIMEOUT, &bank);
+            let recv_result = self.receive_and_buffer_packets(RECV_TIMEOUT);
             if matches!(recv_result, Err(RecvTimeoutError::Disconnected)) {
                 break;
             }
@@ -290,9 +291,21 @@ where
                 }
             });
             saturating_add_assign!(self.metrics.scheduling_time_us, scheduling_time.as_us());
+            self.metrics.max_blocked_packets = self
+                .metrics
+                .max_blocked_packets
+                .max(self.transaction_queue.num_blocked_packets);
 
             self.metrics.report(1000);
         }
+    }
+
+    /// Get the current root bank
+    /// Note: This is blocking, should be used only when necessary
+    fn get_current_bank(&mut self) -> Arc<Bank> {
+        let (bank, bank_lock_time) = measure!(self.root_bank_cache.get_root_bank());
+        saturating_add_assign!(self.metrics.bank_lock_time_us, bank_lock_time.as_us());
+        bank
     }
 
     /// Get the next batch of transactions to be processed by banking stage
@@ -310,7 +323,7 @@ where
             BankPacketProcessingDecision::Forward
             | BankPacketProcessingDecision::ForwardAndHold => {
                 // Take the forwarding filter (will replace at the end of the function)
-                let current_bank = self.bank_forks.read().unwrap().working_bank();
+                let current_bank = self.get_current_bank();
                 let mut forward_filter = match self.forward_filter.take() {
                     Some(mut forward_filter) => {
                         forward_filter.current_bank = current_bank;
@@ -389,15 +402,13 @@ where
 
         match decision {
             BankPacketProcessingDecision::Consume(_) | BankPacketProcessingDecision::Forward => {
-                let bank = self.bank_forks.read().unwrap().working_bank();
                 current_batch
                     .deserialized_packets
                     .iter()
                     .enumerate()
                     .for_each(|(index, packet)| {
                         let retry = (batch.retryable_packets & (1 << index)) != 0;
-                        self.transaction_queue
-                            .complete_or_retry(packet, retry, &bank)
+                        self.transaction_queue.complete_or_retry(packet, retry);
                     });
             }
             BankPacketProcessingDecision::ForwardAndHold => {
@@ -422,11 +433,7 @@ where
     }
 
     /// Receive and buffer packets from sigverify stage
-    fn receive_and_buffer_packets(
-        &mut self,
-        timeout: Duration,
-        bank: &Bank,
-    ) -> Result<(), RecvTimeoutError> {
+    fn receive_and_buffer_packets(&mut self, timeout: Duration) -> Result<(), RecvTimeoutError> {
         let (deserialized_packets, receive_packet_batches_time) = measure!(self
             .deserialized_packet_batch_getter
             .get_deserialized_packets(timeout, self.transaction_queue.remaining_capacity())?);
@@ -437,9 +444,10 @@ where
             receive_packet_batches_time.as_us()
         );
 
+        let bank = self.get_current_bank();
         let (_, insert_new_packets_time) = measure!({
             for packet in deserialized_packets {
-                self.insert_new_packet(packet, bank);
+                self.insert_new_packet(packet, &bank);
             }
         });
         saturating_add_assign!(
@@ -486,6 +494,8 @@ struct TransactionQueue {
     pending_transactions: MinMaxHeap<TransactionRef>,
     /// Transaction queues and locks by account key
     account_queues: HashMap<Pubkey, AccountTransactionQueue>,
+    /// Current number of blocked packets
+    num_blocked_packets: usize,
     /// Map from message hash to transactions blocked by by that transaction
     blocked_transactions: HashMap<Hash, Vec<TransactionRef>>,
     /// Map from message hash transaction and packet
@@ -498,6 +508,7 @@ impl TransactionQueue {
         Self {
             pending_transactions: MinMaxHeap::with_capacity(capacity),
             account_queues: HashMap::with_capacity(capacity.saturating_div(4)),
+            num_blocked_packets: 0,
             blocked_transactions: HashMap::new(),
             tracking_map: HashMap::with_capacity(capacity),
         }
@@ -543,6 +554,7 @@ impl TransactionQueue {
                 .entry(*blocking_transaction.message_hash())
                 .or_default()
                 .push(transaction.clone());
+            saturating_add_assign!(self.num_blocked_packets, 1);
             false
         } else {
             true
@@ -728,6 +740,7 @@ impl TransactionQueue {
     fn unblock_transaction(&mut self, transaction: &TransactionRef) {
         let message_hash = transaction.message_hash();
         if let Some(blocked_transactions) = self.blocked_transactions.remove(message_hash) {
+            self.num_blocked_packets = self.num_blocked_packets - blocked_transactions.len();
             for blocked_transaction in blocked_transactions {
                 self.insert_transaction_into_pending_queue(&blocked_transaction);
             }
@@ -756,12 +769,7 @@ impl TransactionQueue {
     }
 
     /// Mark a transaction as complete or retry
-    fn complete_or_retry(
-        &mut self,
-        packet: &ImmutableDeserializedPacket,
-        retry: bool,
-        bank: &Bank,
-    ) {
+    fn complete_or_retry(&mut self, packet: &ImmutableDeserializedPacket, retry: bool) {
         let message_hash = packet.message_hash();
         let (transaction, deserialized_packet) = self
             .tracking_map
@@ -985,12 +993,14 @@ struct SchedulerMetrics {
     num_packets_scheduled: usize,
     num_packets_retried: usize,
     num_packets_success: usize,
+    max_blocked_packets: usize,
 
     // Batch-wise metrics
     num_batches_scheduled: usize,
     num_batches_completed: usize,
 
     // Timing metrics
+    bank_lock_time_us: u64,
     receive_packet_batches_time_us: u64,
     insert_new_packets_time_us: u64,
     receive_completed_batch_time_us: u64,
@@ -1009,6 +1019,8 @@ impl SchedulerMetrics {
                 ("num_packets_success", self.num_packets_success, i64),
                 ("num_batches_scheduled", self.num_batches_scheduled, i64),
                 ("num_batches_completed", self.num_batches_completed, i64),
+                ("max_blocked_packets", self.max_blocked_packets, i64),
+                ("bank_lock_time_us", self.bank_lock_time_us, i64),
                 (
                     "recieve_packet_batches_time_us",
                     self.receive_packet_batches_time_us,
@@ -1033,5 +1045,38 @@ impl SchedulerMetrics {
             );
             *self = Self::default();
         }
+    }
+}
+
+/// Caches the root bank and provides an interface for getting the root bank from bank_forks
+/// but only locking if the root bank has been updated since the last time the root bank was
+/// fetched.
+pub struct RootBankCache {
+    bank_forks: Arc<RwLock<BankForks>>,
+    root_slot: ReadOnlyAtomicSlot,
+    root_bank: Arc<Bank>,
+}
+
+impl RootBankCache {
+    pub fn new(bank_forks: Arc<RwLock<BankForks>>) -> Self {
+        let (root_slot, root_bank) = {
+            let lock = bank_forks.read().unwrap();
+            (lock.get_atomic_root(), lock.root_bank().clone())
+        };
+        Self {
+            bank_forks,
+            root_slot,
+            root_bank,
+        }
+    }
+
+    pub fn get_root_bank(&mut self) -> Arc<Bank> {
+        let root_slot = self.root_slot.get();
+        if root_slot != self.root_bank.slot() {
+            let lock = self.bank_forks.read().unwrap();
+            let root_bank = lock.root_bank().clone();
+            self.root_bank = root_bank;
+        }
+        self.root_bank.clone()
     }
 }
