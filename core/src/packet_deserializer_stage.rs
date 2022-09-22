@@ -269,7 +269,7 @@ impl PacketDeserializerHandle {
                 Builder::new()
                     .name(format!("solPktDesr{id:02}"))
                     .spawn(move || {
-                        const RECV_TIMEOUT: Duration = Duration::from_millis(10);
+                        const RECV_TIMEOUT: Duration = Duration::from_millis(100);
                         const PACKET_BATCHES_SIZE_LIMIT: usize = 1024 * 1024;
                         loop {
                             match packet_deserializer
@@ -288,6 +288,7 @@ impl PacketDeserializerHandle {
                                 Err(RecvTimeoutError::Timeout) => {}          // do nothing
                             }
                         }
+                        error!("Deserialization thread exited");
                     })
                     .unwrap()
             })

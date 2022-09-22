@@ -80,7 +80,7 @@ use {
     solana_transaction_status::token_balances::TransactionTokenBalancesSet,
     std::{
         cmp,
-        collections::HashMap,
+        collections::{HashMap, VecDeque},
         env,
         net::{SocketAddr, UdpSocket},
         sync::{
@@ -1138,7 +1138,7 @@ impl BankingStage {
         qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         log_messages_bytes_limit: Option<usize>,
-    ) -> u128 {
+    ) -> Option<u128> {
         let bank_start = poh_recorder.read().unwrap().bank_start();
         if let Some(BankStart {
             working_bank,
@@ -1149,7 +1149,11 @@ impl BankingStage {
                 &bank_creation_time,
                 working_bank.ns_per_slot,
             ) {
-                return u128::MAX;
+                banking_stage_stats.rebuffered_packets_count.fetch_add(
+                    scheduled_packet_batch.deserialized_packets.len(),
+                    Ordering::Relaxed,
+                );
+                return None;
             }
 
             let process_transactions_summary = Self::process_packets_transactions(
@@ -1174,17 +1178,25 @@ impl BankingStage {
                 ..
             } = process_transactions_summary;
 
+            banking_stage_stats
+                .rebuffered_packets_count
+                .fetch_add(retryable_transaction_indexes.len(), Ordering::Relaxed);
+
             let mut retryable_packets = 0;
             for retryable_transaction_index in retryable_transaction_indexes {
                 // retryable_packets[retryable_transaction_index] = true;
                 retryable_packets |= (1 << retryable_transaction_index);
             }
 
-            retryable_packets
+            Some(retryable_packets)
         } else {
             // If we don't have a bank, we can't process the packets. Just mark them all as retryable
             // so they get put back into the scheduler.
-            u128::MAX
+            banking_stage_stats.rebuffered_packets_count.fetch_add(
+                scheduled_packet_batch.deserialized_packets.len(),
+                Ordering::Relaxed,
+            );
+            None
         }
     }
 
@@ -1201,7 +1213,7 @@ impl BankingStage {
         connection_cache: &ConnectionCache,
         banking_tracer_packet_stats: &mut IntervalBankingStageTracerPacketStats,
         bank_forks: &Arc<RwLock<BankForks>>,
-    ) -> u128 {
+    ) {
         match forward_option {
             ForwardOption::NotForward => {}
             _ => {
@@ -1220,8 +1232,6 @@ impl BankingStage {
                 );
             }
         }
-
-        0
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1256,24 +1266,27 @@ impl BankingStage {
                 slot_metrics_tracker,
                 log_messages_bytes_limit,
             ),
-            BankingProcessingInstruction::Forward => Self::forward_scheduled_packet_batch(
-                scheduled_packet_batch,
-                forward_option,
-                cluster_info,
-                poh_recorder,
-                socket,
-                data_budget,
-                slot_metrics_tracker,
-                banking_stage_stats,
-                connection_cache,
-                banking_tracer_packet_stats,
-                bank_forks,
-            ),
+            BankingProcessingInstruction::Forward => {
+                Self::forward_scheduled_packet_batch(
+                    scheduled_packet_batch,
+                    forward_option,
+                    cluster_info,
+                    poh_recorder,
+                    socket,
+                    data_budget,
+                    slot_metrics_tracker,
+                    banking_stage_stats,
+                    connection_cache,
+                    banking_tracer_packet_stats,
+                    bank_forks,
+                );
+                Some(0)
+            }
         };
 
         ProcessedPacketBatch {
             id: scheduled_packet_batch.id,
-            retryable_packets,
+            retryable_packets: retryable_packets.unwrap_or(u128::MAX),
         }
     }
 
@@ -1306,6 +1319,7 @@ impl BankingStage {
 
         const RECV_TIMEOUT: Duration = Duration::from_millis(10);
         loop {
+            // Check for new batches
             match transaction_scheduler_handle.get_next_transaction_batch(RECV_TIMEOUT) {
                 Ok(scheduled_packet_batch) => {
                     let processed_packet_batch = Self::process_scheduled_packet_batch(
@@ -1334,6 +1348,9 @@ impl BankingStage {
                     break;
                 }
             }
+
+            banking_stage_stats.report(1000);
+            banking_tracer_packet_stats.report(1000);
         }
     }
 

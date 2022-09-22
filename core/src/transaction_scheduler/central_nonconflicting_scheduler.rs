@@ -14,6 +14,7 @@ use {
         packet_deserializer_stage::DeserializedPacketBatchGetter,
         unprocessed_packet_batches::DeserializedPacket,
     },
+    core::panic,
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     min_max_heap::MinMaxHeap,
     solana_measure::measure,
@@ -216,6 +217,7 @@ where
                     capacity,
                 );
                 scheduler.run();
+                error!("Scheduler thread exited");
             })
             .unwrap();
 
@@ -469,7 +471,18 @@ where
                 "ignoring packet already in tracking map: {:?}",
                 packet.message_hash()
             );
-            panic!("packet already in tracking map");
+            {
+                error!(
+                    "pending: {:#?}",
+                    self.transaction_queue.pending_transactions
+                );
+                error!(
+                    "blocked: {:#?}",
+                    self.transaction_queue.blocked_transactions
+                );
+                panic!("shouldn't have duplicate packets right now");
+            }
+
             return;
         }
 
