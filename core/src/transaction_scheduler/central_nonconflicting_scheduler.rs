@@ -15,7 +15,7 @@ use {
         unprocessed_packet_batches::DeserializedPacket,
     },
     core::panic,
-    crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
+    crossbeam_channel::{Receiver, RecvTimeoutError, SendError, Sender},
     min_max_heap::MinMaxHeap,
     solana_measure::measure,
     solana_runtime::{
@@ -284,8 +284,14 @@ where
             );
 
             // Get the next transaction batches
+            let (decision, decision_making_time) =
+                measure!(self.banking_decision_maker.make_decision());
+            saturating_add_assign!(
+                self.metrics.decision_making_time_us,
+                decision_making_time.as_us()
+            );
             let (_, scheduling_time) = measure!({
-                while let Some(batch) = self.get_next_transaction_batch() {
+                while let Some(batch) = self.get_next_transaction_batch(decision) {
                     let send_result = self.scheduled_packet_batch_sender.send(batch);
                     if send_result.is_err() {
                         return;
@@ -311,8 +317,10 @@ where
     }
 
     /// Get the next batch of transactions to be processed by banking stage
-    fn get_next_transaction_batch(&mut self) -> Option<Arc<ScheduledPacketBatch>> {
-        let decision = self.banking_decision_maker.make_decision();
+    fn get_next_transaction_batch(
+        &mut self,
+        decision: BankPacketProcessingDecision,
+    ) -> Option<Arc<ScheduledPacketBatch>> {
         match decision {
             BankPacketProcessingDecision::Consume(_) => {
                 self.forward_filter = None;
@@ -1018,6 +1026,7 @@ struct SchedulerMetrics {
     insert_new_packets_time_us: u64,
     receive_completed_batch_time_us: u64,
     complete_batches_time_us: u64,
+    decision_making_time_us: u64,
     scheduling_time_us: u64,
 }
 
@@ -1054,6 +1063,7 @@ impl SchedulerMetrics {
                     self.complete_batches_time_us,
                     i64
                 ),
+                ("decision_making_time_us", self.decision_making_time_us, i64),
                 ("scheduling_time_us", self.scheduling_time_us, i64),
             );
             *self = Self::default();

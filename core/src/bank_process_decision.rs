@@ -20,7 +20,7 @@ pub struct BankingDecisionMaker {
     my_pubkey: Pubkey,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum BankPacketProcessingDecision {
     /// Active bank - can immediately process packets. Maximum number of nanoseconds to process for.
     Consume(u128),
