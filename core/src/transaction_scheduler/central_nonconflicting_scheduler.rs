@@ -475,21 +475,21 @@ where
             .tracking_map
             .contains_key(packet.message_hash())
         {
-            error!(
-                "ignoring packet already in tracking map: {:?}",
-                packet.message_hash()
-            );
-            {
-                error!(
-                    "pending: {:#?}",
-                    self.transaction_queue.pending_transactions
-                );
-                error!(
-                    "blocked: {:#?}",
-                    self.transaction_queue.blocked_transactions
-                );
-                panic!("shouldn't have duplicate packets right now");
-            }
+            // error!(
+            //     "ignoring packet already in tracking map: {:?}",
+            //     packet.message_hash()
+            // );
+            // {
+            //     error!(
+            //         "pending: {:#?}",
+            //         self.transaction_queue.pending_transactions
+            //     );
+            //     error!(
+            //         "blocked: {:#?}",
+            //         self.transaction_queue.blocked_transactions
+            //     );
+            //     panic!("shouldn't have duplicate packets right now");
+            // }
 
             return;
         }
