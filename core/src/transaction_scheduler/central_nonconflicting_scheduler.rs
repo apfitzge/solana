@@ -710,27 +710,31 @@ impl TransactionQueue {
             self.pending_transactions.push(transaction.clone());
         } else {
             let dropped_packet = self.pending_transactions.push_pop_min(transaction.clone());
-            error!("dropping packet: {:?}", dropped_packet.message_hash());
-            self.remove_transaction(&dropped_packet);
+            // error!("dropping packet: {:?}", dropped_packet.message_hash());
+            self.remove_transaction(&dropped_packet, false);
         }
     }
 
     /// Remove a transaction from the queue(s) and maps
     ///     - This will happen if a transaction is completed or dropped
     ///     - The transaction should already be removed from the pending queue
-    fn remove_transaction(&mut self, transaction: &TransactionRef) {
+    fn remove_transaction(&mut self, transaction: &TransactionRef, is_scheduled: bool) {
         let message_hash = transaction.message_hash();
         let packet = self
             .tracking_map
             .remove(message_hash)
             .expect("Transaction should exist in tracking map");
 
-        self.remove_transaction_from_account_queues(&transaction);
+        self.remove_transaction_from_account_queues(&transaction, is_scheduled);
         self.unblock_transaction(&transaction);
     }
 
     /// Remove a transaction from account queues
-    fn remove_transaction_from_account_queues(&mut self, transaction: &TransactionRef) {
+    fn remove_transaction_from_account_queues(
+        &mut self,
+        transaction: &TransactionRef,
+        is_scheduled: bool,
+    ) {
         // We got account locks with checks when the transaction was initially inserted. No need to rerun checks.
         let account_locks = transaction.transaction.get_account_locks_unchecked();
 
@@ -739,7 +743,7 @@ impl TransactionQueue {
                 .account_queues
                 .get_mut(account)
                 .expect("account should exist in account queues")
-                .remove_transaction(transaction, false)
+                .remove_transaction(transaction, false, is_scheduled)
             {
                 self.account_queues.remove(account);
             }
@@ -750,7 +754,7 @@ impl TransactionQueue {
                 .account_queues
                 .get_mut(account)
                 .expect("account should exist in account queues")
-                .remove_transaction(transaction, true)
+                .remove_transaction(transaction, true, is_scheduled)
             {
                 self.account_queues.remove(account);
             }
@@ -803,7 +807,7 @@ impl TransactionQueue {
             self.unblock_transaction(&transaction);
             self.insert_transaction_into_pending_queue(&transaction);
         } else {
-            self.remove_transaction(&transaction);
+            self.remove_transaction(&transaction, true);
         }
     }
 
@@ -861,7 +865,12 @@ impl AccountTransactionQueue {
     /// Remove transaction from the queue whether on completion or being dropped.
     ///
     /// Returns true if there are no remaining transactions in this account's queue.
-    fn remove_transaction(&mut self, transaction: &TransactionRef, is_write: bool) -> bool {
+    fn remove_transaction(
+        &mut self,
+        transaction: &TransactionRef,
+        is_write: bool,
+        is_scheduled: bool,
+    ) -> bool {
         // Remove from appropriate tree
         if is_write {
             assert!(self.writes.remove(transaction));
@@ -870,8 +879,10 @@ impl AccountTransactionQueue {
         }
 
         // Unlock
-        self.scheduled_lock
-            .unlock_on_transaction(transaction, is_write);
+        if is_scheduled {
+            self.scheduled_lock
+                .unlock_on_transaction(transaction, is_write);
+        }
 
         // No remaining locks, nothing in the trees
         !self.scheduled_lock.write_locked()
