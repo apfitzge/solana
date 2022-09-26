@@ -291,10 +291,18 @@ where
                 decision_making_time.as_us()
             );
             let (_, scheduling_time) = measure!({
-                while let Some(batch) = self.get_next_transaction_batch(decision) {
+                const SCHEDULE_BATCHES_TIMEOUT: Duration = Duration::from_millis(10);
+                let start = Instant::now();
+
+                while let Some(batch) =
+                    self.get_next_transaction_batch(decision, &start, &SCHEDULE_BATCHES_TIMEOUT)
+                {
                     let send_result = self.scheduled_packet_batch_sender.send(batch);
                     if send_result.is_err() {
                         return;
+                    }
+                    if start.elapsed() >= SCHEDULE_BATCHES_TIMEOUT {
+                        break;
                     }
                 }
             });
@@ -320,12 +328,14 @@ where
     fn get_next_transaction_batch(
         &mut self,
         decision: BankPacketProcessingDecision,
+        start: &Instant,
+        timeout: &Duration,
     ) -> Option<Arc<ScheduledPacketBatch>> {
         match decision {
             BankPacketProcessingDecision::Consume(_) => {
                 self.forward_filter = None;
                 self.move_held_packets();
-                let deserialized_packets = self.transaction_queue.get_consume_batch();
+                let deserialized_packets = self.transaction_queue.get_consume_batch(start, timeout);
                 deserialized_packets.map(|deserialized_packets| {
                     self.create_scheduled_batch(deserialized_packets, decision)
                 })
@@ -536,7 +546,11 @@ impl TransactionQueue {
     }
 
     /// Get a batch of transactions to be consumed by banking stage
-    fn get_consume_batch(&mut self) -> Option<Vec<Arc<ImmutableDeserializedPacket>>> {
+    fn get_consume_batch(
+        &mut self,
+        start: &Instant,
+        timeout: &Duration,
+    ) -> Option<Vec<Arc<ImmutableDeserializedPacket>>> {
         let mut batch = Vec::with_capacity(MAX_BATCH_SIZE);
         while let Some(transaction) = self.pending_transactions.pop_max() {
             if self.can_schedule_transaction(&transaction) {
@@ -544,6 +558,9 @@ impl TransactionQueue {
                 if batch.len() == MAX_BATCH_SIZE {
                     break;
                 }
+            }
+            if start.elapsed() > *timeout {
+                break;
             }
         }
 
