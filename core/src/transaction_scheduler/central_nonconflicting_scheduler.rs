@@ -163,6 +163,19 @@ struct TransactionBatchesTracker {
 }
 
 impl TransactionBatchesTracker {
+    pub fn new(num_execution_threads: usize) -> Self {
+        Self {
+            building_batches: (0..num_execution_threads)
+                .into_iter()
+                .map(|execution_thread_index| TransactionBatchBuilder::new(execution_thread_index))
+                .collect(),
+            execution_thread_stats: (0..num_execution_threads)
+                .into_iter()
+                .map(|execution_thread_index| ExecutionThreadStats::new())
+                .collect(),
+        }
+    }
+
     /// Checks if there are any batches currently being built by the scheduler
     pub fn has_batch_being_built(&self) -> bool {
         !self.building_batches.is_empty()
@@ -188,7 +201,7 @@ impl TransactionBatchesTracker {
             if self.execution_thread_stats[excution_thread_index]
                 .queued_batches
                 .len()
-                > MAX_QUEUED_BATCHES - 1
+                < MAX_QUEUED_BATCHES - 1
             {
                 self.execution_thread_stats[excution_thread_index].has_batch_being_built = true;
                 self.building_batches
@@ -273,7 +286,7 @@ where
         CentralNonConflictingSchedulerThreadHandle,
     ) {
         let (processed_packet_batch_sender, processed_packet_batch_receiver) =
-            crossbeam_channel::bounded(MAX_QUEUED_BATCHES);
+            crossbeam_channel::bounded(num_execution_threads * MAX_QUEUED_BATCHES);
 
         let (scheduled_packet_batch_senders, scheduled_packet_batch_receivers) =
             Self::create_channels(num_execution_threads);
@@ -343,21 +356,14 @@ where
             current_batches: HashMap::new(),
             batch_id_generator: ScheduledPacketBatchIdGenerator::default(),
             metrics: SchedulerMetrics::default(),
-            building_batches_tracker: TransactionBatchesTracker {
-                building_batches: (0..num_execution_threads)
-                    .into_iter()
-                    .map(|execution_thread_index| {
-                        TransactionBatchBuilder::new(execution_thread_index)
-                    })
-                    .collect(),
-                execution_thread_stats: vec![ExecutionThreadStats::new(); num_execution_threads],
-            },
+            building_batches_tracker: TransactionBatchesTracker::new(num_execution_threads),
         }
     }
 
     /// Run the scheduler loop
     fn run(&mut self) {
         const RECV_TIMEOUT: Duration = Duration::from_millis(10);
+        let mut prev_decision = self.banking_decision_maker.make_decision();
         loop {
             // Potentially receive packets
             let recv_result = self.receive_and_buffer_packets(RECV_TIMEOUT);
@@ -391,6 +397,12 @@ where
                 self.metrics.decision_making_time_us,
                 decision_making_time.as_us()
             );
+
+            if decision != prev_decision {
+                self.clear_partially_built_batches(&prev_decision);
+            }
+            prev_decision = decision;
+
             let (_, scheduling_time) = measure!({
                 const SCHEDULE_BATCHES_TIMEOUT: Duration = Duration::from_millis(10);
                 let start = Instant::now();
@@ -421,12 +433,65 @@ where
         start: &Instant,
         timeout: &Duration,
     ) {
+        if self.transaction_queue.pending_transactions.is_empty() {
+            return;
+        }
+
         while self.do_scheduling_iter(decision) && start.elapsed() < *timeout {}
+
+        // if we're out of packets, just send out what we've built
+        if self.transaction_queue.pending_transactions.is_empty() {
+            self.send_building_batches(decision);
+        }
+    }
+
+    /// Send out all batches that are currently being built
+    fn send_building_batches(&mut self, decision: BankPacketProcessingDecision) {
+        let builders: Vec<_> = self
+            .building_batches_tracker
+            .building_batches
+            .drain()
+            .collect();
+
+        for builder in builders {
+            let new_builder = if !builder.deserialized_packets.is_empty() {
+                // build and send out the batch
+                let execution_thread_index = builder.execution_thread_index;
+                self.send_batch(builder, decision);
+
+                if self.building_batches_tracker.execution_thread_stats[execution_thread_index]
+                    .queued_batches
+                    .len()
+                    < MAX_QUEUED_BATCHES
+                {
+                    Some(TransactionBatchBuilder::new(execution_thread_index))
+                } else {
+                    self.building_batches_tracker.execution_thread_stats[execution_thread_index]
+                        .has_batch_being_built = false;
+                    None
+                }
+            } else {
+                Some(builder)
+            };
+            if let Some(new_builder) = new_builder {
+                self.building_batches_tracker
+                    .building_batches
+                    .push(new_builder);
+            }
+        }
     }
 
     /// Return true if there is more scheduling to do
     fn do_scheduling_iter(&mut self, decision: BankPacketProcessingDecision) -> bool {
         if !self.building_batches_tracker.has_batch_being_built() {
+            self.building_batches_tracker
+                .execution_thread_stats
+                .iter()
+                .for_each(|stats| assert_eq!(stats.queued_batches.len(), MAX_QUEUED_BATCHES));
+
+            return false;
+        }
+        if self.transaction_queue.pending_transactions.is_empty() {
             return false;
         }
 
@@ -452,9 +517,12 @@ where
                 self.transaction_queue.try_get_next_consume_packet()
             }
             BankPacketProcessingDecision::Forward
-            | BankPacketProcessingDecision::ForwardAndHold => {
-                self.transaction_queue.try_get_next_forward_packet()
-            }
+            | BankPacketProcessingDecision::ForwardAndHold => match self.forward_filter {
+                Some(ref mut forward_filter) => self
+                    .transaction_queue
+                    .try_get_next_forward_packet(forward_filter),
+                None => unreachable!(),
+            },
             BankPacketProcessingDecision::Hold => None, // do nothing
         }
     }
@@ -474,6 +542,13 @@ where
         let batch = Arc::new(batch_builder.build(id, decision.into()));
         self.current_batches.insert(id, (batch.clone(), decision));
 
+        saturating_add_assign!(
+            self.metrics.num_packets_scheduled,
+            batch.deserialized_packets.len()
+        );
+        saturating_add_assign!(self.metrics.num_batches_scheduled, 1);
+
+        assert!(!self.scheduled_packet_batch_senders[batch.execution_thread_index].is_full());
         self.scheduled_packet_batch_senders[batch.execution_thread_index]
             .send(batch)
             .unwrap();
@@ -484,6 +559,37 @@ where
         for transaction in self.held_packets.drain(..) {
             self.transaction_queue
                 .insert_transaction_into_pending_queue(&transaction);
+        }
+    }
+
+    /// Clear building batches because the banking decision changed before they were sent out
+    fn clear_partially_built_batches(&mut self, decision: &BankPacketProcessingDecision) {
+        let should_unlock = matches!(decision, BankPacketProcessingDecision::Consume(_));
+
+        let builders: Vec<_> = self
+            .building_batches_tracker
+            .building_batches
+            .drain()
+            .collect();
+
+        for mut builder in builders {
+            for packet in builder.deserialized_packets.drain(..) {
+                let transaction = self
+                    .transaction_queue
+                    .tracking_map
+                    .get(packet.message_hash())
+                    .unwrap()
+                    .0
+                    .clone();
+                if should_unlock {
+                    self.transaction_queue
+                        .remove_account_locks_transaction(&transaction);
+                }
+                self.transaction_queue.unblock_transaction(&transaction);
+                self.transaction_queue
+                    .insert_transaction_into_pending_queue(&transaction);
+            }
+            self.building_batches_tracker.building_batches.push(builder);
         }
     }
 
@@ -639,14 +745,26 @@ impl TransactionQueue {
             }
         }
 
+        panic!(
+            "got nothing to consume - this should only happen if we have a bunch of blocked stuff"
+        );
         None
     }
 
     /// Get the next packet for forwarding
-    fn try_get_next_forward_packet(&mut self) -> Option<Arc<ImmutableDeserializedPacket>> {
-        self.pending_transactions
+    fn try_get_next_forward_packet(
+        &mut self,
+        forward_filter: &mut ForwardPacketBatchesByAccounts,
+    ) -> Option<Arc<ImmutableDeserializedPacket>> {
+        let next_packet = self
+            .pending_transactions
             .pop_max()
-            .map(|t| self.get_immutable_section(&t))
+            .map(|t| self.get_immutable_section(&t))?;
+        if forward_filter.add_packet(next_packet.clone()) {
+            Some(next_packet)
+        } else {
+            todo!("dropping packet on forward filter")
+        }
     }
 
     /// Get immutable section from the wrapped sanitized transaction priorty
@@ -703,16 +821,16 @@ impl TransactionQueue {
 
     /// Check if a transaction can be scheduled. If it cannot, add it to the blocked transactions
     fn can_schedule_transaction(&mut self, transaction: &TransactionRef) -> bool {
-        let maybe_blocking_transaction = self.get_lowest_priority_blocking_transaction(transaction);
-        if let Some(blocking_transaction) = maybe_blocking_transaction {
-            self.blocked_transactions
-                .entry(*blocking_transaction.message_hash())
-                .or_default()
-                .push(transaction.clone());
-            saturating_add_assign!(self.num_blocked_packets, 1);
-            false
-        } else {
-            true
+        match self.get_lowest_priority_blocking_transaction(transaction) {
+            Some(blocking_transaction) => {
+                self.blocked_transactions
+                    .entry(*blocking_transaction.message_hash())
+                    .or_default()
+                    .push(transaction.clone());
+                saturating_add_assign!(self.num_blocked_packets, 1);
+                false
+            }
+            None => true,
         }
     }
 
@@ -843,6 +961,7 @@ impl TransactionQueue {
         if self.remaining_capacity() > 0 {
             self.pending_transactions.push(transaction.clone());
         } else {
+            panic!("dropped a packet");
             let dropped_packet = self.pending_transactions.push_pop_min(transaction.clone());
             // error!("dropping packet: {:?}", dropped_packet.message_hash());
             self.remove_transaction(&dropped_packet, false);
@@ -1084,42 +1203,21 @@ impl AccountLock {
     fn read_locked(&self) -> bool {
         self.read.count > 0
     }
-
-    fn get_lowest_priority_transaction(&self, is_write: bool) -> Option<&TransactionRef> {
-        let inner = if is_write { &self.write } else { &self.read };
-        inner.lowest_priority_transaction.as_ref()
-    }
 }
 
 #[derive(Debug, Default)]
 struct AccountLockInner {
     count: usize,
-    lowest_priority_transaction: Option<TransactionRef>,
 }
 
 impl AccountLockInner {
     fn lock_for_transaction(&mut self, transaction: &TransactionRef) {
         self.count += 1;
-
-        match self.lowest_priority_transaction.as_ref() {
-            Some(tx) => {
-                if transaction.cmp(tx).is_lt() {
-                    self.lowest_priority_transaction = Some(transaction.clone());
-                }
-            }
-            None => self.lowest_priority_transaction = Some(transaction.clone()),
-        }
     }
 
     fn unlock_for_transaction(&mut self, transaction: &TransactionRef) {
         assert!(self.count > 0);
         self.count -= 1;
-
-        // This works because we are scheduling by priority order.
-        // So the lowest priority transaction scheduled is guaranteed to finish last
-        if self.count == 0 {
-            self.lowest_priority_transaction = None;
-        }
     }
 }
 
@@ -1207,7 +1305,7 @@ impl Ord for TransactionBatchBuilder {
             .cmp(&self.compute_units)
             .then_with(|| {
                 // sort by time so that older batches are "larger"
-                self.start_time.cmp(&other.start_time)
+                other.start_time.cmp(&self.start_time)
             })
             .then_with(|| {
                 // smaller threads first
@@ -1340,3 +1438,85 @@ impl RootBankCache {
         self.root_bank.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::TransactionBatchBuilder,
+        std::time::{Duration, Instant},
+    };
+
+    #[test]
+    fn transaction_batch_builder_ordering_by_compute_units() {
+        let now = Instant::now();
+
+        let b1 = TransactionBatchBuilder {
+            start_time: now,
+            deserialized_packets: vec![],
+            compute_units: 0,
+            execution_thread_index: 0,
+        };
+        let b2 = TransactionBatchBuilder {
+            start_time: now,
+            deserialized_packets: vec![],
+            compute_units: 1,
+            execution_thread_index: 0,
+        };
+        assert!(b1 > b2); // fewer compute units -> higher priority in the binary heap
+    }
+
+    #[test]
+    fn transaction_batch_builder_ordering_by_age() {
+        let now = Instant::now();
+
+        let b1 = TransactionBatchBuilder {
+            start_time: now,
+            deserialized_packets: vec![],
+            compute_units: 0,
+            execution_thread_index: 0,
+        };
+        let b2 = TransactionBatchBuilder {
+            start_time: now + Duration::from_millis(5),
+            deserialized_packets: vec![],
+            compute_units: 0,
+            execution_thread_index: 0,
+        };
+        assert!(b1 > b2); // older batch is prioritized
+    }
+
+    #[test]
+    fn transaction_batch_builder_ordering_by_thread_index() {
+        let now = Instant::now();
+
+        let b1 = TransactionBatchBuilder {
+            start_time: now,
+            deserialized_packets: vec![],
+            compute_units: 0,
+            execution_thread_index: 0,
+        };
+        let b2 = TransactionBatchBuilder {
+            start_time: now,
+            deserialized_packets: vec![],
+            compute_units: 0,
+            execution_thread_index: 1,
+        };
+        assert!(b1 > b2); // smaller thread index is prioritized
+    }
+}
+
+// fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+//     // sort by queued compute-units first - sort so smaller batches are "larger"
+//     other
+//         .compute_units
+//         .cmp(&self.compute_units)
+//         .then_with(|| {
+//             // sort by time so that older batches are "larger"
+//             self.start_time.cmp(&other.start_time)
+//         })
+//         .then_with(|| {
+//             // smaller threads first
+//             other
+//                 .execution_thread_index
+//                 .cmp(&self.execution_thread_index)
+//         })
+// }
