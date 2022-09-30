@@ -88,6 +88,7 @@ where
                         id: self.batch_id_generator.generate_id(),
                         processing_instruction: decision.clone().into(),
                         deserialized_packets,
+                        execution_thread_index: 0,
                     }),
                     decision,
                 ));
@@ -137,6 +138,7 @@ where
                         id: self.batch_id_generator.generate_id(),
                         processing_instruction: decision.clone().into(),
                         deserialized_packets: forwardable_packets,
+                        execution_thread_index: 0,
                     }),
                     decision,
                 ));

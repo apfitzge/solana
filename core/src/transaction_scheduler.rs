@@ -36,6 +36,8 @@ pub struct ScheduledPacketBatch {
     pub processing_instruction: BankingProcessingInstruction,
     /// Deserialized packets to process.
     pub deserialized_packets: Vec<Arc<ImmutableDeserializedPacket>>,
+    /// Execution thread index (may not be used by all scheduler types)
+    pub execution_thread_index: usize,
 }
 
 /// Message: [BankingStage -> Scheduler]

@@ -500,32 +500,37 @@ impl BankingStage {
             bank_forks.clone(),
         ));
 
-        let (scheduler_banking_handle, scheduler_thread_handle) =
+        let (scheduler_banking_handles, scheduler_thread_handle) =
             CentralNonConflictingScheduler::spawn(
+                (num_threads - NUM_VOTE_PROCESSING_THREADS) as usize,
                 PacketDeserializerHandle::new(verified_receiver, 3, num_threads - 2),
                 bank_forks.clone(),
                 banking_decision_maker.clone(),
                 TOTAL_BUFFERED_PACKETS,
             );
 
-        bank_thread_hdls.extend((2..num_threads).map(|id| {
-            Self::spawn_banking_stage_thread(
-                id,
-                ForwardOption::ForwardTransaction,
-                scheduler_banking_handle.clone(),
-                banking_decision_maker.clone(),
-                cluster_info.clone(),
-                poh_recorder.clone(),
-                batch_limit,
-                transaction_status_sender.clone(),
-                gossip_vote_sender.clone(),
-                data_budget.clone(),
-                cost_model.clone(),
-                log_messages_bytes_limit,
-                connection_cache.clone(),
-                bank_forks.clone(),
-            )
-        }));
+        bank_thread_hdls.extend(
+            (2..num_threads)
+                .zip(scheduler_banking_handles.into_iter())
+                .map(|(id, scheduler_banking_handle)| {
+                    Self::spawn_banking_stage_thread(
+                        id,
+                        ForwardOption::ForwardTransaction,
+                        scheduler_banking_handle,
+                        banking_decision_maker.clone(),
+                        cluster_info.clone(),
+                        poh_recorder.clone(),
+                        batch_limit,
+                        transaction_status_sender.clone(),
+                        gossip_vote_sender.clone(),
+                        data_budget.clone(),
+                        cost_model.clone(),
+                        log_messages_bytes_limit,
+                        connection_cache.clone(),
+                        bank_forks.clone(),
+                    )
+                }),
+        );
 
         Self {
             bank_thread_hdls,

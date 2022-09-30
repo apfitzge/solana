@@ -1,11 +1,12 @@
 //! Implements a transaction scheduler that queues up non-conflicting batches of transactions
 //! for banking threads to process. Design based on: https://github.com/solana-labs/solana/pull/26362
+//! Additionally, adding the thread-aware batch building from https://github.com/solana-labs/solana/pull/26924
 //!
 
 use {
     super::{
-        ProcessedPacketBatch, ScheduledPacketBatch, ScheduledPacketBatchId,
-        ScheduledPacketBatchIdGenerator, TransactionSchedulerBankingHandle,
+        BankingProcessingInstruction, ProcessedPacketBatch, ScheduledPacketBatch,
+        ScheduledPacketBatchId, ScheduledPacketBatchIdGenerator, TransactionSchedulerBankingHandle,
     },
     crate::{
         bank_process_decision::{BankPacketProcessingDecision, BankingDecisionMaker},
@@ -33,7 +34,8 @@ use {
         },
     },
     std::{
-        collections::{BTreeSet, HashMap},
+        cell::RefCell,
+        collections::{BTreeSet, BinaryHeap, HashMap, VecDeque},
         fmt::Display,
         rc::Rc,
         sync::{atomic::Ordering, Arc, RwLock},
@@ -43,6 +45,8 @@ use {
 };
 
 const MAX_BATCH_SIZE: usize = 128;
+const MAX_QUEUED_BATCHES: usize = 4; // re-evaluate this number
+const MAX_BATCH_AGE: Duration = Duration::from_millis(25);
 
 #[derive(Debug)]
 /// A sanitized transaction with the packet priority
@@ -124,8 +128,8 @@ where
 {
     /// Interface for getting deserialized packets from sigverify stage
     deserialized_packet_batch_getter: D,
-    /// Sender for sending batches of transactions to banking stage
-    scheduled_packet_batch_sender: Sender<Arc<ScheduledPacketBatch>>,
+    /// Senders for sending batches of transactions to banking stage threads - indexed by thread index
+    scheduled_packet_batch_senders: Vec<Sender<Arc<ScheduledPacketBatch>>>,
     /// Receiver for getting batches of transactions that have been processed by banking stage
     /// and potentially need to be retried.
     processed_packet_batch_receiver: Receiver<ProcessedPacketBatch>,
@@ -144,9 +148,76 @@ where
     /// Scheduled batch currently being processed.
     current_batches:
         HashMap<ScheduledPacketBatchId, (Arc<ScheduledPacketBatch>, BankPacketProcessingDecision)>,
+    building_batches_tracker: TransactionBatchesTracker,
     /// Generator for unique batch identifiers.
     batch_id_generator: ScheduledPacketBatchIdGenerator,
     metrics: SchedulerMetrics,
+}
+
+struct TransactionBatchesTracker {
+    /// Batches that are currently being built, indexed by execution thread index
+    building_batches: BinaryHeap<TransactionBatchBuilder>,
+    /// Stats on the currently pending batches and queued transactions
+    /// for each execution thread.
+    execution_thread_stats: Vec<ExecutionThreadStats>,
+}
+
+impl TransactionBatchesTracker {
+    /// Checks if there are any batches currently being built by the scheduler
+    pub fn has_batch_being_built(&self) -> bool {
+        !self.building_batches.is_empty()
+    }
+
+    /// Adds a packet to the batch with lowest queued CU. Returns batch builder if it should be sent for execution
+    pub fn add_deserialized_packet(
+        &mut self,
+        deserialized_packet: Arc<ImmutableDeserializedPacket>,
+    ) -> Option<TransactionBatchBuilder> {
+        assert!(self.has_batch_being_built());
+        let mut builder = self.building_batches.pop().unwrap();
+        builder.add_deserialized_packet(deserialized_packet);
+
+        // If the batch should be sent, we will return it
+        if builder.deserialized_packets.len() == MAX_BATCH_SIZE
+            || builder.start_time.elapsed() > MAX_BATCH_AGE
+        {
+            let excution_thread_index = builder.execution_thread_index;
+            self.execution_thread_stats[excution_thread_index].has_batch_being_built = false;
+
+            // If we have room for another batch, add a new builder
+            if self.execution_thread_stats[excution_thread_index]
+                .queued_batches
+                .len()
+                > MAX_QUEUED_BATCHES - 1
+            {
+                self.execution_thread_stats[excution_thread_index].has_batch_being_built = true;
+                self.building_batches
+                    .push(TransactionBatchBuilder::new(builder.execution_thread_index));
+            }
+            Some(builder)
+        } else {
+            // if we aren't sending it, push it back in
+            self.building_batches.push(builder);
+            None
+        }
+    }
+
+    /// Updates tracking and stats for a completed batch
+    pub fn complete_batch(&mut self, batch: &ScheduledPacketBatch) {
+        let id = batch.id;
+        let execution_thread_index = batch.execution_thread_index;
+
+        let stats = &mut self.execution_thread_stats[execution_thread_index];
+        assert_eq!(id, stats.queued_batches.pop_front().unwrap()); // check processed in correct order
+
+        // if we aren't currently building a batch for this thread, we can start to build another
+        // now that we have the capacity for it
+        if !stats.has_batch_being_built {
+            stats.has_batch_being_built = true;
+            self.building_batches
+                .push(TransactionBatchBuilder::new(execution_thread_index))
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -192,25 +263,27 @@ where
 {
     /// Spawn a scheduler thread and return a handle to it
     pub fn spawn(
+        num_execution_threads: usize,
         deserialized_packet_batch_getter: D,
         bank_forks: Arc<RwLock<BankForks>>,
         banking_decision_maker: Arc<BankingDecisionMaker>,
         capacity: usize,
     ) -> (
-        CentralNonConflictingSchedulerBankingHandle,
+        Vec<CentralNonConflictingSchedulerBankingHandle>,
         CentralNonConflictingSchedulerThreadHandle,
     ) {
-        let (scheduled_packet_batch_sender, scheduled_packet_batch_receiver) =
-            crossbeam_channel::unbounded();
         let (processed_packet_batch_sender, processed_packet_batch_receiver) =
-            crossbeam_channel::unbounded();
+            crossbeam_channel::bounded(MAX_QUEUED_BATCHES);
+
+        let (scheduled_packet_batch_senders, scheduled_packet_batch_receivers) =
+            Self::create_channels(num_execution_threads);
 
         let scheduler_thread = Builder::new()
             .name("solCtrlSchd".to_string())
             .spawn(move || {
                 let mut scheduler = Self::new(
                     deserialized_packet_batch_getter,
-                    scheduled_packet_batch_sender,
+                    scheduled_packet_batch_senders,
                     processed_packet_batch_receiver,
                     bank_forks,
                     banking_decision_maker,
@@ -222,26 +295,45 @@ where
             .unwrap();
 
         (
-            CentralNonConflictingSchedulerBankingHandle {
-                scheduled_packet_batch_receiver,
-                processed_packet_batch_sender,
-            },
+            scheduled_packet_batch_receivers
+                .into_iter()
+                .map(|scheduled_packet_batch_receiver| {
+                    CentralNonConflictingSchedulerBankingHandle {
+                        scheduled_packet_batch_receiver,
+                        processed_packet_batch_sender: processed_packet_batch_sender.clone(),
+                    }
+                })
+                .collect(),
             CentralNonConflictingSchedulerThreadHandle { scheduler_thread },
         )
+    }
+
+    /// Create vec of crossbeam channels separated into senders and receivers
+    fn create_channels<T>(num_execution_threads: usize) -> (Vec<Sender<T>>, Vec<Receiver<T>>) {
+        let mut senders = Vec::with_capacity(num_execution_threads);
+        let mut receivers = Vec::with_capacity(num_execution_threads);
+        for _ in 0..num_execution_threads {
+            let (sender, receiver) = crossbeam_channel::bounded(MAX_QUEUED_BATCHES);
+            senders.push(sender);
+            receivers.push(receiver);
+        }
+        (senders, receivers)
     }
 
     /// Create a new scheduler
     fn new(
         deserialized_packet_batch_getter: D,
-        scheduled_packet_batch_sender: Sender<Arc<ScheduledPacketBatch>>,
+        scheduled_packet_batch_senders: Vec<Sender<Arc<ScheduledPacketBatch>>>,
         processed_packet_batch_receiver: Receiver<ProcessedPacketBatch>,
         bank_forks: Arc<RwLock<BankForks>>,
         banking_decision_maker: Arc<BankingDecisionMaker>,
         capacity: usize,
     ) -> Self {
+        let num_execution_threads = scheduled_packet_batch_senders.len();
+
         Self {
             deserialized_packet_batch_getter,
-            scheduled_packet_batch_sender,
+            scheduled_packet_batch_senders,
             processed_packet_batch_receiver,
             held_packets: Vec::new(),
             root_bank_cache: RootBankCache::new(bank_forks),
@@ -251,6 +343,15 @@ where
             current_batches: HashMap::new(),
             batch_id_generator: ScheduledPacketBatchIdGenerator::default(),
             metrics: SchedulerMetrics::default(),
+            building_batches_tracker: TransactionBatchesTracker {
+                building_batches: (0..num_execution_threads)
+                    .into_iter()
+                    .map(|execution_thread_index| {
+                        TransactionBatchBuilder::new(execution_thread_index)
+                    })
+                    .collect(),
+                execution_thread_stats: vec![ExecutionThreadStats::new(); num_execution_threads],
+            },
         }
     }
 
@@ -293,18 +394,7 @@ where
             let (_, scheduling_time) = measure!({
                 const SCHEDULE_BATCHES_TIMEOUT: Duration = Duration::from_millis(10);
                 let start = Instant::now();
-
-                while let Some(batch) =
-                    self.get_next_transaction_batch(decision, &start, &SCHEDULE_BATCHES_TIMEOUT)
-                {
-                    let send_result = self.scheduled_packet_batch_sender.send(batch);
-                    if send_result.is_err() {
-                        return;
-                    }
-                    if start.elapsed() >= SCHEDULE_BATCHES_TIMEOUT {
-                        break;
-                    }
-                }
+                self.do_scheduling(decision, &start, &SCHEDULE_BATCHES_TIMEOUT);
             });
             saturating_add_assign!(self.metrics.scheduling_time_us, scheduling_time.as_us());
             self.metrics.max_blocked_packets = self
@@ -324,76 +414,69 @@ where
         bank
     }
 
-    /// Get the next batch of transactions to be processed by banking stage
-    fn get_next_transaction_batch(
+    /// Do scheduling
+    fn do_scheduling(
         &mut self,
         decision: BankPacketProcessingDecision,
         start: &Instant,
         timeout: &Duration,
-    ) -> Option<Arc<ScheduledPacketBatch>> {
+    ) {
+        while self.do_scheduling_iter(decision) && start.elapsed() < *timeout {}
+    }
+
+    /// Return true if there is more scheduling to do
+    fn do_scheduling_iter(&mut self, decision: BankPacketProcessingDecision) -> bool {
+        if !self.building_batches_tracker.has_batch_being_built() {
+            return false;
+        }
+
+        if let Some(next_packet) = self.try_get_next_packet(&decision) {
+            if let Some(batch_to_send) = self
+                .building_batches_tracker
+                .add_deserialized_packet(next_packet)
+            {
+                self.send_batch(batch_to_send, decision);
+            }
+        }
+
+        return true;
+    }
+
+    /// Try to get the next packet
+    fn try_get_next_packet(
+        &mut self,
+        decision: &BankPacketProcessingDecision,
+    ) -> Option<Arc<ImmutableDeserializedPacket>> {
         match decision {
             BankPacketProcessingDecision::Consume(_) => {
-                self.forward_filter = None;
-                self.move_held_packets();
-                let deserialized_packets = self.transaction_queue.get_consume_batch(start, timeout);
-                deserialized_packets.map(|deserialized_packets| {
-                    self.create_scheduled_batch(deserialized_packets, decision)
-                })
+                self.transaction_queue.try_get_next_consume_packet()
             }
             BankPacketProcessingDecision::Forward
             | BankPacketProcessingDecision::ForwardAndHold => {
-                // Take the forwarding filter (will replace at the end of the function)
-                let current_bank = self.get_current_bank();
-                let mut forward_filter = match self.forward_filter.take() {
-                    Some(mut forward_filter) => {
-                        forward_filter.current_bank = current_bank;
-                        forward_filter
-                    }
-                    None => {
-                        ForwardPacketBatchesByAccounts::new_with_default_batch_limits(current_bank)
-                    }
-                };
-
-                let deserialized_packets = self
-                    .transaction_queue
-                    .get_forwarding_batch(&mut forward_filter);
-
-                // Move the forward filter back into the scheduler for the next iteration
-                self.forward_filter = Some(forward_filter);
-
-                deserialized_packets.map(|deserialized_packets| {
-                    self.create_scheduled_batch(deserialized_packets, decision)
-                })
+                self.transaction_queue.try_get_next_forward_packet()
             }
-            BankPacketProcessingDecision::Hold => {
-                self.forward_filter = None;
-                None
-            }
+            BankPacketProcessingDecision::Hold => None, // do nothing
         }
     }
 
-    /// Create scheduled batch from deserialized packets and decision. Insert into the current
-    /// batches map.
-    fn create_scheduled_batch(
+    /// Build and send a batch given a batch builder
+    fn send_batch(
         &mut self,
-        deserialized_packets: Vec<Arc<ImmutableDeserializedPacket>>,
+        batch_builder: TransactionBatchBuilder,
         decision: BankPacketProcessingDecision,
-    ) -> Arc<ScheduledPacketBatch> {
-        saturating_add_assign!(self.metrics.num_batches_scheduled, 1);
-        saturating_add_assign!(
-            self.metrics.num_packets_scheduled,
-            deserialized_packets.len()
-        );
-
+    ) {
         let id = self.batch_id_generator.generate_id();
-        let scheduled_batch = Arc::new(ScheduledPacketBatch {
-            id,
-            processing_instruction: decision.clone().into(),
-            deserialized_packets,
-        });
-        self.current_batches
-            .insert(id, (scheduled_batch.clone(), decision));
-        scheduled_batch
+        let execution_thread_index = batch_builder.execution_thread_index;
+        let execution_thread_stats =
+            &mut self.building_batches_tracker.execution_thread_stats[execution_thread_index];
+
+        execution_thread_stats.queued_batches.push_back(id);
+        let batch = Arc::new(batch_builder.build(id, decision.into()));
+        self.current_batches.insert(id, (batch.clone(), decision));
+
+        self.scheduled_packet_batch_senders[batch.execution_thread_index]
+            .send(batch)
+            .unwrap();
     }
 
     /// Move held packets back into the queues
@@ -419,6 +502,8 @@ where
         saturating_add_assign!(self.metrics.num_batches_completed, 1);
         saturating_add_assign!(self.metrics.num_packets_retried, num_retries);
         saturating_add_assign!(self.metrics.num_packets_success, num_success);
+
+        self.building_batches_tracker.complete_batch(&current_batch);
 
         match decision {
             BankPacketProcessingDecision::Consume(_) | BankPacketProcessingDecision::Forward => {
@@ -543,6 +628,38 @@ impl TransactionQueue {
             blocked_transactions: HashMap::new(),
             tracking_map: HashMap::with_capacity(capacity),
         }
+    }
+
+    /// Get the next packet for consuming
+    fn try_get_next_consume_packet(&mut self) -> Option<Arc<ImmutableDeserializedPacket>> {
+        while let Some(transaction) = self.pending_transactions.pop_max() {
+            if self.can_schedule_transaction(&transaction) {
+                self.lock_for_transaction(&transaction);
+                return Some(self.get_immutable_section(&transaction));
+            }
+        }
+
+        None
+    }
+
+    /// Get the next packet for forwarding
+    fn try_get_next_forward_packet(&mut self) -> Option<Arc<ImmutableDeserializedPacket>> {
+        self.pending_transactions
+            .pop_max()
+            .map(|t| self.get_immutable_section(&t))
+    }
+
+    /// Get immutable section from the wrapped sanitized transaction priorty
+    fn get_immutable_section(
+        &self,
+        transaction: &SanitizedTransactionPriority,
+    ) -> Arc<ImmutableDeserializedPacket> {
+        self.tracking_map
+            .get(transaction.message_hash())
+            .unwrap()
+            .1
+            .immutable_section()
+            .clone()
     }
 
     /// Get a batch of transactions to be consumed by banking stage
@@ -1033,6 +1150,96 @@ fn drain_channel<T>(channel: &Receiver<T>, timeout: Duration) -> Vec<T> {
         }
     }
     vec
+}
+
+/// A builder for transaction batches
+#[derive(Debug, PartialEq, Eq)]
+struct TransactionBatchBuilder {
+    /// Timestamp of the batch starting to be built
+    start_time: Instant,
+    /// Transactions in the batch
+    deserialized_packets: Vec<Arc<ImmutableDeserializedPacket>>,
+    /// Queued compute-units
+    compute_units: u64,
+    /// Thread index to be sent to
+    execution_thread_index: usize,
+}
+
+impl TransactionBatchBuilder {
+    fn new(execution_thread_index: usize) -> Self {
+        Self {
+            start_time: Instant::now(),
+            deserialized_packets: Vec::with_capacity(MAX_BATCH_SIZE),
+            compute_units: 0,
+            execution_thread_index,
+        }
+    }
+
+    fn add_deserialized_packet(&mut self, deserialized_packet: Arc<ImmutableDeserializedPacket>) {
+        // set the time when first packet is added
+        if self.deserialized_packets.is_empty() {
+            self.start_time = Instant::now();
+        }
+
+        saturating_add_assign!(self.compute_units, deserialized_packet.compute_unit_limit());
+        self.deserialized_packets.push(deserialized_packet);
+    }
+
+    fn build(
+        self,
+        scheduled_batch_id: ScheduledPacketBatchId,
+        processing_instruction: BankingProcessingInstruction,
+    ) -> ScheduledPacketBatch {
+        ScheduledPacketBatch {
+            id: scheduled_batch_id,
+            processing_instruction,
+            deserialized_packets: self.deserialized_packets,
+            execution_thread_index: self.execution_thread_index,
+        }
+    }
+}
+
+impl Ord for TransactionBatchBuilder {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // sort by queued compute-units first - sort so smaller batches are "larger"
+        other
+            .compute_units
+            .cmp(&self.compute_units)
+            .then_with(|| {
+                // sort by time so that older batches are "larger"
+                self.start_time.cmp(&other.start_time)
+            })
+            .then_with(|| {
+                // smaller threads first
+                other
+                    .execution_thread_index
+                    .cmp(&self.execution_thread_index)
+            })
+    }
+}
+
+impl PartialOrd for TransactionBatchBuilder {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Track stats for the execution threads
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ExecutionThreadStats {
+    /// Currently queue batch ids
+    queued_batches: VecDeque<ScheduledPacketBatchId>,
+    /// Has batch being built
+    has_batch_being_built: bool,
+}
+
+impl ExecutionThreadStats {
+    fn new() -> Self {
+        Self {
+            queued_batches: VecDeque::with_capacity(MAX_QUEUED_BATCHES),
+            has_batch_being_built: true, // each thread starts with batch being built
+        }
+    }
 }
 
 #[derive(Default)]
