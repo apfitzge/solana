@@ -554,6 +554,7 @@ impl TransactionQueue {
         let mut batch = Vec::with_capacity(MAX_BATCH_SIZE);
         while let Some(transaction) = self.pending_transactions.pop_max() {
             if self.can_schedule_transaction(&transaction) {
+                self.lock_for_transaction(&transaction);
                 batch.push(transaction);
                 if batch.len() == MAX_BATCH_SIZE {
                     break;
@@ -565,7 +566,6 @@ impl TransactionQueue {
         }
 
         if batch.len() > 0 {
-            self.lock_batch(&batch);
             Some(
                 batch
                     .into_iter()
@@ -919,13 +919,15 @@ impl AccountTransactionQueue {
         if is_write {
             min_blocking_transaction = option_min(
                 min_blocking_transaction,
-                self.scheduled_lock.get_lowest_priority_transaction(false), // blocked by lowest-priority read or write
+                upper_bound(&self.reads, transaction.clone()),
+                // self.scheduled_lock.get_lowest_priority_transaction(false), // blocked by lowest-priority read or write
             );
         }
 
         min_blocking_transaction = option_min(
             min_blocking_transaction,
-            self.scheduled_lock.get_lowest_priority_transaction(true), // blocked by lowest-priority write
+            upper_bound(&self.writes, transaction.clone()),
+            // self.scheduled_lock.get_lowest_priority_transaction(true), // blocked by lowest-priority write
         );
 
         min_blocking_transaction
