@@ -149,8 +149,6 @@ where
     current_batches:
         HashMap<ScheduledPacketBatchId, (Arc<ScheduledPacketBatch>, BankPacketProcessingDecision)>,
     building_batches_tracker: TransactionBatchesTracker,
-    /// Generator for unique batch identifiers.
-    batch_id_generator: ScheduledPacketBatchIdGenerator,
     metrics: SchedulerMetrics,
 }
 
@@ -160,19 +158,25 @@ struct TransactionBatchesTracker {
     /// Stats on the currently pending batches and queued transactions
     /// for each execution thread.
     execution_thread_stats: Vec<ExecutionThreadStats>,
+    id_generator: ScheduledPacketBatchIdGenerator,
 }
 
 impl TransactionBatchesTracker {
     pub fn new(num_execution_threads: usize) -> Self {
+        let mut id_generator = ScheduledPacketBatchIdGenerator::default();
         Self {
             building_batches: (0..num_execution_threads)
                 .into_iter()
-                .map(|execution_thread_index| TransactionBatchBuilder::new(execution_thread_index))
+                .map(|execution_thread_index| {
+                    let id = id_generator.generate_id();
+                    TransactionBatchBuilder::new(id, execution_thread_index)
+                })
                 .collect(),
             execution_thread_stats: (0..num_execution_threads)
                 .into_iter()
                 .map(|execution_thread_index| ExecutionThreadStats::new())
                 .collect(),
+            id_generator,
         }
     }
 
@@ -194,18 +198,16 @@ impl TransactionBatchesTracker {
         if builder.deserialized_packets.len() == MAX_BATCH_SIZE
             || builder.start_time.elapsed() > MAX_BATCH_AGE
         {
-            let excution_thread_index = builder.execution_thread_index;
-            self.execution_thread_stats[excution_thread_index].has_batch_being_built = false;
+            let execution_thread_index = builder.execution_thread_index;
+            self.execution_thread_stats[execution_thread_index].has_batch_being_built = false;
 
             // If we have room for another batch, add a new builder
-            if self.execution_thread_stats[excution_thread_index]
+            if self.execution_thread_stats[execution_thread_index]
                 .queued_batches
                 .len()
                 < MAX_QUEUED_BATCHES - 1
             {
-                self.execution_thread_stats[excution_thread_index].has_batch_being_built = true;
-                self.building_batches
-                    .push(TransactionBatchBuilder::new(builder.execution_thread_index));
+                self.add_new_batch_builder(execution_thread_index);
             }
             Some(builder)
         } else {
@@ -226,10 +228,16 @@ impl TransactionBatchesTracker {
         // if we aren't currently building a batch for this thread, we can start to build another
         // now that we have the capacity for it
         if !stats.has_batch_being_built {
-            stats.has_batch_being_built = true;
-            self.building_batches
-                .push(TransactionBatchBuilder::new(execution_thread_index))
+            self.add_new_batch_builder(execution_thread_index);
         }
+    }
+
+    /// Add a new batch for `execution_thread_index`
+    fn add_new_batch_builder(&mut self, execution_thread_index: usize) {
+        let id = self.id_generator.generate_id();
+        self.execution_thread_stats[execution_thread_index].has_batch_being_built = true;
+        self.building_batches
+            .push(TransactionBatchBuilder::new(id, execution_thread_index));
     }
 }
 
@@ -354,7 +362,6 @@ where
             banking_decision_maker: banking_decision_maker,
             transaction_queue: TransactionQueue::with_capacity(capacity),
             current_batches: HashMap::new(),
-            batch_id_generator: ScheduledPacketBatchIdGenerator::default(),
             metrics: SchedulerMetrics::default(),
             building_batches_tracker: TransactionBatchesTracker::new(num_execution_threads),
         }
@@ -462,7 +469,7 @@ where
             .collect();
 
         for builder in builders {
-            let new_builder = if !builder.deserialized_packets.is_empty() {
+            if !builder.deserialized_packets.is_empty() {
                 // build and send out the batch
                 let execution_thread_index = builder.execution_thread_index;
                 self.send_batch(builder, decision);
@@ -472,19 +479,15 @@ where
                     .len()
                     < MAX_QUEUED_BATCHES
                 {
-                    Some(TransactionBatchBuilder::new(execution_thread_index))
+                    self.building_batches_tracker
+                        .add_new_batch_builder(execution_thread_index);
                 } else {
                     self.building_batches_tracker.execution_thread_stats[execution_thread_index]
                         .has_batch_being_built = false;
-                    None
                 }
             } else {
-                Some(builder)
-            };
-            if let Some(new_builder) = new_builder {
-                self.building_batches_tracker
-                    .building_batches
-                    .push(new_builder);
+                // just push this one back in
+                self.building_batches_tracker.building_batches.push(builder);
             }
         }
     }
@@ -541,13 +544,13 @@ where
         batch_builder: TransactionBatchBuilder,
         decision: BankPacketProcessingDecision,
     ) {
-        let id = self.batch_id_generator.generate_id();
+        let id = batch_builder.batch_id;
         let execution_thread_index = batch_builder.execution_thread_index;
         let execution_thread_stats =
             &mut self.building_batches_tracker.execution_thread_stats[execution_thread_index];
 
         execution_thread_stats.queued_batches.push_back(id);
-        let batch = Arc::new(batch_builder.build(id, decision.into()));
+        let batch = Arc::new(batch_builder.build(decision.into()));
         self.current_batches.insert(id, (batch.clone(), decision));
 
         saturating_add_assign!(
@@ -1314,16 +1317,19 @@ struct TransactionBatchBuilder {
     deserialized_packets: Vec<Arc<ImmutableDeserializedPacket>>,
     /// Queued compute-units
     compute_units: u64,
+    /// Batch Id to identify the batch
+    batch_id: ScheduledPacketBatchId,
     /// Thread index to be sent to
     execution_thread_index: usize,
 }
 
 impl TransactionBatchBuilder {
-    fn new(execution_thread_index: usize) -> Self {
+    fn new(batch_id: ScheduledPacketBatchId, execution_thread_index: usize) -> Self {
         Self {
             start_time: Instant::now(),
             deserialized_packets: Vec::with_capacity(MAX_BATCH_SIZE),
             compute_units: 0,
+            batch_id,
             execution_thread_index,
         }
     }
@@ -1338,13 +1344,9 @@ impl TransactionBatchBuilder {
         self.deserialized_packets.push(deserialized_packet);
     }
 
-    fn build(
-        self,
-        scheduled_batch_id: ScheduledPacketBatchId,
-        processing_instruction: BankingProcessingInstruction,
-    ) -> ScheduledPacketBatch {
+    fn build(self, processing_instruction: BankingProcessingInstruction) -> ScheduledPacketBatch {
         ScheduledPacketBatch {
-            id: scheduled_batch_id,
+            id: self.batch_id,
             processing_instruction,
             deserialized_packets: self.deserialized_packets,
             execution_thread_index: self.execution_thread_index,
