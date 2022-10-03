@@ -914,14 +914,14 @@ impl TransactionQueue {
             self.account_queues
                 .get_mut(account)
                 .unwrap()
-                .handle_schedule_transaction(transaction, false);
+                .handle_schedule_transaction(false);
         }
 
         for account in account_locks.writable {
             self.account_queues
                 .get_mut(account)
                 .unwrap()
-                .handle_schedule_transaction(transaction, true);
+                .handle_schedule_transaction(true);
         }
     }
 
@@ -1085,7 +1085,7 @@ impl TransactionQueue {
                 .get_mut(account)
                 .unwrap()
                 .scheduled_lock
-                .unlock_on_transaction(transaction, false);
+                .unlock(false);
         }
 
         for account in account_locks.writable {
@@ -1093,7 +1093,7 @@ impl TransactionQueue {
                 .get_mut(account)
                 .unwrap()
                 .scheduled_lock
-                .unlock_on_transaction(transaction, true);
+                .unlock(true);
         }
     }
 
@@ -1168,9 +1168,8 @@ impl AccountTransactionQueue {
     }
 
     /// Apply account locks for `transaction`
-    fn handle_schedule_transaction(&mut self, transaction: &TransactionRef, is_write: bool) {
-        self.scheduled_lock
-            .lock_on_transaction(&transaction, is_write);
+    fn handle_schedule_transaction(&mut self, is_write: bool) {
+        self.scheduled_lock.lock(is_write);
     }
 
     /// Remove transaction from the queue whether on completion or being dropped.
@@ -1191,8 +1190,7 @@ impl AccountTransactionQueue {
 
         // Unlock
         if is_scheduled {
-            self.scheduled_lock
-                .unlock_on_transaction(transaction, is_write);
+            self.scheduled_lock.unlock(is_write);
         }
 
         // No remaining locks, nothing in the trees
@@ -1236,22 +1234,22 @@ struct AccountLock {
 }
 
 impl AccountLock {
-    fn lock_on_transaction(&mut self, transaction: &TransactionRef, is_write: bool) {
+    fn lock(&mut self, is_write: bool) {
         let inner = if is_write {
             &mut self.write
         } else {
             &mut self.read
         };
-        inner.lock_for_transaction(transaction);
+        inner.lock();
     }
 
-    fn unlock_on_transaction(&mut self, transaction: &TransactionRef, is_write: bool) {
+    fn unlock(&mut self, is_write: bool) {
         let inner = if is_write {
             &mut self.write
         } else {
             &mut self.read
         };
-        inner.unlock_for_transaction(transaction);
+        inner.unlock();
     }
 
     fn write_locked(&self) -> bool {
@@ -1265,15 +1263,16 @@ impl AccountLock {
 
 #[derive(Debug, Default)]
 struct AccountLockInner {
+    /// Number of outstanding locks
     count: usize,
 }
 
 impl AccountLockInner {
-    fn lock_for_transaction(&mut self, transaction: &TransactionRef) {
+    fn lock(&mut self) {
         self.count += 1;
     }
 
-    fn unlock_for_transaction(&mut self, transaction: &TransactionRef) {
+    fn unlock(&mut self) {
         assert!(self.count > 0);
         self.count -= 1;
     }
