@@ -44,8 +44,8 @@ use {
     },
 };
 
-const MAX_BATCH_SIZE: usize = 128;
-const MAX_QUEUED_BATCHES: usize = 4; // re-evaluate this number
+const MAX_BATCH_SIZE: usize = 64;
+const MAX_QUEUED_BATCHES: usize = 8; // re-evaluate this number
 const MAX_BATCH_AGE: Duration = Duration::from_millis(25);
 
 #[derive(Debug)]
@@ -362,10 +362,17 @@ where
 
     /// Run the scheduler loop
     fn run(&mut self) {
-        const RECV_TIMEOUT: Duration = Duration::from_millis(10);
+        const RECV_TIMEOUT: Duration = Duration::from_millis(100);
         let mut prev_decision = self.banking_decision_maker.make_decision();
         loop {
             // Potentially receive packets
+            // let timeout = if self.transaction_queue.pending_transactions.len() > 100000
+            //     || self.transaction_queue.num_blocked_packets > 100000
+            // {
+            //     Duration::from_millis(0)
+            // } else {
+            //     Duration::from_millis(10)
+            // };
             let recv_result = self.receive_and_buffer_packets(RECV_TIMEOUT);
             if matches!(recv_result, Err(RecvTimeoutError::Disconnected)) {
                 break;
@@ -399,6 +406,7 @@ where
             );
 
             if decision != prev_decision {
+                self.move_held_packets();
                 self.clear_partially_built_batches(&prev_decision);
             }
             prev_decision = decision;
@@ -440,9 +448,9 @@ where
         while self.do_scheduling_iter(decision) && start.elapsed() < *timeout {}
 
         // if we're out of packets, just send out what we've built
-        if self.transaction_queue.pending_transactions.is_empty() {
-            self.send_building_batches(decision);
-        }
+        // if self.transaction_queue.pending_transactions.is_empty() {
+        self.send_building_batches(decision);
+        // }
     }
 
     /// Send out all batches that are currently being built
@@ -546,9 +554,19 @@ where
             self.metrics.num_packets_scheduled,
             batch.deserialized_packets.len()
         );
+        if matches!(decision, BankPacketProcessingDecision::Consume(_)) {
+            saturating_add_assign!(
+                self.metrics.num_packets_scheduled_consume,
+                batch.deserialized_packets.len()
+            );
+        }
         saturating_add_assign!(self.metrics.num_batches_scheduled, 1);
 
         assert!(!self.scheduled_packet_batch_senders[batch.execution_thread_index].is_full());
+        self.metrics.max_batch_size = self
+            .metrics
+            .max_batch_size
+            .max(batch.deserialized_packets.len());
         self.scheduled_packet_batch_senders[batch.execution_thread_index]
             .send(batch)
             .unwrap();
@@ -573,6 +591,11 @@ where
             .collect();
 
         for mut builder in builders {
+            saturating_add_assign!(
+                self.metrics.num_packets_unscheduled,
+                builder.deserialized_packets.len()
+            );
+
             for packet in builder.deserialized_packets.drain(..) {
                 let transaction = self
                     .transaction_queue
@@ -589,8 +612,14 @@ where
                 self.transaction_queue
                     .insert_transaction_into_pending_queue(&transaction);
             }
+            builder.compute_units = 0;
             self.building_batches_tracker.building_batches.push(builder);
         }
+
+        saturating_add_assign!(
+            self.metrics.num_batches_cleared,
+            self.building_batches_tracker.building_batches.len()
+        );
     }
 
     /// Complete the processing of a batch of transactions. This function will remove the transactions
@@ -609,6 +638,10 @@ where
         saturating_add_assign!(self.metrics.num_packets_retried, num_retries);
         saturating_add_assign!(self.metrics.num_packets_success, num_success);
 
+        if !matches!(decision, BankPacketProcessingDecision::Consume(_)) {
+            panic!("what am i forwarding...?");
+        }
+
         self.building_batches_tracker.complete_batch(&current_batch);
 
         match decision {
@@ -619,7 +652,11 @@ where
                     .enumerate()
                     .for_each(|(index, packet)| {
                         let retry = (batch.retryable_packets & (1 << index)) != 0;
-                        self.transaction_queue.complete_or_retry(packet, retry);
+                        self.transaction_queue.complete_or_retry(
+                            packet,
+                            retry,
+                            &mut self.metrics.max_completed_packet_age_us,
+                        );
                     });
             }
             BankPacketProcessingDecision::ForwardAndHold => {
@@ -738,16 +775,13 @@ impl TransactionQueue {
 
     /// Get the next packet for consuming
     fn try_get_next_consume_packet(&mut self) -> Option<Arc<ImmutableDeserializedPacket>> {
-        while let Some(transaction) = self.pending_transactions.pop_max() {
+        while let Some(transaction) = self.get_next_pending_transaction() {
             if self.can_schedule_transaction(&transaction) {
                 self.lock_for_transaction(&transaction);
                 return Some(self.get_immutable_section(&transaction));
             }
         }
 
-        panic!(
-            "got nothing to consume - this should only happen if we have a bunch of blocked stuff"
-        );
         None
     }
 
@@ -757,8 +791,7 @@ impl TransactionQueue {
         forward_filter: &mut ForwardPacketBatchesByAccounts,
     ) -> Option<Arc<ImmutableDeserializedPacket>> {
         let next_packet = self
-            .pending_transactions
-            .pop_max()
+            .get_next_pending_transaction()
             .map(|t| self.get_immutable_section(&t))?;
         if forward_filter.add_packet(next_packet.clone()) {
             Some(next_packet)
@@ -787,7 +820,7 @@ impl TransactionQueue {
         timeout: &Duration,
     ) -> Option<Vec<Arc<ImmutableDeserializedPacket>>> {
         let mut batch = Vec::with_capacity(MAX_BATCH_SIZE);
-        while let Some(transaction) = self.pending_transactions.pop_max() {
+        while let Some(transaction) = self.get_next_pending_transaction() {
             if self.can_schedule_transaction(&transaction) {
                 self.lock_for_transaction(&transaction);
                 batch.push(transaction);
@@ -889,6 +922,21 @@ impl TransactionQueue {
         }
     }
 
+    // Get the next pending transaction from pending queue that does not exceed max age
+    fn get_next_pending_transaction(&mut self) -> Option<TransactionRef> {
+        // while let Some(transaction) = self.pending_transactions.pop_max() {
+        //     // TODO: this shouldn't be 1s
+        //     if transaction.timestamp.elapsed() < Duration::from_millis(400) {
+        //         return Some(transaction);
+        //     } else {
+        //         self.remove_transaction(&transaction, false);
+        //     }
+        // }
+
+        // None
+        self.pending_transactions.pop_max()
+    }
+
     /// Get a batch of transactions to be forwarded by banking stage
     fn get_forwarding_batch(
         &mut self,
@@ -896,7 +944,7 @@ impl TransactionQueue {
     ) -> Option<Vec<Arc<ImmutableDeserializedPacket>>> {
         // Get batch of transaction simply by priority, and insert into the forwarding filter
         let mut batch = Vec::with_capacity(self.pending_transactions.len().min(MAX_BATCH_SIZE));
-        while let Some(transaction) = self.pending_transactions.pop_max() {
+        while let Some(transaction) = self.get_next_pending_transaction() {
             let packet = self
                 .tracking_map
                 .get(transaction.message_hash())
@@ -1047,7 +1095,12 @@ impl TransactionQueue {
     }
 
     /// Mark a transaction as complete or retry
-    fn complete_or_retry(&mut self, packet: &ImmutableDeserializedPacket, retry: bool) {
+    fn complete_or_retry(
+        &mut self,
+        packet: &ImmutableDeserializedPacket,
+        retry: bool,
+        max_completed_packet_age_us: &mut u64,
+    ) {
         let message_hash = packet.message_hash();
         let (transaction, deserialized_packet) = self
             .tracking_map
@@ -1061,6 +1114,8 @@ impl TransactionQueue {
             self.insert_transaction_into_pending_queue(&transaction);
         } else {
             self.remove_transaction(&transaction, true);
+            *max_completed_packet_age_us = (*max_completed_packet_age_us)
+                .max(transaction.timestamp.elapsed().as_micros() as u64);
         }
     }
 
@@ -1347,6 +1402,8 @@ struct SchedulerMetrics {
     // Packet-wise metrics
     num_packets_seen: usize,
     num_packets_scheduled: usize,
+    num_packets_scheduled_consume: usize,
+    num_packets_unscheduled: usize, // due to decision change
     num_packets_retried: usize,
     num_packets_success: usize,
     max_blocked_packets: usize,
@@ -1354,6 +1411,8 @@ struct SchedulerMetrics {
     // Batch-wise metrics
     num_batches_scheduled: usize,
     num_batches_completed: usize,
+    num_batches_cleared: usize,
+    max_batch_size: usize,
 
     // Timing metrics
     bank_lock_time_us: u64,
@@ -1363,6 +1422,7 @@ struct SchedulerMetrics {
     complete_batches_time_us: u64,
     decision_making_time_us: u64,
     scheduling_time_us: u64,
+    max_completed_packet_age_us: u64,
 }
 
 impl SchedulerMetrics {
@@ -1372,11 +1432,19 @@ impl SchedulerMetrics {
                 "tx-scheduler",
                 ("num_packets_seen", self.num_packets_seen, i64),
                 ("num_packets_scheduled", self.num_packets_scheduled, i64),
+                (
+                    "num_packets_scheduled_consume",
+                    self.num_packets_scheduled_consume,
+                    i64
+                ),
+                ("num_packets_unscheduled", self.num_packets_unscheduled, i64),
                 ("num_packets_retried", self.num_packets_retried, i64),
                 ("num_packets_success", self.num_packets_success, i64),
+                ("max_blocked_packets", self.max_blocked_packets, i64),
                 ("num_batches_scheduled", self.num_batches_scheduled, i64),
                 ("num_batches_completed", self.num_batches_completed, i64),
-                ("max_blocked_packets", self.max_blocked_packets, i64),
+                ("num_batches_cleared", self.num_batches_cleared, i64),
+                ("max_batch_size", self.max_batch_size, i64),
                 ("bank_lock_time_us", self.bank_lock_time_us, i64),
                 (
                     "recieve_packet_batches_time_us",
@@ -1400,6 +1468,11 @@ impl SchedulerMetrics {
                 ),
                 ("decision_making_time_us", self.decision_making_time_us, i64),
                 ("scheduling_time_us", self.scheduling_time_us, i64),
+                (
+                    "max_completed_packet_age_us",
+                    self.max_completed_packet_age_us,
+                    i64
+                ),
             );
             *self = Self::default();
         }
@@ -1442,7 +1515,8 @@ impl RootBankCache {
 #[cfg(test)]
 mod tests {
     use {
-        super::TransactionBatchBuilder,
+        super::{SanitizedTransactionPriority, TransactionBatchBuilder},
+        solana_sdk::{hash::Hash, signer::Signer, transaction::SanitizedTransaction},
         std::time::{Duration, Instant},
     };
 
@@ -1502,21 +1576,47 @@ mod tests {
         };
         assert!(b1 > b2); // smaller thread index is prioritized
     }
-}
 
-// fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-//     // sort by queued compute-units first - sort so smaller batches are "larger"
-//     other
-//         .compute_units
-//         .cmp(&self.compute_units)
-//         .then_with(|| {
-//             // sort by time so that older batches are "larger"
-//             self.start_time.cmp(&other.start_time)
-//         })
-//         .then_with(|| {
-//             // smaller threads first
-//             other
-//                 .execution_thread_index
-//                 .cmp(&self.execution_thread_index)
-//         })
-// }
+    fn create_simple_transaction() -> SanitizedTransaction {
+        let keypair = solana_sdk::signature::Keypair::new();
+        let pubkey = keypair.pubkey();
+        let tx = solana_sdk::system_transaction::transfer(&keypair, &pubkey, 1, Hash::default());
+        SanitizedTransaction::from_transaction_for_tests(tx)
+    }
+
+    #[test]
+    fn transaction_priority_ordering_by_priority() {
+        let now = Instant::now();
+        let stx = create_simple_transaction();
+
+        let tx1 = SanitizedTransactionPriority {
+            priority: 1,
+            transaction: stx.clone(),
+            timestamp: now,
+        };
+        let tx2 = SanitizedTransactionPriority {
+            priority: 0,
+            transaction: stx,
+            timestamp: now,
+        };
+        assert!(tx1 > tx2); // higher priority is prioritized
+    }
+
+    #[test]
+    fn transaction_priority_ordering_by_age() {
+        let now = Instant::now();
+        let stx = create_simple_transaction();
+
+        let tx1 = SanitizedTransactionPriority {
+            priority: 0,
+            transaction: stx.clone(),
+            timestamp: now + Duration::from_millis(5),
+        };
+        let tx2 = SanitizedTransactionPriority {
+            priority: 0,
+            transaction: stx,
+            timestamp: now,
+        };
+        assert!(tx1 > tx2); // older tx is prioritized
+    }
+}
