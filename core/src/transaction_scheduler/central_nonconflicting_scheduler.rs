@@ -5,8 +5,9 @@
 
 use {
     super::{
-        BankingProcessingInstruction, ProcessedPacketBatch, ScheduledPacketBatch,
-        ScheduledPacketBatchId, ScheduledPacketBatchIdGenerator, TransactionSchedulerBankingHandle,
+        conflict_set::ConflictSet, BankingProcessingInstruction, ProcessedPacketBatch,
+        ScheduledPacketBatch, ScheduledPacketBatchId, ScheduledPacketBatchIdGenerator,
+        TransactionSchedulerBankingHandle,
     },
     crate::{
         bank_process_decision::{BankPacketProcessingDecision, BankingDecisionMaker},
@@ -35,7 +36,7 @@ use {
     },
     std::{
         cell::RefCell,
-        collections::{BTreeSet, BinaryHeap, HashMap, VecDeque},
+        collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque},
         fmt::Display,
         rc::Rc,
         sync::{atomic::Ordering, Arc, RwLock},
@@ -193,7 +194,55 @@ impl TransactionBatchesTracker {
         assert!(self.has_batch_being_built());
         let mut builder = self.building_batches.pop().unwrap();
         builder.add_deserialized_packet(deserialized_packet);
+        self.should_batch_be_sent(builder)
+    }
 
+    /// Adds a packet to the batch on the given execution thread. Returns batch builder if it should be sent for execution
+    pub fn add_deserialized_packet_to_thread(
+        &mut self,
+        deserialized_packet: Arc<ImmutableDeserializedPacket>,
+        execution_thread_index: usize,
+    ) -> Option<TransactionBatchBuilder> {
+        // TODO: this seems slow, maybe we can do better
+        let builders: Vec<_> = self.building_batches.drain().collect();
+
+        let mut target_builder = None;
+        for mut builder in builders {
+            if builder.execution_thread_index == execution_thread_index {
+                // store this batch to add the packet to
+                assert!(target_builder.is_none());
+                builder.add_deserialized_packet(deserialized_packet.clone());
+                target_builder = Some(builder);
+            } else {
+                // just push this one back in
+                self.building_batches.push(builder);
+            }
+        }
+
+        let target_builder = target_builder.unwrap();
+        self.should_batch_be_sent(target_builder)
+    }
+
+    /// Updates tracking and stats for a completed batch
+    pub fn complete_batch(&mut self, batch: &ScheduledPacketBatch) {
+        let id = batch.id;
+        let execution_thread_index = batch.execution_thread_index;
+
+        let stats = &mut self.execution_thread_stats[execution_thread_index];
+        assert_eq!(id, stats.queued_batches.pop_front().unwrap()); // check processed in correct order
+
+        // if we aren't currently building a batch for this thread, we can start to build another
+        // now that we have the capacity for it
+        if !stats.has_batch_being_built {
+            self.add_new_batch_builder(execution_thread_index);
+        }
+    }
+
+    /// Checks if a builder should be sent. If so, return it, otherwise push back in and return None
+    fn should_batch_be_sent(
+        &mut self,
+        builder: TransactionBatchBuilder,
+    ) -> Option<TransactionBatchBuilder> {
         // If the batch should be sent, we will return it
         if builder.deserialized_packets.len() == MAX_BATCH_SIZE
             || builder.start_time.elapsed() > MAX_BATCH_AGE
@@ -214,21 +263,6 @@ impl TransactionBatchesTracker {
             // if we aren't sending it, push it back in
             self.building_batches.push(builder);
             None
-        }
-    }
-
-    /// Updates tracking and stats for a completed batch
-    pub fn complete_batch(&mut self, batch: &ScheduledPacketBatch) {
-        let id = batch.id;
-        let execution_thread_index = batch.execution_thread_index;
-
-        let stats = &mut self.execution_thread_stats[execution_thread_index];
-        assert_eq!(id, stats.queued_batches.pop_front().unwrap()); // check processed in correct order
-
-        // if we aren't currently building a batch for this thread, we can start to build another
-        // now that we have the capacity for it
-        if !stats.has_batch_being_built {
-            self.add_new_batch_builder(execution_thread_index);
         }
     }
 
@@ -506,11 +540,41 @@ where
             return false;
         }
 
-        if let Some(next_packet) = self.try_get_next_packet(&decision) {
-            if let Some(batch_to_send) = self
-                .building_batches_tracker
-                .add_deserialized_packet(next_packet)
-            {
+        if let Some((next_packet, maybe_thread_index)) = self.try_get_next_packet(&decision) {
+            let transaction = self
+                .transaction_queue
+                .tracking_map
+                .get(next_packet.message_hash())
+                .unwrap()
+                .0
+                .clone();
+
+            if let Some(batch_to_send) = if let Some(execution_thread_index) = maybe_thread_index {
+                let batch_id = self
+                    .building_batches_tracker
+                    .building_batches
+                    .iter()
+                    .find(|builder| builder.execution_thread_index == execution_thread_index)
+                    .unwrap()
+                    .batch_id;
+
+                self.transaction_queue
+                    .lock_for_transaction(&transaction, batch_id);
+                self.building_batches_tracker
+                    .add_deserialized_packet_to_thread(next_packet, execution_thread_index)
+            } else {
+                let batch_id = self
+                    .building_batches_tracker
+                    .building_batches
+                    .iter()
+                    .next()
+                    .unwrap()
+                    .batch_id;
+                self.transaction_queue
+                    .lock_for_transaction(&transaction, batch_id);
+                self.building_batches_tracker
+                    .add_deserialized_packet(next_packet)
+            } {
                 self.send_batch(batch_to_send, decision);
             }
         }
@@ -518,24 +582,84 @@ where
         return true;
     }
 
-    /// Try to get the next packet
+    /// Try to get the next packet - if it can only be scheduled to a specific thread then return as well
     fn try_get_next_packet(
         &mut self,
         decision: &BankPacketProcessingDecision,
-    ) -> Option<Arc<ImmutableDeserializedPacket>> {
+    ) -> Option<(Arc<ImmutableDeserializedPacket>, Option<usize>)> {
         match decision {
             BankPacketProcessingDecision::Consume(_) => {
-                self.transaction_queue.try_get_next_consume_packet()
+                while let Some(transaction) = self.transaction_queue.get_next_pending_transaction()
+                {
+                    let (conflict_set, building_conflict_set) =
+                        self.get_conflict_sets(&transaction);
+                    if building_conflict_set.can_schedule_to_any_thread()
+                        && conflict_set.is_schedulable()
+                    {
+                        let packet = self.transaction_queue.get_immutable_section(&transaction);
+                        return Some((packet, conflict_set.get_conflicting_thread_index()));
+                    } else {
+                        // call `can_schedule_transaction()` to block this by the lowest priority transaction
+                        // and assert that it cannot be scheduled - either due to multiple in progress conflicts
+                        // or due to a conflict with a batch being built.
+                        assert!(!self
+                            .transaction_queue
+                            .can_schedule_transaction(&transaction));
+                    }
+                }
+
+                None
             }
             BankPacketProcessingDecision::Forward
             | BankPacketProcessingDecision::ForwardAndHold => match self.forward_filter {
                 Some(ref mut forward_filter) => self
                     .transaction_queue
-                    .try_get_next_forward_packet(forward_filter),
+                    .try_get_next_forward_packet(forward_filter)
+                    .map(|p| (p, None)), // forward packets can be scheduled to any thread
                 None => unreachable!(),
             },
             BankPacketProcessingDecision::Hold => None, // do nothing
         }
+    }
+
+    fn get_conflict_sets(
+        &self,
+        transaction: &SanitizedTransactionPriority,
+    ) -> (ConflictSet, ConflictSet) {
+        let mut conflict_set = ConflictSet::default();
+        let mut inflight_conflict_set = ConflictSet::default();
+
+        let mut check_batches = |batch_ids| {
+            for batch_id in batch_ids {
+                if let Some((batch, _)) = self.current_batches.get(batch_id) {
+                    conflict_set.mark_conflict(batch.execution_thread_index);
+                } else if let Some(batch) = self
+                    .building_batches_tracker
+                    .building_batches
+                    .iter()
+                    .find(|b| b.batch_id == *batch_id)
+                {
+                    inflight_conflict_set.mark_conflict(batch.execution_thread_index);
+                    break;
+                }
+            }
+        };
+
+        // Build a set of conflicting thread indexes for the transaction
+        // TODO: Exit early if we find an inflight conflict? - borrow-checker is not happy because mutable borrow
+        let account_locks = transaction.transaction.get_account_locks_unchecked();
+        for account in account_locks.readonly {
+            let account_queue = self.transaction_queue.account_queues.get(account).unwrap();
+            check_batches(account_queue.scheduled_lock.write.batch_ids.iter());
+        }
+
+        for account in account_locks.writable {
+            let account_queue = self.transaction_queue.account_queues.get(account).unwrap();
+            check_batches(account_queue.scheduled_lock.write.batch_ids.iter());
+            check_batches(account_queue.scheduled_lock.read.batch_ids.iter());
+        }
+
+        (conflict_set, inflight_conflict_set)
     }
 
     /// Build and send a batch given a batch builder
@@ -609,7 +733,7 @@ where
                     .clone();
                 if should_unlock {
                     self.transaction_queue
-                        .remove_account_locks_transaction(&transaction);
+                        .remove_account_locks_transaction(&transaction, builder.batch_id);
                 }
                 self.transaction_queue.unblock_transaction(&transaction);
                 self.transaction_queue
@@ -658,6 +782,7 @@ where
                         self.transaction_queue.complete_or_retry(
                             packet,
                             retry,
+                            batch.id,
                             &mut self.metrics.max_completed_packet_age_us,
                         );
                     });
@@ -776,18 +901,6 @@ impl TransactionQueue {
         }
     }
 
-    /// Get the next packet for consuming
-    fn try_get_next_consume_packet(&mut self) -> Option<Arc<ImmutableDeserializedPacket>> {
-        while let Some(transaction) = self.get_next_pending_transaction() {
-            if self.can_schedule_transaction(&transaction) {
-                self.lock_for_transaction(&transaction);
-                return Some(self.get_immutable_section(&transaction));
-            }
-        }
-
-        None
-    }
-
     /// Get the next packet for forwarding
     fn try_get_next_forward_packet(
         &mut self,
@@ -816,45 +929,6 @@ impl TransactionQueue {
             .clone()
     }
 
-    /// Get a batch of transactions to be consumed by banking stage
-    fn get_consume_batch(
-        &mut self,
-        start: &Instant,
-        timeout: &Duration,
-    ) -> Option<Vec<Arc<ImmutableDeserializedPacket>>> {
-        let mut batch = Vec::with_capacity(MAX_BATCH_SIZE);
-        while let Some(transaction) = self.get_next_pending_transaction() {
-            if self.can_schedule_transaction(&transaction) {
-                self.lock_for_transaction(&transaction);
-                batch.push(transaction);
-                if batch.len() == MAX_BATCH_SIZE {
-                    break;
-                }
-            }
-            if start.elapsed() > *timeout {
-                break;
-            }
-        }
-
-        if batch.len() > 0 {
-            Some(
-                batch
-                    .into_iter()
-                    .map(|transaction| {
-                        self.tracking_map
-                            .get(transaction.message_hash())
-                            .unwrap()
-                            .1
-                            .immutable_section()
-                            .clone()
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        }
-    }
-
     /// Check if a transaction can be scheduled. If it cannot, add it to the blocked transactions
     fn can_schedule_transaction(&mut self, transaction: &TransactionRef) -> bool {
         match self.get_lowest_priority_blocking_transaction(transaction) {
@@ -866,7 +940,7 @@ impl TransactionQueue {
                 saturating_add_assign!(self.num_blocked_packets, 1);
                 false
             }
-            None => true,
+            None => false,
         }
     }
 
@@ -899,29 +973,26 @@ impl TransactionQueue {
             .cloned()
     }
 
-    /// Lock a batch of transactions
-    fn lock_batch(&mut self, batch: &[TransactionRef]) {
-        for transaction in batch {
-            self.lock_for_transaction(transaction);
-        }
-    }
-
     /// Lock all accounts for a transaction
-    fn lock_for_transaction(&mut self, transaction: &TransactionRef) {
+    fn lock_for_transaction(
+        &mut self,
+        transaction: &TransactionRef,
+        batch_id: ScheduledPacketBatchId,
+    ) {
         let account_locks = transaction.transaction.get_account_locks_unchecked();
 
         for account in account_locks.readonly {
             self.account_queues
                 .get_mut(account)
                 .unwrap()
-                .handle_schedule_transaction(false);
+                .handle_schedule_transaction(false, batch_id);
         }
 
         for account in account_locks.writable {
             self.account_queues
                 .get_mut(account)
                 .unwrap()
-                .handle_schedule_transaction(true);
+                .handle_schedule_transaction(true, batch_id);
         }
     }
 
@@ -1015,21 +1086,26 @@ impl TransactionQueue {
             panic!("dropped a packet");
             let dropped_packet = self.pending_transactions.push_pop_min(transaction.clone());
             // error!("dropping packet: {:?}", dropped_packet.message_hash());
-            self.remove_transaction(&dropped_packet, false);
+            self.remove_transaction(&dropped_packet, false, ScheduledPacketBatchId::default());
         }
     }
 
     /// Remove a transaction from the queue(s) and maps
     ///     - This will happen if a transaction is completed or dropped
     ///     - The transaction should already be removed from the pending queue
-    fn remove_transaction(&mut self, transaction: &TransactionRef, is_scheduled: bool) {
+    fn remove_transaction(
+        &mut self,
+        transaction: &TransactionRef,
+        is_scheduled: bool,
+        batch_id: ScheduledPacketBatchId,
+    ) {
         let message_hash = transaction.message_hash();
         let packet = self
             .tracking_map
             .remove(message_hash)
             .expect("Transaction should exist in tracking map");
 
-        self.remove_transaction_from_account_queues(&transaction, is_scheduled);
+        self.remove_transaction_from_account_queues(&transaction, is_scheduled, batch_id);
         self.unblock_transaction(&transaction);
     }
 
@@ -1038,6 +1114,7 @@ impl TransactionQueue {
         &mut self,
         transaction: &TransactionRef,
         is_scheduled: bool,
+        batch_id: ScheduledPacketBatchId,
     ) {
         // We got account locks with checks when the transaction was initially inserted. No need to rerun checks.
         let account_locks = transaction.transaction.get_account_locks_unchecked();
@@ -1047,7 +1124,7 @@ impl TransactionQueue {
                 .account_queues
                 .get_mut(account)
                 .expect("account should exist in account queues")
-                .remove_transaction(transaction, false, is_scheduled)
+                .remove_transaction(transaction, false, is_scheduled, batch_id)
             {
                 self.account_queues.remove(account);
             }
@@ -1058,7 +1135,7 @@ impl TransactionQueue {
                 .account_queues
                 .get_mut(account)
                 .expect("account should exist in account queues")
-                .remove_transaction(transaction, true, is_scheduled)
+                .remove_transaction(transaction, true, is_scheduled, batch_id)
             {
                 self.account_queues.remove(account);
             }
@@ -1077,7 +1154,11 @@ impl TransactionQueue {
     }
 
     /// Unlocks all accounts for a transaction
-    fn remove_account_locks_transaction(&mut self, transaction: &TransactionRef) {
+    fn remove_account_locks_transaction(
+        &mut self,
+        transaction: &TransactionRef,
+        batch_id: ScheduledPacketBatchId,
+    ) {
         let account_locks = transaction.transaction.get_account_locks_unchecked();
 
         for account in account_locks.readonly {
@@ -1085,7 +1166,7 @@ impl TransactionQueue {
                 .get_mut(account)
                 .unwrap()
                 .scheduled_lock
-                .unlock(false);
+                .unlock(false, batch_id);
         }
 
         for account in account_locks.writable {
@@ -1093,7 +1174,7 @@ impl TransactionQueue {
                 .get_mut(account)
                 .unwrap()
                 .scheduled_lock
-                .unlock(true);
+                .unlock(true, batch_id);
         }
     }
 
@@ -1102,6 +1183,7 @@ impl TransactionQueue {
         &mut self,
         packet: &ImmutableDeserializedPacket,
         retry: bool,
+        batch_id: ScheduledPacketBatchId,
         max_completed_packet_age_us: &mut u64,
     ) {
         let message_hash = packet.message_hash();
@@ -1112,11 +1194,11 @@ impl TransactionQueue {
         let transaction = transaction.clone();
 
         if retry {
-            self.remove_account_locks_transaction(&transaction);
+            self.remove_account_locks_transaction(&transaction, batch_id);
             self.unblock_transaction(&transaction);
             self.insert_transaction_into_pending_queue(&transaction);
         } else {
-            self.remove_transaction(&transaction, true);
+            self.remove_transaction(&transaction, true, batch_id);
             *max_completed_packet_age_us = (*max_completed_packet_age_us)
                 .max(transaction.timestamp.elapsed().as_micros() as u64);
         }
@@ -1168,8 +1250,8 @@ impl AccountTransactionQueue {
     }
 
     /// Apply account locks for `transaction`
-    fn handle_schedule_transaction(&mut self, is_write: bool) {
-        self.scheduled_lock.lock(is_write);
+    fn handle_schedule_transaction(&mut self, is_write: bool, batch_id: ScheduledPacketBatchId) {
+        self.scheduled_lock.lock(is_write, batch_id);
     }
 
     /// Remove transaction from the queue whether on completion or being dropped.
@@ -1180,6 +1262,7 @@ impl AccountTransactionQueue {
         transaction: &TransactionRef,
         is_write: bool,
         is_scheduled: bool,
+        batch_id: ScheduledPacketBatchId,
     ) -> bool {
         // Remove from appropriate tree
         if is_write {
@@ -1190,7 +1273,7 @@ impl AccountTransactionQueue {
 
         // Unlock
         if is_scheduled {
-            self.scheduled_lock.unlock(is_write);
+            self.scheduled_lock.unlock(is_write, batch_id);
         }
 
         // No remaining locks, nothing in the trees
@@ -1234,22 +1317,22 @@ struct AccountLock {
 }
 
 impl AccountLock {
-    fn lock(&mut self, is_write: bool) {
+    fn lock(&mut self, is_write: bool, batch_id: ScheduledPacketBatchId) {
         let inner = if is_write {
             &mut self.write
         } else {
             &mut self.read
         };
-        inner.lock();
+        inner.lock(batch_id);
     }
 
-    fn unlock(&mut self, is_write: bool) {
+    fn unlock(&mut self, is_write: bool, batch_id: ScheduledPacketBatchId) {
         let inner = if is_write {
             &mut self.write
         } else {
             &mut self.read
         };
-        inner.unlock();
+        inner.unlock(batch_id);
     }
 
     fn write_locked(&self) -> bool {
@@ -1265,16 +1348,20 @@ impl AccountLock {
 struct AccountLockInner {
     /// Number of outstanding locks
     count: usize,
+    /// Batch Ids that are currently locking this account
+    batch_ids: HashSet<ScheduledPacketBatchId>,
 }
 
 impl AccountLockInner {
-    fn lock(&mut self) {
+    fn lock(&mut self, batch_id: ScheduledPacketBatchId) {
         self.count += 1;
+        self.batch_ids.insert(batch_id);
     }
 
-    fn unlock(&mut self) {
+    fn unlock(&mut self, batch_id: ScheduledPacketBatchId) {
         assert!(self.count > 0);
         self.count -= 1;
+        self.batch_ids.remove(&batch_id);
     }
 }
 
