@@ -551,12 +551,16 @@ where
 
             if let Some(batch_to_send) = if let Some(execution_thread_index) = maybe_thread_index {
                 let batch_id = self
-                    .building_batches_tracker
-                    .building_batches
+                    .current_batches
                     .iter()
-                    .find(|builder| builder.execution_thread_index == execution_thread_index)
-                    .unwrap()
-                    .batch_id;
+                    .find_map(|(batch_id, (batch, _))| {
+                        if batch.execution_thread_index == execution_thread_index {
+                            Some(*batch_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
 
                 self.transaction_queue
                     .lock_for_transaction(&transaction, batch_id);
@@ -597,7 +601,24 @@ where
                         && conflict_set.is_schedulable()
                     {
                         let packet = self.transaction_queue.get_immutable_section(&transaction);
-                        return Some((packet, conflict_set.get_conflicting_thread_index()));
+
+                        let conflict_thread_index = conflict_set.get_conflicting_thread_index();
+                        if let Some(execution_thread_index) = conflict_thread_index {
+                            if !self.building_batches_tracker.execution_thread_stats
+                                [execution_thread_index]
+                                .has_batch_being_built
+                            {
+                                // call `can_schedule_transaction()` to block this by the lowest priority transaction
+                                // and assert that it cannot be scheduled - either due to multiple in progress conflicts
+                                // or due to a conflict with a batch being built.
+                                assert!(!self
+                                    .transaction_queue
+                                    .can_schedule_transaction(&transaction));
+                                continue; // try scheduling another packet
+                            }
+                        }
+
+                        return Some((packet, conflict_thread_index));
                     } else {
                         // call `can_schedule_transaction()` to block this by the lowest priority transaction
                         // and assert that it cannot be scheduled - either due to multiple in progress conflicts
@@ -1604,6 +1625,7 @@ impl RootBankCache {
 mod tests {
     use {
         super::{SanitizedTransactionPriority, TransactionBatchBuilder},
+        crate::transaction_scheduler::ScheduledPacketBatchId,
         solana_sdk::{hash::Hash, signer::Signer, transaction::SanitizedTransaction},
         std::time::{Duration, Instant},
     };
@@ -1617,12 +1639,14 @@ mod tests {
             deserialized_packets: vec![],
             compute_units: 0,
             execution_thread_index: 0,
+            batch_id: ScheduledPacketBatchId::new(0),
         };
         let b2 = TransactionBatchBuilder {
             start_time: now,
             deserialized_packets: vec![],
             compute_units: 1,
             execution_thread_index: 0,
+            batch_id: ScheduledPacketBatchId::new(1),
         };
         assert!(b1 > b2); // fewer compute units -> higher priority in the binary heap
     }
@@ -1636,12 +1660,14 @@ mod tests {
             deserialized_packets: vec![],
             compute_units: 0,
             execution_thread_index: 0,
+            batch_id: ScheduledPacketBatchId::new(0),
         };
         let b2 = TransactionBatchBuilder {
             start_time: now + Duration::from_millis(5),
             deserialized_packets: vec![],
             compute_units: 0,
             execution_thread_index: 0,
+            batch_id: ScheduledPacketBatchId::new(1),
         };
         assert!(b1 > b2); // older batch is prioritized
     }
@@ -1655,12 +1681,14 @@ mod tests {
             deserialized_packets: vec![],
             compute_units: 0,
             execution_thread_index: 0,
+            batch_id: ScheduledPacketBatchId::new(0),
         };
         let b2 = TransactionBatchBuilder {
             start_time: now,
             deserialized_packets: vec![],
             compute_units: 0,
             execution_thread_index: 1,
+            batch_id: ScheduledPacketBatchId::new(1),
         };
         assert!(b1 > b2); // smaller thread index is prioritized
     }
