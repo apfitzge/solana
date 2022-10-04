@@ -550,30 +550,25 @@ where
                 .clone();
 
             if let Some(batch_to_send) = if let Some(execution_thread_index) = maybe_thread_index {
-                let batch_id = self
-                    .current_batches
+                let batch_builder = self.building_batches_tracker
+                    .building_batches
                     .iter()
-                    .find_map(|(batch_id, (batch, _))| {
-                        if batch.execution_thread_index == execution_thread_index {
-                            Some(*batch_id)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap();
+                    .find(|batch_builder| {
+                        batch_builder.execution_thread_index == execution_thread_index
+                    }).expect("should have found a batch builder. This is verified in `try_get_next_packet`");
 
+                let batch_id = batch_builder.batch_id;
                 self.transaction_queue
                     .lock_for_transaction(&transaction, batch_id);
                 self.building_batches_tracker
                     .add_deserialized_packet_to_thread(next_packet, execution_thread_index)
             } else {
-                let batch_id = self
+                let batch_builder = self
                     .building_batches_tracker
                     .building_batches
-                    .iter()
-                    .next()
-                    .unwrap()
-                    .batch_id;
+                    .peek()
+                    .unwrap();
+                let batch_id = batch_builder.batch_id;
                 self.transaction_queue
                     .lock_for_transaction(&transaction, batch_id);
                 self.building_batches_tracker
@@ -1376,13 +1371,13 @@ struct AccountLockInner {
 impl AccountLockInner {
     fn lock(&mut self, batch_id: ScheduledPacketBatchId) {
         self.count += 1;
-        self.batch_ids.insert(batch_id);
+        self.batch_ids.insert(batch_id); // read-locks could be inserted multiple times, so can't assert on insert
     }
 
     fn unlock(&mut self, batch_id: ScheduledPacketBatchId) {
         assert!(self.count > 0);
         self.count -= 1;
-        self.batch_ids.remove(&batch_id);
+        self.batch_ids.remove(&batch_id); // read-locks could be inserted multiple times, so can't assert on remove
     }
 }
 
@@ -1624,11 +1619,58 @@ impl RootBankCache {
 #[cfg(test)]
 mod tests {
     use {
-        super::{SanitizedTransactionPriority, TransactionBatchBuilder},
-        crate::transaction_scheduler::ScheduledPacketBatchId,
-        solana_sdk::{hash::Hash, signer::Signer, transaction::SanitizedTransaction},
-        std::time::{Duration, Instant},
+        super::{
+            CentralNonConflictingScheduler, SanitizedTransactionPriority, TransactionBatchBuilder,
+        },
+        crate::{
+            bank_process_decision::BankingDecisionMaker,
+            packet_deserializer_stage::InlinePacketDeserializer,
+            transaction_scheduler::ScheduledPacketBatchId,
+        },
+        solana_ledger::blockstore::Blockstore,
+        solana_poh::poh_recorder::{create_test_recorder, PohRecorder},
+        solana_runtime::{bank::Bank, bank_forks::BankForks},
+        solana_sdk::{
+            hash::Hash, pubkey::Pubkey, signature::Keypair, signer::Signer,
+            transaction::SanitizedTransaction,
+        },
+        std::{
+            sync::{Arc, RwLock},
+            time::{Duration, Instant},
+        },
     };
+
+    fn create_transfer(from_keypair: &Keypair, to_pubkey: &Pubkey) -> SanitizedTransaction {
+        let tx =
+            solana_sdk::system_transaction::transfer(from_keypair, to_pubkey, 1, Hash::default());
+        SanitizedTransaction::from_transaction_for_tests(tx)
+    }
+
+    fn create_simple_transaction() -> SanitizedTransaction {
+        let keypair = solana_sdk::signature::Keypair::new();
+        let pubkey = keypair.pubkey();
+        create_transfer(&keypair, &pubkey)
+    }
+
+    // fn create_transaction_scheduler(num_execution_threads: usize, capacity: usize) -> CentralNonConflictingScheduler<InlinePacketDeserializer> {
+    //     // Create a simple inline deserializer - won't actually be used.
+    //     let (_packet_sender, packet_receiver) = crossbeam_channel::unbounded();
+    //     let deserializer = InlinePacketDeserializer::new(packet_receiver, 0);
+
+    //     let (batch_senders, batch_receivers) = CentralNonConflictingScheduler::create_channels(num_execution_threads);
+    //     let (processed_batch_sender, processed_batch_receiver) = crossbeam_channel::unbounded();
+
+    //     let banking_decision_maker = BankingDecisionMaker::new(, Pubkey::new_unique());
+    //     let bank_forks = Arc::new(RwLock::new(BankForks::new(Bank::default_for_tests())));
+    //     let poh_recorder = Arc::new(RwLock::new(create_test_recorder(&bank_forks.read().unwrap().root_bank(), Arc::new(Blockstore::))));
+
+    //     let scheduler = CentralNonConflictingScheduler::new(deserializer, batch_senders, processed_batch_receiver, bank_forks, banking_decision_maker, capcity)
+    // }
+
+    // #[test]
+    // fn transaction_scheduler_single_thread() {
+
+    // }
 
     #[test]
     fn transaction_batch_builder_ordering_by_compute_units() {
@@ -1691,13 +1733,6 @@ mod tests {
             batch_id: ScheduledPacketBatchId::new(1),
         };
         assert!(b1 > b2); // smaller thread index is prioritized
-    }
-
-    fn create_simple_transaction() -> SanitizedTransaction {
-        let keypair = solana_sdk::signature::Keypair::new();
-        let pubkey = keypair.pubkey();
-        let tx = solana_sdk::system_transaction::transfer(&keypair, &pubkey, 1, Hash::default());
-        SanitizedTransaction::from_transaction_for_tests(tx)
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Bitset for marking thread conflicts for transaction scheduling.
 //1
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ConflictSet {
     /// Bitset of threads that conflict for a transaction.
     bitset: u8, // TODO: support more than 8 threads?
