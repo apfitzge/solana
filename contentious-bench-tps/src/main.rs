@@ -6,6 +6,7 @@ use {
 
 mod accounts;
 mod cli;
+mod client;
 
 fn main() {
     solana_logger::setup_with_default("solana=info");

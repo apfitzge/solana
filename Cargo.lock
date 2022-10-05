@@ -5016,7 +5016,9 @@ dependencies = [
  "solana-logger 1.15.0",
  "solana-measure",
  "solana-metrics",
+ "solana-rpc-client",
  "solana-sdk 1.15.0",
+ "solana-tpu-client",
 ]
 
 [[package]]
