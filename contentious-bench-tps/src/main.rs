@@ -1,4 +1,5 @@
 use {
+    crate::client::Client,
     clap::{crate_name, Parser},
     cli::Config,
     log::*,
@@ -7,6 +8,10 @@ use {
 mod accounts;
 mod cli;
 mod client;
+
+// TODO: Make these configurable
+const JSON_RPC_URL: &str = "http://localhost:8899";
+const WEBSOCKET_URL: &str = "";
 
 fn main() {
     solana_logger::setup_with_default("solana=info");
@@ -26,4 +31,10 @@ fn main() {
         num_contentious_transfer_accounts,
         num_regular_transfer_accounts,
     );
+
+    info!("creating client...");
+    let client = Client::new(JSON_RPC_URL.to_string(), WEBSOCKET_URL);
+
+    info!("funding accounts...");
+    client.fund_accounts(&accounts);
 }
