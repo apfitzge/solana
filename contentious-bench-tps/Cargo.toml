@@ -9,9 +9,9 @@ homepage = "https://solana.com/"
 publish = false
 
 [dependencies]
-# clap = "2.33.1"
+clap = "3.2.22"
 # crossbeam-channel = "0.5"
-# log = "0.4.17"
+log = "0.4.17"
 # rand = "0.7.0"
 # rayon = "1.5.3"
 # serde_json = "1.0.83"
@@ -23,9 +23,9 @@ publish = false
 # solana-faucet = { path = "../faucet", version = "=1.15.0" }
 # solana-genesis = { path = "../genesis", version = "=1.15.0" }
 # solana-gossip = { path = "../gossip", version = "=1.15.0" }
-# solana-logger = { path = "../logger", version = "=1.15.0" }
-# solana-measure = { path = "../measure", version = "=1.15.0" }
-# solana-metrics = { path = "../metrics", version = "=1.15.0" }
+solana-logger = { path = "../logger", version = "=1.15.0" }
+solana-measure = { path = "../measure", version = "=1.15.0" }
+solana-metrics = { path = "../metrics", version = "=1.15.0" }
 # solana-net-utils = { path = "../net-utils", version = "=1.15.0" }
 # solana-rpc = { path = "../rpc", version = "=1.15.0" }
 # solana-rpc-client = { path = "../rpc-client", version = "=1.15.0", default-features = false }
