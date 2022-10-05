@@ -1,4 +1,8 @@
-use {clap::Parser, cli::Config, log::info};
+use {
+    clap::{crate_name, Parser},
+    cli::Config,
+    log::info,
+};
 
 mod cli;
 
@@ -7,5 +11,5 @@ fn main() {
     solana_metrics::set_panic_hook("contentious-bench-tps", /*version:*/ None);
 
     let config = Config::parse();
-    info!("config: {config:?}");
+    info!("running {} with configuration: {:?}", crate_name!(), config);
 }
