@@ -5002,6 +5002,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-contentious-bench-tps"
+version = "1.15.0"
+
+[[package]]
 name = "solana-core"
 version = "1.15.0"
 dependencies = [
