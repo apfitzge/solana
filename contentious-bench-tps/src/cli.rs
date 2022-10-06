@@ -13,6 +13,6 @@ pub struct Config {
     pub num_contentious_transfer_accounts: usize,
 
     /// Number of non-contentious accounts for transfers
-    #[clap(short, long, value_parser, default_value_t = 100000)]
+    #[clap(short, long, value_parser, default_value_t = 10000)]
     pub num_regular_transfer_accounts: usize,
 }
