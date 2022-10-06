@@ -32,16 +32,10 @@ fn main() {
     let config = Config::parse();
     info!("running {} with configuration: {:?}", crate_name!(), config);
 
-    let Config {
-        entrypoint,
-        num_contentious_transfer_accounts,
-        num_regular_transfer_accounts,
-    } = config;
-
     info!("generating accounts...");
     let accounts = Arc::new(Accounts::new(
-        num_contentious_transfer_accounts,
-        num_regular_transfer_accounts,
+        config.num_contentious_transfer_accounts,
+        config.num_regular_transfer_accounts,
     ));
 
     info!("creating client...");
@@ -51,18 +45,14 @@ fn main() {
     client.fund_accounts(&accounts);
 
     info!("beginning benchmark...");
-    benchmark(client, accounts);
+    benchmark(&config, client, accounts);
 }
 
-fn benchmark(client: Arc<Client>, accounts: Arc<Accounts>) {
-    const NUM_CONTENTIOUS_THREADS: usize = 1;
-    const NUM_REGULAR_THREADS: usize = 4;
-    const BENCHMARK_DURATION: Duration = Duration::from_secs(10);
-
+fn benchmark(config: &Config, client: Arc<Client>, accounts: Arc<Accounts>) {
     let num_transactions_sent = Arc::new(AtomicUsize::new(0));
     let exit = Arc::new(AtomicBool::new(false));
 
-    let contentious_threads = (0..NUM_CONTENTIOUS_THREADS)
+    let contentious_threads = (0..config.num_contentious_transfer_threads)
         .map(|idx| {
             let client = client.clone();
             let accounts = accounts.clone();
@@ -83,7 +73,7 @@ fn benchmark(client: Arc<Client>, accounts: Arc<Accounts>) {
         })
         .collect::<Vec<_>>();
 
-    let regular_threads = (0..NUM_REGULAR_THREADS)
+    let regular_threads = (0..config.num_regular_transfer_threads)
         .map(|idx| {
             let client = client.clone();
             let accounts = accounts.clone();
@@ -104,7 +94,7 @@ fn benchmark(client: Arc<Client>, accounts: Arc<Accounts>) {
         })
         .collect::<Vec<_>>();
     let start = Instant::now();
-    while start.elapsed() < BENCHMARK_DURATION {
+    while start.elapsed() < config.duration {
         let num_transactions_sent = num_transactions_sent.load(Ordering::Relaxed);
         let num_transactions_confirmed = client.get_num_transactions();
         info!(
