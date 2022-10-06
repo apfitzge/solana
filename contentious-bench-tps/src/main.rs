@@ -10,7 +10,7 @@ use {
     },
     std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
         time::{Duration, Instant},
@@ -59,17 +59,24 @@ fn benchmark(client: Arc<Client>, accounts: Arc<Accounts>) {
     const NUM_REGULAR_THREADS: usize = 4;
     const BENCHMARK_DURATION: Duration = Duration::from_secs(10);
 
+    let num_transactions_sent = Arc::new(AtomicUsize::new(0));
     let exit = Arc::new(AtomicBool::new(false));
 
     let contentious_threads = (0..NUM_CONTENTIOUS_THREADS)
         .map(|idx| {
             let client = client.clone();
             let accounts = accounts.clone();
+            let num_transactions_sent = num_transactions_sent.clone();
             let exit = exit.clone();
             std::thread::Builder::new()
                 .name(format!("conSnd-{idx}"))
                 .spawn(move || {
-                    let _ = sender_loop(client, &accounts.contentious_accounts, &exit);
+                    let _ = sender_loop(
+                        client,
+                        &accounts.contentious_accounts,
+                        &num_transactions_sent,
+                        &exit,
+                    );
                     exit.store(true, Ordering::Relaxed);
                 })
                 .unwrap()
@@ -80,11 +87,17 @@ fn benchmark(client: Arc<Client>, accounts: Arc<Accounts>) {
         .map(|idx| {
             let client = client.clone();
             let accounts = accounts.clone();
+            let num_transactions_sent = num_transactions_sent.clone();
             let exit = exit.clone();
             std::thread::Builder::new()
                 .name(format!("regSnd-{idx}"))
                 .spawn(move || {
-                    let _ = sender_loop(client, &accounts.regular_accounts, &exit);
+                    let _ = sender_loop(
+                        client,
+                        &accounts.regular_accounts,
+                        &num_transactions_sent,
+                        &exit,
+                    );
                     exit.store(true, Ordering::Relaxed);
                 })
                 .unwrap()
@@ -92,8 +105,11 @@ fn benchmark(client: Arc<Client>, accounts: Arc<Accounts>) {
         .collect::<Vec<_>>();
     let start = Instant::now();
     while start.elapsed() < BENCHMARK_DURATION {
-        let num_transactions = client.get_num_transactions();
-        info!("transactions: {num_transactions}");
+        let num_transactions_sent = num_transactions_sent.load(Ordering::Relaxed);
+        let num_transactions_confirmed = client.get_num_transactions();
+        info!(
+            "transactions_sent={num_transactions_sent} transactions_confirmed={num_transactions_confirmed}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
     exit.store(true, Ordering::Relaxed);
@@ -107,9 +123,10 @@ fn benchmark(client: Arc<Client>, accounts: Arc<Accounts>) {
 fn sender_loop(
     client: Arc<Client>,
     accounts: &[Keypair],
+    num_transactions_sent: &AtomicUsize,
     exit: &AtomicBool,
 ) -> Result<(), TransportError> {
-    const TRANSACTION_CHUNK_SIZE: usize = 4;
+    const TRANSACTION_CHUNK_SIZE: usize = 128 * 128;
 
     let mut rng = rand::thread_rng();
 
@@ -122,6 +139,7 @@ fn sender_loop(
             &recent_blockhash,
         );
         client.send_transactions(&txs)?;
+        num_transactions_sent.fetch_add(txs.len(), Ordering::Relaxed);
     }
 
     Ok(())
