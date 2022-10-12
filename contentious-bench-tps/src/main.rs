@@ -5,10 +5,12 @@ use {
     log::*,
     rand::Rng,
     solana_sdk::{
-        hash::Hash, signature::Keypair, signer::Signer, system_transaction,
-        transaction::Transaction, transport::TransportError,
+        compute_budget::ComputeBudgetInstruction, hash::Hash, message::Message, pubkey::Pubkey,
+        signature::Keypair, signer::Signer, system_instruction, transaction::Transaction,
+        transport::TransportError,
     },
     std::{
+        ops::RangeInclusive,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
@@ -31,6 +33,7 @@ fn main() {
 
     let config = Config::parse();
     info!("running {} with configuration: {:?}", crate_name!(), config);
+    let config = Arc::new(config);
 
     info!("generating accounts...");
     let accounts = Arc::new(Accounts::new(
@@ -43,20 +46,72 @@ fn main() {
 
     info!("funding accounts...");
     client.fund_accounts(&accounts);
+    check_funds(&client, &accounts);
 
     info!("beginning benchmark...");
     benchmark(&config, client, accounts);
 }
 
-fn benchmark(config: &Config, client: Arc<Client>, accounts: Arc<Accounts>) {
-    let num_transactions_sent = Arc::new(AtomicUsize::new(0));
+fn check_funds(client: &Client, accounts: &Accounts) {
+    let mut num_failure = 0;
+    let mut num_success = 0;
+    for account in accounts
+        .contentious_accounts
+        .iter()
+        .chain(accounts.regular_accounts.iter())
+    {
+        match client.get_balance(&account.pubkey()) {
+            Ok(balance) => {
+                if balance < 1_000_000_000 {
+                    error!(
+                        "account {} has insufficient balance: {}",
+                        account.pubkey(),
+                        balance
+                    );
+                    num_failure += 1;
+                } else {
+                    num_success += 1;
+                }
+            }
+            Err(err) => {
+                error!(
+                    "failed to get balance for account {}: {}",
+                    account.pubkey(),
+                    err
+                );
+                num_failure += 1;
+            }
+        }
+    }
+    error!("num_success={num_success}");
+    assert!(num_failure == 0);
+
+    // let contentious_funds = client.get_funds(&contentious_accounts);
+    // let regular_funds = client.get_funds(&regular_accounts);
+
+    // assert_eq!(
+    //     contentious_funds.len(),
+    //     contentious_accounts.len(),
+    //     "not all contentious accounts have funds"
+    // );
+    // assert_eq!(
+    //     regular_funds.len(),
+    //     regular_accounts.len(),
+    //     "not all regular accounts have funds"
+    // );
+}
+
+fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>) {
+    let num_contentious_transactions_sent = Arc::new(AtomicUsize::new(0));
+    let num_regular_transactions_sent = Arc::new(AtomicUsize::new(0));
     let exit = Arc::new(AtomicBool::new(false));
 
     let contentious_threads = (0..config.num_contentious_transfer_threads)
         .map(|idx| {
+            let config = config.clone();
             let client = client.clone();
             let accounts = accounts.clone();
-            let num_transactions_sent = num_transactions_sent.clone();
+            let num_transactions_sent = num_contentious_transactions_sent.clone();
             let exit = exit.clone();
             std::thread::Builder::new()
                 .name(format!("conSnd-{idx}"))
@@ -64,6 +119,8 @@ fn benchmark(config: &Config, client: Arc<Client>, accounts: Arc<Accounts>) {
                     let _ = sender_loop(
                         client,
                         &accounts.contentious_accounts,
+                        &accounts.regular_accounts, // transfer to regular accounts so we don't have many repeated transactions
+                        &config.contentious_transfer_fee_range,
                         &num_transactions_sent,
                         &exit,
                     );
@@ -75,16 +132,20 @@ fn benchmark(config: &Config, client: Arc<Client>, accounts: Arc<Accounts>) {
 
     let regular_threads = (0..config.num_regular_transfer_threads)
         .map(|idx| {
+            let config = config.clone();
             let client = client.clone();
             let accounts = accounts.clone();
-            let num_transactions_sent = num_transactions_sent.clone();
+            let num_transactions_sent = num_regular_transactions_sent.clone();
             let exit = exit.clone();
             std::thread::Builder::new()
                 .name(format!("regSnd-{idx}"))
                 .spawn(move || {
+                    let partition = accounts.regular_accounts.len() / 2;
                     let _ = sender_loop(
                         client,
-                        &accounts.regular_accounts,
+                        &accounts.regular_accounts[..partition],
+                        &accounts.regular_accounts[partition..],
+                        &config.regular_transfer_fee_range,
                         &num_transactions_sent,
                         &exit,
                     );
@@ -93,16 +154,45 @@ fn benchmark(config: &Config, client: Arc<Client>, accounts: Arc<Accounts>) {
                 .unwrap()
         })
         .collect::<Vec<_>>();
+
+    // wait a bit to see how many transactions were confirmed for the funding
     let start = Instant::now();
     while start.elapsed() < config.duration {
-        let num_transactions_sent = num_transactions_sent.load(Ordering::Relaxed);
+        let num_contentious_transactions_sent =
+            num_contentious_transactions_sent.load(Ordering::Relaxed);
+        let num_regular_transactions_sent = num_regular_transactions_sent.load(Ordering::Relaxed);
         let num_transactions_confirmed = client.get_num_transactions();
         info!(
-            "transactions_sent={num_transactions_sent} transactions_confirmed={num_transactions_confirmed}"
+            "num_contentious_transactions_sent={num_contentious_transactions_sent} regular_transactions_sent={num_regular_transactions_sent} transactions_confirmed={num_transactions_confirmed}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let start = Instant::now();
+    while start.elapsed() < config.duration {
+        let num_contentious_transactions_sent =
+            num_contentious_transactions_sent.load(Ordering::Relaxed);
+        let num_regular_transactions_sent = num_regular_transactions_sent.load(Ordering::Relaxed);
+        let num_transactions_confirmed = client.get_num_transactions();
+        info!(
+            "num_contentious_transactions_sent={num_contentious_transactions_sent} regular_transactions_sent={num_regular_transactions_sent} transactions_confirmed={num_transactions_confirmed}"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
     exit.store(true, Ordering::Relaxed);
+
+    // wait another round to see how many more get confirmed in the next bit (no more sending)
+    let start = Instant::now();
+    while start.elapsed() < config.duration {
+        let num_contentious_transactions_sent =
+            num_contentious_transactions_sent.load(Ordering::Relaxed);
+        let num_regular_transactions_sent = num_regular_transactions_sent.load(Ordering::Relaxed);
+        let num_transactions_confirmed = client.get_num_transactions();
+        info!(
+            "num_contentious_transactions_sent={num_contentious_transactions_sent} regular_transactions_sent={num_regular_transactions_sent} transactions_confirmed={num_transactions_confirmed}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     contentious_threads
         .into_iter()
@@ -112,7 +202,9 @@ fn benchmark(config: &Config, client: Arc<Client>, accounts: Arc<Accounts>) {
 
 fn sender_loop(
     client: Arc<Client>,
-    accounts: &[Keypair],
+    from_accounts: &[Keypair],
+    to_accounts: &[Keypair],
+    fee_range: &Option<RangeInclusive<u64>>,
     num_transactions_sent: &AtomicUsize,
     exit: &AtomicBool,
 ) -> Result<(), TransportError> {
@@ -123,10 +215,12 @@ fn sender_loop(
     while !exit.load(Ordering::Relaxed) {
         let recent_blockhash = client.get_recent_blockhash();
         let txs = generate_transactions(
-            accounts,
+            from_accounts,
+            to_accounts,
+            fee_range,
             TRANSACTION_CHUNK_SIZE,
-            &mut rng,
             &recent_blockhash,
+            &mut rng,
         );
         client.send_transactions(&txs)?;
         num_transactions_sent.fetch_add(txs.len(), Ordering::Relaxed);
@@ -136,25 +230,60 @@ fn sender_loop(
 }
 
 fn generate_transactions(
-    accounts: &[Keypair],
+    from_accounts: &[Keypair],
+    to_accounts: &[Keypair],
+    fee_range: &Option<RangeInclusive<u64>>,
     num_txs: usize,
-    rng: &mut impl Rng,
     recent_blockhash: &Hash,
+    rng: &mut impl Rng,
 ) -> Vec<Transaction> {
     (0..num_txs)
-        .map(|_| {
-            let from = rng.gen_range(0..accounts.len());
-            let to = loop {
-                let x = rng.gen_range(0..accounts.len());
-                if x != from {
-                    break x;
-                }
-            };
-
-            let from_keypair = &accounts[from];
-            let to_pubkey = &accounts[to].pubkey();
-
-            system_transaction::transfer(from_keypair, to_pubkey, 1, *recent_blockhash)
-        })
+        .map(|_| generate_transaction(from_accounts, to_accounts, fee_range, recent_blockhash, rng))
         .collect()
+}
+
+/// Generate a transfer transaction with an additional compute-unit fee for prioritization
+fn generate_transaction(
+    from_accounts: &[Keypair],
+    to_accounts: &[Keypair],
+    fee_range: &Option<RangeInclusive<u64>>,
+    recent_blockhash: &Hash,
+    rng: &mut impl Rng,
+) -> Transaction {
+    let (from_keypair, to_pubkey) = generate_transfer_accounts(from_accounts, to_accounts, rng);
+    let mut instructions = vec![system_instruction::transfer(
+        &from_keypair.pubkey(),
+        &to_pubkey,
+        1,
+    )];
+    if let Some(fee_range) = fee_range {
+        let compute_unit_price = generate_compute_unit_price(fee_range, rng);
+        instructions.extend_from_slice(&[
+            ComputeBudgetInstruction::set_compute_unit_limit(200000),
+            ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
+        ]);
+    }
+
+    let message = Message::new(&instructions, Some(&from_keypair.pubkey()));
+    Transaction::new(&[from_keypair], message, *recent_blockhash)
+}
+
+/// Generate a random keypair to transfer from and pubkey to
+fn generate_transfer_accounts<'a>(
+    from_accounts: &'a [Keypair],
+    to_accounts: &'a [Keypair],
+    rng: &mut impl Rng,
+) -> (&'a Keypair, Pubkey) {
+    let from = rng.gen_range(0..from_accounts.len());
+    let to = rng.gen_range(0..to_accounts.len());
+
+    let from_keypair = &from_accounts[from];
+    let to_pubkey = (&to_accounts[to]).pubkey();
+
+    (from_keypair, to_pubkey)
+}
+
+/// Generate a random fee in the given range
+fn generate_compute_unit_price(fee_range: &RangeInclusive<u64>, rng: &mut impl Rng) -> u64 {
+    rng.gen_range(*fee_range.start()..=*fee_range.end())
 }
