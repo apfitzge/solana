@@ -212,17 +212,18 @@ fn sender_loop(
 
     let mut rng = rand::thread_rng();
 
+    let (unsigned_txs, signers) = generate_transactions(
+        from_accounts,
+        to_accounts,
+        fee_range,
+        TRANSACTION_CHUNK_SIZE,
+        &mut rng,
+    );
+
     while !exit.load(Ordering::Relaxed) {
         let recent_blockhash = client.get_recent_blockhash();
-        let txs = generate_transactions(
-            from_accounts,
-            to_accounts,
-            fee_range,
-            TRANSACTION_CHUNK_SIZE,
-            &recent_blockhash,
-            &mut rng,
-        );
-        client.send_transactions(&txs)?;
+        let txs = sign_transactions(&unsigned_txs, &signers, recent_blockhash);
+        client.send_transactions(&txs).unwrap();
         num_transactions_sent.fetch_add(txs.len(), Ordering::Relaxed);
     }
 
@@ -234,11 +235,28 @@ fn generate_transactions(
     to_accounts: &[Keypair],
     fee_range: &Option<RangeInclusive<u64>>,
     num_txs: usize,
-    recent_blockhash: &Hash,
     rng: &mut impl Rng,
-) -> Vec<Transaction> {
+) -> (Vec<Message>, Vec<Keypair>) {
+    let mut messages = Vec::with_capacity(num_txs);
+    let mut signers = Vec::with_capacity(num_txs);
     (0..num_txs)
-        .map(|_| generate_transaction(from_accounts, to_accounts, fee_range, recent_blockhash, rng))
+        .map(|_| generate_transaction(from_accounts, to_accounts, fee_range, rng))
+        .for_each(|(message, signer)| {
+            messages.push(message);
+            signers.push(signer.insecure_clone());
+        });
+    (messages, signers)
+}
+
+fn sign_transactions<'a>(
+    messages: &[Message],
+    signers: &[Keypair],
+    recent_blockhash: Hash,
+) -> Vec<Transaction> {
+    messages
+        .iter()
+        .zip(signers.iter())
+        .map(|(message, signer)| Transaction::new(&[signer], message.clone(), recent_blockhash))
         .collect()
 }
 
@@ -247,9 +265,8 @@ fn generate_transaction(
     from_accounts: &[Keypair],
     to_accounts: &[Keypair],
     fee_range: &Option<RangeInclusive<u64>>,
-    recent_blockhash: &Hash,
     rng: &mut impl Rng,
-) -> Transaction {
+) -> (Message, Keypair) {
     let (from_keypair, to_pubkey) = generate_transfer_accounts(from_accounts, to_accounts, rng);
     let mut instructions = vec![system_instruction::transfer(
         &from_keypair.pubkey(),
@@ -265,7 +282,7 @@ fn generate_transaction(
     }
 
     let message = Message::new(&instructions, Some(&from_keypair.pubkey()));
-    Transaction::new(&[from_keypair], message, *recent_blockhash)
+    (message, from_keypair.insecure_clone())
 }
 
 /// Generate a random keypair to transfer from and pubkey to
