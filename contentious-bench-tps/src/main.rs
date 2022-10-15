@@ -185,17 +185,17 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
     exit.store(true, Ordering::Relaxed);
 
     // wait another round to see how many more get confirmed in the next bit (no more sending)
-    let start = Instant::now();
-    while start.elapsed() < config.duration {
-        let num_contentious_transactions_sent =
-            num_contentious_transactions_sent.load(Ordering::Relaxed);
-        let num_regular_transactions_sent = num_regular_transactions_sent.load(Ordering::Relaxed);
-        let num_transactions_confirmed = client.get_num_transactions();
-        info!(
-            "num_contentious_transactions_sent={num_contentious_transactions_sent} regular_transactions_sent={num_regular_transactions_sent} transactions_confirmed={num_transactions_confirmed}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+//    let start = Instant::now();
+//    while start.elapsed() < config.duration {
+//        let num_contentious_transactions_sent =
+//            num_contentious_transactions_sent.load(Ordering::Relaxed);
+//        let num_regular_transactions_sent = num_regular_transactions_sent.load(Ordering::Relaxed);
+//        let num_transactions_confirmed = client.get_num_transactions();
+//        info!(
+//            "num_contentious_transactions_sent={num_contentious_transactions_sent} regular_transactions_sent={num_regular_transactions_sent} transactions_confirmed={num_transactions_confirmed}"
+//        );
+//        std::thread::sleep(Duration::from_millis(100));
+//    }
 
     contentious_threads
         .into_iter()
@@ -212,11 +212,14 @@ fn sender_loop(
     num_transactions_sent: &AtomicUsize,
     exit: &AtomicBool,
 ) -> Result<(), TransportError> {
-    const TRANSACTION_CHUNK_SIZE: usize = 128 * 128;
+    const TRANSACTION_CHUNK_SIZE: usize = 128;
 
     let mut rng = rand::thread_rng();
 
-    let (unsigned_txs, signers) = generate_transactions(
+    let should_log = thread_idx == 0;
+
+    while !exit.load(Ordering::Relaxed) {
+     let (unsigned_txs, signers) = generate_transactions(
         from_accounts,
         to_accounts,
         fee_range,
@@ -224,22 +227,19 @@ fn sender_loop(
         &mut rng,
     );
 
-    let should_log = thread_idx == 0;
-
-    while !exit.load(Ordering::Relaxed) {
-        let (recent_blockhash, get_blockhash_time) = measure!(client.get_recent_blockhash());
+       let (recent_blockhash, get_blockhash_time) = measure!(client.get_recent_blockhash());
         let (txs, sign_time) =
             measure!(sign_transactions(&unsigned_txs, &signers, recent_blockhash));
         let (_, send_time) = measure!(client.send_transactions(&txs).unwrap());
 
         if should_log {
-            info!(
-                "thread_idx={} get_blockhash_time={}ms sign_time={}ms send_time={}ms",
-                thread_idx,
-                get_blockhash_time.as_ms(),
-                sign_time.as_ms(),
-                send_time.as_ms(),
-            );
+//            info!(
+//                "thread_idx={} get_blockhash_time={}ms sign_time={}ms send_time={}ms",
+//                thread_idx,
+//                get_blockhash_time.as_ms(),
+//                sign_time.as_ms(),
+//                send_time.as_ms(),
+//            );
         }
 
         num_transactions_sent.fetch_add(txs.len(), Ordering::Relaxed);

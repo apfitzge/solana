@@ -132,7 +132,7 @@ impl Client {
 
     /// Fund an individual account
     fn fund_account(&self, account: &Keypair, recent_blockhash: &Hash) {
-        const LAMPORTS_PER_ACCOUNT: u64 = 1_000_000_000;
+        const LAMPORTS_PER_ACCOUNT: u64 = 1_000_000_000_000;
 
         self.client
             .rpc_client()
