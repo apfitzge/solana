@@ -18,14 +18,14 @@ const RECEIVE_FILTER_ACCOUNT_MAX_CU: u64 = 4 * MAX_WRITABLE_ACCOUNT_UNITS;
 
 /// Filters out transactions exceeding a write-account compute-unit threshold.
 pub struct ReceiveAccountFilter {
-    /// Last clearing time - should be cleared incrementally
-    last_clear_time: Instant,
-    /// Total compute units for write-account hash
-    compute_units: Vec<u64>,
     /// Seed for hashing write-accounts
     seed: (u128, u128),
+    /// Total compute units for write-account hash
+    compute_units: Vec<u64>,
     /// Banking stage thread id - used to distringuish metrics
     id: u32,
+    /// Last clearing time - should be cleared incrementally
+    last_clear_time: Instant,
     /// Count the number of filtered transactions
     num_filtered: u64,
 }
@@ -36,10 +36,10 @@ impl ReceiveAccountFilter {
         let seed = thread_rng().gen();
 
         Self {
-            last_clear_time: Instant::now(),
-            compute_units: vec![0; HASH_BUFFER_SIZE],
             seed,
+            compute_units: vec![0; HASH_BUFFER_SIZE],
             id,
+            last_clear_time: Instant::now(),
             num_filtered: 0,
         }
     }
