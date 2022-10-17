@@ -2247,7 +2247,7 @@ impl BankingStage {
         tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), RecvTimeoutError> {
-        receive_account_filter.reset();
+        receive_account_filter.reset_on_interval();
         let mut recv_time = Measure::start("receive_and_buffer_packets_recv");
         let ReceivePacketResults {
             deserialized_packets,

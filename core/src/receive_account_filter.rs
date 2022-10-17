@@ -48,15 +48,11 @@ impl ReceiveAccountFilter {
     }
 
     /// Reset the filter and send metrics
-    pub fn reset(&mut self) {
+    pub fn reset_on_interval(&mut self) {
         const CLEAR_INTERVAL: Duration = Duration::from_millis(400); // clear every slot
         if self.last_clear_time.elapsed() >= CLEAR_INTERVAL {
             self.report_metrics();
-            self.last_clear_time = Instant::now();
-            self.compute_units.clear();
-            self.compute_units.resize(HASH_BUFFER_SIZE, 0);
-            self.num_filtered = 0;
-            self.num_passed = 0;
+            self.reset();
         }
     }
 
@@ -93,6 +89,15 @@ impl ReceiveAccountFilter {
         (usize::try_from(h).unwrap()).wrapping_rem(HASH_BUFFER_SIZE)
     }
 
+    /// Reset state
+    fn reset(&mut self) {
+        self.last_clear_time = Instant::now();
+        self.compute_units.clear();
+        self.compute_units.resize(HASH_BUFFER_SIZE, 0);
+        self.num_filtered = 0;
+        self.num_passed = 0;
+    }
+
     /// Report metrics on how many transactions were filtered out
     fn report_metrics(&self) {
         datapoint_info!(
@@ -101,5 +106,31 @@ impl ReceiveAccountFilter {
             ("num_filtered", self.num_filtered, i64),
             ("num_passed", self.num_passed, i64),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        crate::receive_account_filter::RECEIVE_FILTER_ACCOUNT_MAX_CU, solana_sdk::pubkey::Pubkey,
+    };
+
+    #[test]
+    fn test_should_filter() {
+        // TODO: this test is flaky - we're relying on hash function binning w/ random keys
+        const TEST_TX_COST: u64 = RECEIVE_FILTER_ACCOUNT_MAX_CU / 2;
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let pk3 = Pubkey::new_unique();
+        let pk4 = Pubkey::new_unique();
+
+        let mut filter = super::ReceiveAccountFilter::new(0);
+
+        assert!(!filter.should_filter([pk1, pk2].iter(), TEST_TX_COST)); // under limit shouldn't filter
+        assert!(!filter.should_filter([pk1, pk3].iter(), TEST_TX_COST)); // at limit for pk1, shouldn't filter
+        assert!(filter.should_filter([pk1, pk4].iter(), TEST_TX_COST)); // at limit for pk1, shouldn't filter. ** still adds to pk4 **
+        assert!(!filter.should_filter([pk2, pk4].iter(), TEST_TX_COST)); // at limit for pk2 and pk4, shoulnd't filter
+        filter.reset(); // force reset - no interval check
+        assert!(!filter.should_filter([pk1, pk2].iter(), TEST_TX_COST)); // limits reset - we can do this again
     }
 }
