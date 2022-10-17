@@ -49,7 +49,7 @@ impl ReceiveAccountFilter {
 
     /// Reset the filter and send metrics
     pub fn reset_on_interval(&mut self) {
-        const CLEAR_INTERVAL: Duration = Duration::from_millis(400); // clear every slot
+        const CLEAR_INTERVAL: Duration = Duration::from_millis(2000);
         if self.last_clear_time.elapsed() >= CLEAR_INTERVAL {
             self.report_metrics();
             self.reset();
