@@ -4,7 +4,7 @@
 
 use {
     ahash::AHasher,
-    rand::thread_rng,
+    rand::{thread_rng, Rng},
     solana_runtime::block_cost_limits::MAX_WRITABLE_ACCOUNT_UNITS,
     solana_sdk::{pubkey::Pubkey, saturating_add_assign},
     std::{hash::Hasher, time::Instant},
@@ -42,10 +42,10 @@ impl ReceiveAccountFilter {
 
     /// Iterates over accounts and accumulates CUs for each write account
     /// Returns true if the transaction should be filtered out
-    pub fn should_filter(&mut self, write_accounts: &[Pubkey], compute_units: u64) -> bool {
+    pub fn should_filter(&mut self, write_accounts: &[&Pubkey], compute_units: u64) -> bool {
         let mut should_filter = false;
         for account in write_accounts {
-            let bin = self.get_account_bin(write_account);
+            let bin = self.get_account_bin(account);
             saturating_add_assign!(self.compute_units[bin], compute_units);
 
             // Add to all bins - return true if any exceed
@@ -56,9 +56,9 @@ impl ReceiveAccountFilter {
     }
 
     /// Compute hash for write-account. Returns (hash, bin_pos)
-    fn get_account_bin(&self, write_account: &Pubkey) -> (u64, usize) {
+    fn get_account_bin(&self, write_account: &Pubkey) -> usize {
         let mut hasher = AHasher::new_with_keys(self.seed.0, self.seed.1);
-        hasher.write(write_account.as_ref()).unwrap_or_default();
+        hasher.write(write_account.as_ref());
         let h = hasher.finish();
         (usize::try_from(h).unwrap()).wrapping_rem(HASH_BUFFER_SIZE)
     }
