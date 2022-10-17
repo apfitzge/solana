@@ -2355,7 +2355,7 @@ impl BankingStage {
                         .filter(|(immutable_packet, sanitized_transaciton)| {
                             let compute_units = immutable_packet.compute_unit_limit(); // TODO: should use estimator here?
                             let account_locks = sanitized_transaciton.get_account_locks_unchecked();
-                            receive_account_filter
+                            !receive_account_filter
                                 .should_filter(&account_locks.writable[..], compute_units)
                         })
                         .map(|(immutable_packet, _)| {
