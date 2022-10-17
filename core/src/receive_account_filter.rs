@@ -21,7 +21,7 @@ pub struct ReceiveAccountFilter {
     /// Last clearing time - should be cleared incrementally
     last_clear_time: Instant,
     /// Total compute units for write-account hash
-    compute_units: [u64; HASH_BUFFER_SIZE],
+    compute_units: Vec<u64>,
     /// Seed for hashing write-accounts
     seed: (u128, u128),
     /// Banking stage thread id - used to distringuish metrics
@@ -34,9 +34,10 @@ impl ReceiveAccountFilter {
     /// Creates a new filter with random seed
     pub fn new(id: u32) -> Self {
         let seed = thread_rng().gen();
+
         Self {
             last_clear_time: Instant::now(),
-            compute_units: [0; HASH_BUFFER_SIZE],
+            compute_units: vec![0; HASH_BUFFER_SIZE],
             seed,
             id,
             num_filtered: 0,
@@ -49,7 +50,8 @@ impl ReceiveAccountFilter {
         if self.last_clear_time.elapsed() >= CLEAR_INTERVAL {
             self.report_metrics();
             self.last_clear_time = Instant::now();
-            self.compute_units = [0; HASH_BUFFER_SIZE];
+            self.compute_units.clear();
+            self.compute_units.resize(HASH_BUFFER_SIZE, 0);
             self.num_filtered = 0;
         }
     }
