@@ -28,6 +28,8 @@ pub struct ReceiveAccountFilter {
     last_clear_time: Instant,
     /// Count the number of filtered transactions
     num_filtered: u64,
+    /// Count the number of passed transactions
+    num_passed: u64,
 }
 
 impl ReceiveAccountFilter {
@@ -41,18 +43,20 @@ impl ReceiveAccountFilter {
             id,
             last_clear_time: Instant::now(),
             num_filtered: 0,
+            num_passed: 0,
         }
     }
 
     /// Reset the filter and send metrics
     pub fn reset(&mut self) {
-        const CLEAR_INTERVAL: Duration = Duration::from_secs(1);
+        const CLEAR_INTERVAL: Duration = Duration::from_millis(400); // clear every slot
         if self.last_clear_time.elapsed() >= CLEAR_INTERVAL {
             self.report_metrics();
             self.last_clear_time = Instant::now();
             self.compute_units.clear();
             self.compute_units.resize(HASH_BUFFER_SIZE, 0);
             self.num_filtered = 0;
+            self.num_passed = 0;
         }
     }
 
@@ -70,6 +74,8 @@ impl ReceiveAccountFilter {
 
         if should_filter {
             saturating_add_assign!(self.num_filtered, 1);
+        } else {
+            saturating_add_assign!(self.num_passed, 1);
         }
 
         should_filter
@@ -89,6 +95,7 @@ impl ReceiveAccountFilter {
             "receive_account_filter",
             ("id", self.id, i64),
             ("num_filtered", self.num_filtered, i64),
+            ("num_passed", self.num_passed, i64),
         );
     }
 }
