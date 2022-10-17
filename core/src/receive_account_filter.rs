@@ -62,7 +62,11 @@ impl ReceiveAccountFilter {
 
     /// Iterates over accounts and accumulates CUs for each write account
     /// Returns true if the transaction should be filtered out
-    pub fn should_filter(&mut self, write_accounts: &[&Pubkey], compute_units: u64) -> bool {
+    pub fn should_filter<'a>(
+        &mut self,
+        write_accounts: impl Iterator<Item = &'a Pubkey>,
+        compute_units: u64,
+    ) -> bool {
         let mut should_filter = false;
         for account in write_accounts {
             let bin = self.get_account_bin(account);

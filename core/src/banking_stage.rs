@@ -46,7 +46,6 @@ use {
         bank_forks::BankForks,
         bank_utils,
         cost_model::{CostModel, TransactionCost},
-        root_bank_cache::RootBankCache,
         transaction_batch::TransactionBatch,
         transaction_error_metrics::TransactionErrorMetrics,
         vote_sender_types::ReplayVoteSender,
@@ -1339,7 +1338,6 @@ impl BankingStage {
         let mut tracer_packet_stats = TracerPacketStats::new(id);
         let qos_service = QosService::new(cost_model, id);
         let mut receive_account_filter = ReceiveAccountFilter::new(id);
-        let mut root_bank_cache = RootBankCache::new(bank_forks.clone());
 
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::new(id);
         let mut last_metrics_update = Instant::now();
@@ -1389,15 +1387,12 @@ impl BankingStage {
                 Duration::from_millis(100)
             };
 
-            // TODO: should I use root bank here?
-            let root_bank = root_bank_cache.root_bank();
             let (res, receive_and_buffer_packets_time) = measure!(
                 Self::receive_and_buffer_packets(
                     packet_deserializer,
                     recv_start,
                     recv_timeout,
                     id,
-                    &root_bank,
                     &mut receive_account_filter,
                     &mut buffered_packet_batches,
                     &mut banking_stage_stats,
@@ -2246,7 +2241,6 @@ impl BankingStage {
         recv_start: &mut Instant,
         recv_timeout: Duration,
         id: u32,
-        bank: &Bank,
         receive_account_filter: &mut ReceiveAccountFilter,
         buffered_packet_batches: &mut UnprocessedPacketBatches,
         banking_stage_stats: &mut BankingStageStats,
@@ -2285,7 +2279,6 @@ impl BankingStage {
         let mut newly_buffered_packets_count = 0;
         Self::push_unprocessed(
             buffered_packet_batches,
-            bank,
             receive_account_filter,
             deserialized_packets,
             &mut dropped_packets_count,
@@ -2320,7 +2313,6 @@ impl BankingStage {
 
     fn push_unprocessed(
         unprocessed_packet_batches: &mut UnprocessedPacketBatches,
-        bank: &Bank,
         receive_account_filter: &mut ReceiveAccountFilter,
         deserialized_packets: Vec<ImmutableDeserializedPacket>,
         dropped_packets_count: &mut usize,
@@ -2342,25 +2334,18 @@ impl BankingStage {
                 unprocessed_packet_batches.insert_batch(
                     deserialized_packets
                         .into_iter()
-                        .filter_map(|immutable_packet| {
-                            let sanitized_transaction =
-                                unprocessed_packet_batches::transaction_from_deserialized_packet(
-                                    &immutable_packet,
-                                    &bank.feature_set,
-                                    bank.vote_only_bank(),
-                                    bank,
-                                )?;
-                            Some((immutable_packet, sanitized_transaction))
+                        .filter(|p| {
+                            let message = &p.transaction().get_message().message;
+                            let static_keys = message.static_account_keys();
+                            let writable = static_keys
+                                .iter()
+                                .enumerate()
+                                .filter(|(idx, _)| message.is_maybe_writable(*idx))
+                                .map(|(_, k)| k);
+                            let compute_units = p.compute_unit_limit();
+                            !receive_account_filter.should_filter(writable, compute_units)
                         })
-                        .filter(|(immutable_packet, sanitized_transaciton)| {
-                            let compute_units = immutable_packet.compute_unit_limit(); // TODO: should use estimator here?
-                            let account_locks = sanitized_transaciton.get_account_locks_unchecked();
-                            !receive_account_filter
-                                .should_filter(&account_locks.writable[..], compute_units)
-                        })
-                        .map(|(immutable_packet, _)| {
-                            DeserializedPacket::from_immutable_section(immutable_packet)
-                        }),
+                        .map(DeserializedPacket::from_immutable_section), // deserialized_packets
                 );
 
             saturating_add_assign!(*dropped_packets_count, number_of_dropped_packets);
