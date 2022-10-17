@@ -7,7 +7,10 @@ use {
     rand::{thread_rng, Rng},
     solana_runtime::block_cost_limits::MAX_WRITABLE_ACCOUNT_UNITS,
     solana_sdk::{pubkey::Pubkey, saturating_add_assign},
-    std::{hash::Hasher, time::Instant},
+    std::{
+        hash::Hasher,
+        time::{Duration, Instant},
+    },
 };
 
 const HASH_BUFFER_SIZE: usize = 1_000_000;
@@ -21,23 +24,34 @@ pub struct ReceiveAccountFilter {
     compute_units: [u64; HASH_BUFFER_SIZE],
     /// Seed for hashing write-accounts
     seed: (u128, u128),
+    /// Banking stage thread id - used to distringuish metrics
+    id: u32,
+    /// Count the number of filtered transactions
+    num_filtered: u64,
 }
 
 impl ReceiveAccountFilter {
     /// Creates a new filter with random seed
-    pub fn new() -> Self {
+    pub fn new(id: u32) -> Self {
         let seed = thread_rng().gen();
         Self {
             last_clear_time: Instant::now(),
             compute_units: [0; HASH_BUFFER_SIZE],
             seed,
+            id,
+            num_filtered: 0,
         }
     }
 
     /// Reset the filter and send metrics
     pub fn reset(&mut self) {
-        self.last_clear_time = Instant::now();
-        self.compute_units = [0; HASH_BUFFER_SIZE];
+        const CLEAR_INTERVAL: Duration = Duration::from_secs(1);
+        if self.last_clear_time.elapsed() >= CLEAR_INTERVAL {
+            self.report_metrics();
+            self.last_clear_time = Instant::now();
+            self.compute_units = [0; HASH_BUFFER_SIZE];
+            self.num_filtered = 0;
+        }
     }
 
     /// Iterates over accounts and accumulates CUs for each write account
@@ -52,6 +66,10 @@ impl ReceiveAccountFilter {
             should_filter |= self.compute_units[bin] > RECEIVE_FILTER_ACCOUNT_MAX_CU;
         }
 
+        if should_filter {
+            saturating_add_assign!(self.num_filtered, 1);
+        }
+
         should_filter
     }
 
@@ -61,5 +79,14 @@ impl ReceiveAccountFilter {
         hasher.write(write_account.as_ref());
         let h = hasher.finish();
         (usize::try_from(h).unwrap()).wrapping_rem(HASH_BUFFER_SIZE)
+    }
+
+    /// Report metrics on how many transactions were filtered out
+    fn report_metrics(&self) {
+        datapoint_info!(
+            "receive_account_filter",
+            ("id", self.id, i64),
+            ("num_filtered", self.num_filtered, i64),
+        );
     }
 }

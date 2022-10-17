@@ -1338,7 +1338,7 @@ impl BankingStage {
         let mut banking_stage_stats = BankingStageStats::new(id);
         let mut tracer_packet_stats = TracerPacketStats::new(id);
         let qos_service = QosService::new(cost_model, id);
-        let mut receive_account_filter = ReceiveAccountFilter::new();
+        let mut receive_account_filter = ReceiveAccountFilter::new(id);
         let mut root_bank_cache = RootBankCache::new(bank_forks.clone());
 
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::new(id);
@@ -2253,6 +2253,7 @@ impl BankingStage {
         tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), RecvTimeoutError> {
+        receive_account_filter.reset();
         let mut recv_time = Measure::start("receive_and_buffer_packets_recv");
         let ReceivePacketResults {
             deserialized_packets,
