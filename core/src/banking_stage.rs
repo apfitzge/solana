@@ -2314,7 +2314,7 @@ impl BankingStage {
     fn push_unprocessed(
         unprocessed_packet_batches: &mut UnprocessedPacketBatches,
         receive_account_filter: &mut ReceiveAccountFilter,
-        deserialized_packets: Vec<ImmutableDeserializedPacket>,
+        mut deserialized_packets: Vec<ImmutableDeserializedPacket>,
         dropped_packets_count: &mut usize,
         newly_buffered_packets_count: &mut usize,
         banking_stage_stats: &mut BankingStageStats,
@@ -2330,6 +2330,9 @@ impl BankingStage {
             slot_metrics_tracker
                 .increment_newly_buffered_packets_count(deserialized_packets.len() as u64);
 
+            // sort the deserialized packets by priority - higher prio tx get into the `receive_account_filter` first
+            deserialized_packets.sort();
+
             let (number_of_dropped_packets, number_of_dropped_tracer_packets) =
                 unprocessed_packet_batches.insert_batch(
                     deserialized_packets
@@ -2342,7 +2345,7 @@ impl BankingStage {
                                 .enumerate()
                                 .filter(|(idx, _)| message.is_maybe_writable(*idx))
                                 .map(|(_, k)| k);
-                            let compute_units = p.compute_unit_limit();
+                            let compute_units = p.compute_unit_limit(); // TODO: should this be estimate?
                             !receive_account_filter.should_filter(writable, compute_units)
                         })
                         .map(DeserializedPacket::from_immutable_section), // deserialized_packets

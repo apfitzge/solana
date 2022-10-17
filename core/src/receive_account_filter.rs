@@ -58,27 +58,31 @@ impl ReceiveAccountFilter {
 
     /// Iterates over accounts and accumulates CUs for each write account
     /// Returns true if the transaction should be filtered out
+    ///
+    /// Note: If two or more keys in the same transaction hash to the same bin, the CU count check only considers them once.
+    ///       but the value is incremented for all.
     pub fn should_filter<'a>(
         &mut self,
         write_accounts: impl Iterator<Item = &'a Pubkey>,
         compute_units: u64,
     ) -> bool {
-        let mut should_filter = false;
-        for account in write_accounts {
-            let bin = self.get_account_bin(account);
+        let bins = write_accounts
+            .map(|a| self.get_account_bin(a))
+            .collect::<Vec<_>>();
+
+        for bin in bins.iter() {
+            if self.compute_units[*bin] + compute_units > RECEIVE_FILTER_ACCOUNT_MAX_CU {
+                saturating_add_assign!(self.num_filtered, 1);
+                return true;
+            }
+        }
+
+        for bin in bins {
             saturating_add_assign!(self.compute_units[bin], compute_units);
-
-            // Add to all bins - return true if any exceed
-            should_filter |= self.compute_units[bin] > RECEIVE_FILTER_ACCOUNT_MAX_CU;
         }
 
-        if should_filter {
-            saturating_add_assign!(self.num_filtered, 1);
-        } else {
-            saturating_add_assign!(self.num_passed, 1);
-        }
-
-        should_filter
+        saturating_add_assign!(self.num_passed, 1);
+        false
     }
 
     /// Compute hash for write-account.
@@ -128,8 +132,9 @@ mod tests {
 
         assert!(!filter.should_filter([pk1, pk2].iter(), TEST_TX_COST)); // under limit shouldn't filter
         assert!(!filter.should_filter([pk1, pk3].iter(), TEST_TX_COST)); // at limit for pk1, shouldn't filter
-        assert!(filter.should_filter([pk1, pk4].iter(), TEST_TX_COST)); // at limit for pk1, shouldn't filter. ** still adds to pk4 **
-        assert!(!filter.should_filter([pk2, pk4].iter(), TEST_TX_COST)); // at limit for pk2 and pk4, shoulnd't filter
+        assert!(filter.should_filter([pk1, pk4].iter(), TEST_TX_COST)); // above limit for pk1, should filter - pk4 is not incremented
+        assert!(!filter.should_filter([pk2, pk4].iter(), TEST_TX_COST)); // at limit for pk2, shoulnd't filter
+        assert!(!filter.should_filter([pk3, pk4].iter(), TEST_TX_COST)); // at limit for pk3 and pk4, shoulnd't filter
         filter.reset(); // force reset - no interval check
         assert!(!filter.should_filter([pk1, pk2].iter(), TEST_TX_COST)); // limits reset - we can do this again
     }
