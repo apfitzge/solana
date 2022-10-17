@@ -81,7 +81,7 @@ impl ReceiveAccountFilter {
         should_filter
     }
 
-    /// Compute hash for write-account. Returns (hash, bin_pos)
+    /// Compute hash for write-account.
     fn get_account_bin(&self, write_account: &Pubkey) -> usize {
         let mut hasher = AHasher::new_with_keys(self.seed.0, self.seed.1);
         hasher.write(write_account.as_ref());
