@@ -47,7 +47,7 @@ use {
 
 const MAX_BATCH_SIZE: usize = 64;
 const MAX_QUEUED_BATCHES: usize = 8; // re-evaluate this number
-const MAX_BATCH_AGE: Duration = Duration::from_millis(25);
+const MAX_BATCH_AGE: Duration = Duration::from_millis(1);
 
 #[derive(Debug)]
 /// A sanitized transaction with the packet priority
@@ -403,26 +403,25 @@ where
 
     /// Run the scheduler loop
     fn run(&mut self) {
-        const RECV_TIMEOUT: Duration = Duration::from_millis(100);
         let mut prev_decision = self.banking_decision_maker.make_decision();
         loop {
             // Potentially receive packets
-            // let timeout = if self.transaction_queue.pending_transactions.len() > 100000
-            //     || self.transaction_queue.num_blocked_packets > 100000
-            // {
-            //     Duration::from_millis(0)
-            // } else {
-            //     Duration::from_millis(10)
-            // };
-            let recv_result = self.receive_and_buffer_packets(RECV_TIMEOUT);
+            let timeout = if self.transaction_queue.tracking_map.is_empty() {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_millis(0)
+            };
+            // const PACKET_RECV_TIMEOUT: Duration = Duration::from_millis(10);
+            let recv_result = self.receive_and_buffer_packets(timeout);
             if matches!(recv_result, Err(RecvTimeoutError::Disconnected)) {
                 break;
             }
 
             // Potentially receive processed batches
+            const PROCESSED_BATCH_RECV_TIMEOUT: Duration = Duration::from_millis(10);
             let (recv_results, receive_completed_batches_time) = measure!(drain_channel(
                 &self.processed_packet_batch_receiver,
-                RECV_TIMEOUT
+                PROCESSED_BATCH_RECV_TIMEOUT
             ));
             let (_, complete_batches_time) = measure!({
                 for processed_batch in recv_results {
@@ -452,8 +451,14 @@ where
             }
             prev_decision = decision;
 
+            // always move these on consume, since we also use `held_packets` to store
+            // packets that were blocked by lower priority transactions.
+            if matches!(decision, BankPacketProcessingDecision::Consume(_)) {
+                self.move_held_packets();
+            }
+
             let (_, scheduling_time) = measure!({
-                const SCHEDULE_BATCHES_TIMEOUT: Duration = Duration::from_millis(10);
+                const SCHEDULE_BATCHES_TIMEOUT: Duration = Duration::from_millis(100);
                 let start = Instant::now();
                 self.do_scheduling(decision, &start, &SCHEDULE_BATCHES_TIMEOUT);
             });
@@ -540,15 +545,8 @@ where
             return false;
         }
 
-        if let Some((next_packet, maybe_thread_index)) = self.try_get_next_packet(&decision) {
-            let transaction = self
-                .transaction_queue
-                .tracking_map
-                .get(next_packet.message_hash())
-                .unwrap()
-                .0
-                .clone();
-
+        if let Some((transaction, maybe_thread_index)) = self.try_get_next_transaction(&decision) {
+            let next_packet = self.transaction_queue.get_immutable_section(&transaction);
             if let Some(batch_to_send) = if let Some(execution_thread_index) = maybe_thread_index {
                 let batch_builder = self.building_batches_tracker
                     .building_batches
@@ -582,45 +580,86 @@ where
     }
 
     /// Try to get the next packet - if it can only be scheduled to a specific thread then return as well
-    fn try_get_next_packet(
+    fn try_get_next_transaction(
         &mut self,
         decision: &BankPacketProcessingDecision,
-    ) -> Option<(Arc<ImmutableDeserializedPacket>, Option<usize>)> {
+    ) -> Option<(TransactionRef, Option<usize>)> {
         match decision {
             BankPacketProcessingDecision::Consume(_) => {
                 while let Some(transaction) = self.transaction_queue.get_next_pending_transaction()
                 {
                     let (conflict_set, building_conflict_set) =
                         self.get_conflict_sets(&transaction);
-                    if building_conflict_set.can_schedule_to_any_thread()
-                        && conflict_set.is_schedulable()
-                    {
-                        let packet = self.transaction_queue.get_immutable_section(&transaction);
 
+                    if !building_conflict_set.can_schedule_to_any_thread() {
+                        // if we have any conflicts with a batch that is currently being built, then we can't schedule this transaction
+                        // to any thread. So we can block it by the minimum blocking transaction.
+                        // Try to block by the minimum blocking transaction. If there is no minimum blocking transaction, because lower
+                        // priority transactions were queued up, then we push into a temporary holding queue until the next iteration.
+                        // if self
+                        //     .transaction_queue
+                        //     .can_schedule_transaction(&transaction)
+                        // {
+                        //     self.held_packets.push(transaction);
+                        // }
+                        self.held_packets.push(transaction);
+                        continue;
+                    }
+
+                    if conflict_set.is_schedulable() {
                         let conflict_thread_index = conflict_set.get_conflicting_thread_index();
                         if let Some(execution_thread_index) = conflict_thread_index {
                             if !self.building_batches_tracker.execution_thread_stats
                                 [execution_thread_index]
                                 .has_batch_being_built
                             {
-                                // call `can_schedule_transaction()` to block this by the lowest priority transaction
-                                // and assert that it cannot be scheduled - either due to multiple in progress conflicts
-                                // or due to a conflict with a batch being built.
-                                assert!(!self
-                                    .transaction_queue
-                                    .can_schedule_transaction(&transaction));
+                                // Inside this if, we have a conflict with a thread that has no batch being built.
+                                //     this means we've queued up all batches for this thread, and would need to wait for the
+                                //     next batch to finish before we can schedule this one.
+                                // For now, we'll just mark this tx as blocked by a tx in the first batch on the thread
+                                // TODO: Consider just having a "blocked_by_queue" container
+                                // if self
+                                //     .transaction_queue
+                                //     .can_schedule_transaction(&transaction)
+                                // {
+                                //     let blocking_batch_id = self
+                                //         .building_batches_tracker
+                                //         .execution_thread_stats[execution_thread_index]
+                                //         .queued_batches
+                                //         .iter()
+                                //         .next()
+                                //         .unwrap();
+                                //     let blocking_transaction = self
+                                //         .current_batches
+                                //         .get(blocking_batch_id)
+                                //         .unwrap()
+                                //         .0
+                                //         .deserialized_packets
+                                //         .first()
+                                //         .unwrap();
+
+                                //     self.transaction_queue.block_transaction(
+                                //         *blocking_transaction.message_hash(),
+                                //         transaction,
+                                //     );
+                                // }
+                                self.held_packets.push(transaction);
                                 continue; // try scheduling another packet
                             }
                         }
 
-                        return Some((packet, conflict_thread_index));
+                        return Some((transaction, conflict_thread_index));
                     } else {
-                        // call `can_schedule_transaction()` to block this by the lowest priority transaction
-                        // and assert that it cannot be scheduled - either due to multiple in progress conflicts
-                        // or due to a conflict with a batch being built.
-                        assert!(!self
-                            .transaction_queue
-                            .can_schedule_transaction(&transaction));
+                        // We have conficts with multiple threads, so we can't schedule this transaction to any thread.
+                        // Try to block by the minimum blocking transaction. If there is no minimum blocking transaction, because lower
+                        // priority transactions were queued up, then we push into a temporary holding queue until the next iteration.
+                        // if self
+                        //     .transaction_queue
+                        //     .can_schedule_transaction(&transaction)
+                        // {
+                        //     self.held_packets.push(transaction);
+                        // }
+                        self.held_packets.push(transaction);
                     }
                 }
 
@@ -630,8 +669,8 @@ where
             | BankPacketProcessingDecision::ForwardAndHold => match self.forward_filter {
                 Some(ref mut forward_filter) => self
                     .transaction_queue
-                    .try_get_next_forward_packet(forward_filter)
-                    .map(|p| (p, None)), // forward packets can be scheduled to any thread
+                    .try_get_next_forward_transaction(forward_filter)
+                    .map(|t| (t, None)), // forward packets can be scheduled to any thread
                 None => unreachable!(),
             },
             BankPacketProcessingDecision::Hold => None, // do nothing
@@ -697,6 +736,10 @@ where
             self.metrics.num_packets_scheduled,
             batch.deserialized_packets.len()
         );
+        saturating_add_assign!(
+            self.metrics.num_packets_by_thread[execution_thread_index],
+            1
+        );
         if matches!(decision, BankPacketProcessingDecision::Consume(_)) {
             saturating_add_assign!(
                 self.metrics.num_packets_scheduled_consume,
@@ -705,11 +748,35 @@ where
         }
         saturating_add_assign!(self.metrics.num_batches_scheduled, 1);
 
+        // Unblock transactions that were blocked by the transactions in this batch
+        //     - Now that these are being sent out, we can schedule blocked transactions
+        //       because they'd be queued behind them if they conflict.
+        for transaction in batch.deserialized_packets.iter() {
+            let message_hash = transaction.message_hash();
+            let transaction = self
+                .transaction_queue
+                .tracking_map
+                .get(&message_hash)
+                .unwrap()
+                .0
+                .clone();
+            self.transaction_queue.unblock_transaction(&transaction);
+        }
+
         assert!(!self.scheduled_packet_batch_senders[batch.execution_thread_index].is_full());
         self.metrics.max_batch_size = self
             .metrics
             .max_batch_size
             .max(batch.deserialized_packets.len());
+        self.metrics.max_batch_size_by_thread[execution_thread_index] =
+            self.metrics.max_batch_size_by_thread[execution_thread_index]
+                .max(batch.deserialized_packets.len());
+        self.metrics.max_queued_batches_by_thread[execution_thread_index] =
+            self.metrics.max_queued_batches_by_thread[execution_thread_index].max(
+                self.building_batches_tracker.execution_thread_stats[execution_thread_index]
+                    .queued_batches
+                    .len(),
+            );
         self.scheduled_packet_batch_senders[batch.execution_thread_index]
             .send(batch)
             .unwrap();
@@ -718,6 +785,11 @@ where
     /// Move held packets back into the queues
     fn move_held_packets(&mut self) {
         for transaction in self.held_packets.drain(..) {
+            assert!(self
+                .transaction_queue
+                .tracking_map
+                .get(transaction.message_hash())
+                .is_some());
             self.transaction_queue
                 .insert_transaction_into_pending_queue(&transaction);
         }
@@ -918,15 +990,14 @@ impl TransactionQueue {
     }
 
     /// Get the next packet for forwarding
-    fn try_get_next_forward_packet(
+    fn try_get_next_forward_transaction(
         &mut self,
         forward_filter: &mut ForwardPacketBatchesByAccounts,
-    ) -> Option<Arc<ImmutableDeserializedPacket>> {
-        let next_packet = self
-            .get_next_pending_transaction()
-            .map(|t| self.get_immutable_section(&t))?;
-        if forward_filter.add_packet(next_packet.clone()) {
-            Some(next_packet)
+    ) -> Option<TransactionRef> {
+        let next_transaction = self.get_next_pending_transaction()?;
+        let next_packet = self.get_immutable_section(&next_transaction);
+        if forward_filter.add_packet(next_packet) {
+            Some(next_transaction)
         } else {
             todo!("dropping packet on forward filter")
         }
@@ -949,14 +1020,10 @@ impl TransactionQueue {
     fn can_schedule_transaction(&mut self, transaction: &TransactionRef) -> bool {
         match self.get_lowest_priority_blocking_transaction(transaction) {
             Some(blocking_transaction) => {
-                self.blocked_transactions
-                    .entry(*blocking_transaction.message_hash())
-                    .or_default()
-                    .push(transaction.clone());
-                saturating_add_assign!(self.num_blocked_packets, 1);
+                self.block_transaction(*blocking_transaction.message_hash(), transaction.clone());
                 false
             }
-            None => false,
+            None => true,
         }
     }
 
@@ -1019,40 +1086,12 @@ impl TransactionQueue {
         //     if transaction.timestamp.elapsed() < Duration::from_millis(400) {
         //         return Some(transaction);
         //     } else {
-        //         self.remove_transaction(&transaction, false);
+        //         self.remove_transaction(&transaction, false, ScheduledPacketBatchId::default());
         //     }
         // }
 
         // None
         self.pending_transactions.pop_max()
-    }
-
-    /// Get a batch of transactions to be forwarded by banking stage
-    fn get_forwarding_batch(
-        &mut self,
-        forward_filter: &mut ForwardPacketBatchesByAccounts,
-    ) -> Option<Vec<Arc<ImmutableDeserializedPacket>>> {
-        // Get batch of transaction simply by priority, and insert into the forwarding filter
-        let mut batch = Vec::with_capacity(self.pending_transactions.len().min(MAX_BATCH_SIZE));
-        while let Some(transaction) = self.get_next_pending_transaction() {
-            let packet = self
-                .tracking_map
-                .get(transaction.message_hash())
-                .unwrap()
-                .1
-                .immutable_section()
-                .clone();
-            if forward_filter.add_packet(packet.clone()) {
-                batch.push(packet);
-                if batch.len() == MAX_BATCH_SIZE {
-                    break;
-                }
-            } else {
-                // drop it?
-                panic!("forwarding filter is full - probably should drop, not sure yet.");
-            }
-        }
-        (batch.len() > 0).then(|| batch)
     }
 
     /// Insert a new transaction into the queue(s) and maps
@@ -1158,12 +1197,28 @@ impl TransactionQueue {
         }
     }
 
+    /// Block a transaction by another
+    fn block_transaction(
+        &mut self,
+        blocking_transaction_hash: Hash,
+        blocked_transaction: TransactionRef,
+    ) {
+        self.blocked_transactions
+            .entry(blocking_transaction_hash)
+            .or_default()
+            .push(blocked_transaction);
+        saturating_add_assign!(self.num_blocked_packets, 1);
+    }
+
     /// Unblock transactions blocked by a transaction
     fn unblock_transaction(&mut self, transaction: &TransactionRef) {
         let message_hash = transaction.message_hash();
         if let Some(blocked_transactions) = self.blocked_transactions.remove(message_hash) {
-            self.num_blocked_packets = self.num_blocked_packets - blocked_transactions.len();
+            self.num_blocked_packets -= blocked_transactions.len();
             for blocked_transaction in blocked_transactions {
+                assert!(self
+                    .tracking_map
+                    .contains_key(blocked_transaction.message_hash()));
                 self.insert_transaction_into_pending_queue(&blocked_transaction);
             }
         }
@@ -1518,6 +1573,11 @@ struct SchedulerMetrics {
     num_batches_cleared: usize,
     max_batch_size: usize,
 
+    // Thread-wise metrics
+    num_packets_by_thread: [usize; 4],
+    max_batch_size_by_thread: [usize; 4],
+    max_queued_batches_by_thread: [usize; 4],
+
     // Timing metrics
     bank_lock_time_us: u64,
     receive_packet_batches_time_us: u64,
@@ -1575,6 +1635,34 @@ impl SchedulerMetrics {
                 (
                     "max_completed_packet_age_us",
                     self.max_completed_packet_age_us,
+                    i64
+                ),
+                ("num_packets_0", self.num_packets_by_thread[0], i64),
+                ("num_packets_1", self.num_packets_by_thread[1], i64),
+                ("num_packets_2", self.num_packets_by_thread[2], i64),
+                ("num_packets_3", self.num_packets_by_thread[3], i64),
+                ("max_batch_size_0", self.max_batch_size_by_thread[0], i64),
+                ("max_batch_size_1", self.max_batch_size_by_thread[1], i64),
+                ("max_batch_size_2", self.max_batch_size_by_thread[2], i64),
+                ("max_batch_size_3", self.max_batch_size_by_thread[3], i64),
+                (
+                    "max_queued_batches_0",
+                    self.max_queued_batches_by_thread[0],
+                    i64
+                ),
+                (
+                    "max_queued_batches_1",
+                    self.max_queued_batches_by_thread[1],
+                    i64
+                ),
+                (
+                    "max_queued_batches_2",
+                    self.max_queued_batches_by_thread[2],
+                    i64
+                ),
+                (
+                    "max_queued_batches_3",
+                    self.max_queued_batches_by_thread[3],
                     i64
                 ),
             );
