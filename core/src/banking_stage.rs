@@ -596,6 +596,7 @@ impl BankingStage {
         max_tx_ingestion_ns: u128,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         buffered_packet_batches: &mut UnprocessedPacketBatches,
+        receive_account_filter: &mut ReceiveAccountFilter,
         transaction_status_sender: Option<TransactionStatusSender>,
         gossip_vote_sender: &ReplayVoteSender,
         test_fn: Option<impl Fn()>,
@@ -647,6 +648,7 @@ impl BankingStage {
                                     &bank_creation_time,
                                     recorder,
                                     packets_to_process.iter().map(|p| &**p),
+                                    receive_account_filter,
                                     transaction_status_sender.clone(),
                                     gossip_vote_sender,
                                     banking_stage_stats,
@@ -795,6 +797,7 @@ impl BankingStage {
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         cluster_info: &ClusterInfo,
         buffered_packet_batches: &mut UnprocessedPacketBatches,
+        receive_account_filter: &mut ReceiveAccountFilter,
         forward_option: &ForwardOption,
         transaction_status_sender: Option<TransactionStatusSender>,
         gossip_vote_sender: &ReplayVoteSender,
@@ -858,6 +861,7 @@ impl BankingStage {
                         max_tx_ingestion_ns,
                         poh_recorder,
                         buffered_packet_batches,
+                        receive_account_filter,
                         transaction_status_sender,
                         gossip_vote_sender,
                         None::<Box<dyn Fn()>>,
@@ -1354,6 +1358,7 @@ impl BankingStage {
                         poh_recorder,
                         cluster_info,
                         &mut buffered_packet_batches,
+                        &mut receive_account_filter,
                         &forward_option,
                         transaction_status_sender.clone(),
                         &gossip_vote_sender,
@@ -1375,6 +1380,7 @@ impl BankingStage {
             }
 
             tracer_packet_stats.report(1000);
+            receive_account_filter.reset_on_interval();
 
             let recv_timeout = if !buffered_packet_batches.is_empty() {
                 // If there are buffered packets, run the equivalent of try_recv to try reading more
@@ -1393,7 +1399,6 @@ impl BankingStage {
                     recv_start,
                     recv_timeout,
                     id,
-                    &mut receive_account_filter,
                     &mut buffered_packet_batches,
                     &mut banking_stage_stats,
                     &mut tracer_packet_stats,
@@ -2133,6 +2138,7 @@ impl BankingStage {
         bank_creation_time: &Instant,
         poh: &'a TransactionRecorder,
         deserialized_packets: impl Iterator<Item = &'a ImmutableDeserializedPacket>,
+        receive_account_filter: &mut ReceiveAccountFilter,
         transaction_status_sender: Option<TransactionStatusSender>,
         gossip_vote_sender: &'a ReplayVoteSender,
         banking_stage_stats: &'a BankingStageStats,
@@ -2140,7 +2146,7 @@ impl BankingStage {
         slot_metrics_tracker: &'a mut LeaderSlotMetricsTracker,
         log_messages_bytes_limit: Option<usize>,
     ) -> ProcessTransactionsSummary {
-        // Convert packets to transactions
+        // Convert packets to transactions and run coarse account limit checks
         let ((transactions, transaction_to_packet_indexes), packet_conversion_time): (
             (Vec<SanitizedTransaction>, Vec<usize>),
             _,
@@ -2154,7 +2160,18 @@ impl BankingStage {
                         bank.vote_only_bank(),
                         bank.as_ref(),
                     )
-                    .map(|transaction| (transaction, i))
+                    .map(|transaction| (transaction, i, deserialized_packet))
+                })
+                .filter_map(|(transaction, i, deserialized_packet)| {
+                    receive_account_filter
+                        .should_filter(
+                            transaction
+                                .get_account_locks_unchecked()
+                                .writable
+                                .into_iter(),
+                            deserialized_packet.compute_unit_limit(),
+                        )
+                        .then_some((transaction, i))
                 })
                 .unzip(),
             "packet_conversion",
@@ -2241,13 +2258,11 @@ impl BankingStage {
         recv_start: &mut Instant,
         recv_timeout: Duration,
         id: u32,
-        receive_account_filter: &mut ReceiveAccountFilter,
         buffered_packet_batches: &mut UnprocessedPacketBatches,
         banking_stage_stats: &mut BankingStageStats,
         tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), RecvTimeoutError> {
-        receive_account_filter.reset_on_interval();
         let mut recv_time = Measure::start("receive_and_buffer_packets_recv");
         let ReceivePacketResults {
             deserialized_packets,
@@ -2279,7 +2294,6 @@ impl BankingStage {
         let mut newly_buffered_packets_count = 0;
         Self::push_unprocessed(
             buffered_packet_batches,
-            receive_account_filter,
             deserialized_packets,
             &mut dropped_packets_count,
             &mut newly_buffered_packets_count,
@@ -2313,8 +2327,7 @@ impl BankingStage {
 
     fn push_unprocessed(
         unprocessed_packet_batches: &mut UnprocessedPacketBatches,
-        receive_account_filter: &mut ReceiveAccountFilter,
-        mut deserialized_packets: Vec<ImmutableDeserializedPacket>,
+        deserialized_packets: Vec<ImmutableDeserializedPacket>,
         dropped_packets_count: &mut usize,
         newly_buffered_packets_count: &mut usize,
         banking_stage_stats: &mut BankingStageStats,
@@ -2330,24 +2343,10 @@ impl BankingStage {
             slot_metrics_tracker
                 .increment_newly_buffered_packets_count(deserialized_packets.len() as u64);
 
-            // sort the deserialized packets by priority - higher prio tx get into the `receive_account_filter` first
-            deserialized_packets.sort();
-
             let (number_of_dropped_packets, number_of_dropped_tracer_packets) =
                 unprocessed_packet_batches.insert_batch(
                     deserialized_packets
                         .into_iter()
-                        .filter(|p| {
-                            let message = &p.transaction().get_message().message;
-                            let static_keys = message.static_account_keys();
-                            let writable = static_keys
-                                .iter()
-                                .enumerate()
-                                .filter(|(idx, _)| message.is_maybe_writable(*idx))
-                                .map(|(_, k)| k);
-                            let compute_units = p.compute_unit_limit(); // TODO: should this be estimate?
-                            !receive_account_filter.should_filter(writable, compute_units)
-                        })
                         .map(DeserializedPacket::from_immutable_section), // deserialized_packets
                 );
 
