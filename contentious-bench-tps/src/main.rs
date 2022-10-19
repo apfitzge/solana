@@ -161,7 +161,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
                         &exit,
                         &ready_count,
                         thread_count,
-                        1024, // chunk is 1k
+                        128,
                     );
                     exit.store(true, Ordering::Relaxed);
                 })
@@ -169,18 +169,8 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
         })
         .collect::<Vec<_>>();
 
-    // wait a bit to see how many transactions were confirmed for the funding
-    let start = Instant::now();
-    while start.elapsed() < config.duration {
-        let num_contentious_transactions_sent =
-            num_contentious_transactions_sent.load(Ordering::Relaxed);
-        let num_regular_transactions_sent = num_regular_transactions_sent.load(Ordering::Relaxed);
-        let num_transactions_confirmed = client.get_num_transactions();
-        info!(
-            "num_contentious_transactions_sent={num_contentious_transactions_sent} regular_transactions_sent={num_regular_transactions_sent} transactions_confirmed={num_transactions_confirmed}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    // Wait until we start sending
+    while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
 
     let start = Instant::now();
     while start.elapsed() < config.duration {
