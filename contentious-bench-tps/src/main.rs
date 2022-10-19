@@ -178,7 +178,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
 
     let contentious_thread_count = config.num_contentious_transfer_threads;
     // Wait until we start sending
-    while contentious_ready_count.load(Ordering::Relaxed) % contentious_thread_count == 0 {}
+    while contentious_ready_count.load(Ordering::Relaxed) % contentious_thread_count != 0 {}
 
     let printer = move || {
         let num_contentious_transactions_sent =
@@ -233,7 +233,7 @@ fn sender_loop(
         let (txs, sign_time) =
             measure!(sign_transactions(&unsigned_txs, &signers, recent_blockhash));
         ready_count.fetch_add(1, Ordering::Relaxed);
-        while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
+        while ready_count.load(Ordering::Relaxed) % thread_count != 0 {}
 
         let (_, send_time) = measure!(client.send_transactions(&txs).unwrap());
 
