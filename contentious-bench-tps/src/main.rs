@@ -109,6 +109,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
     let ready_count = Arc::new(AtomicUsize::new(0));
     let thread_count =
         config.num_contentious_transfer_threads + config.num_regular_transfer_threads;
+    let done_count = Arc::new(AtomicUsize::new(0));
 
     let contentious_threads = (0..config.num_contentious_transfer_threads)
         .map(|idx| {
@@ -118,6 +119,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
             let num_transactions_sent = num_contentious_transactions_sent.clone();
             let exit = exit.clone();
             let ready_count = ready_count.clone();
+            let done_count = done_count.clone();
             std::thread::Builder::new()
                 .name(format!("conSnd-{idx}"))
                 .spawn(move || {
@@ -134,6 +136,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
                         100_000,
                     );
                     exit.store(true, Ordering::Relaxed);
+                    done_count.fetch_add(1, Ordering::Relaxed);
                 })
                 .unwrap()
         })
@@ -147,6 +150,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
             let num_transactions_sent = num_regular_transactions_sent.clone();
             let exit = exit.clone();
             let ready_count = ready_count.clone();
+            let done_count = done_count.clone();
             std::thread::Builder::new()
                 .name(format!("regSnd-{idx}"))
                 .spawn(move || {
@@ -164,6 +168,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
                         1000,
                     );
                     exit.store(true, Ordering::Relaxed);
+                    done_count.fetch_add(1, Ordering::Relaxed);
                 })
                 .unwrap()
         })
@@ -172,16 +177,27 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
     // Wait until we start sending
     while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
 
-    let start = Instant::now();
-    while start.elapsed() < 2 * config.duration {
+    let printer = move || {
         let num_contentious_transactions_sent =
             num_contentious_transactions_sent.load(Ordering::Relaxed);
         let num_regular_transactions_sent = num_regular_transactions_sent.load(Ordering::Relaxed);
         let num_transactions_confirmed = client.get_num_transactions();
         info!(
-            "num_contentious_transactions_sent={num_contentious_transactions_sent} regular_transactions_sent={num_regular_transactions_sent} transactions_confirmed={num_transactions_confirmed}"
+            "num_contentious_transactions_sent={} regular_transactions_sent={} transactions_confirmed={}",
+            num_contentious_transactions_sent,
+            num_regular_transactions_sent,
+            num_transactions_confirmed,
         );
         std::thread::sleep(Duration::from_millis(100));
+    };
+
+    while done_count.load(Ordering::Relaxed) < thread_count {
+        printer();
+    }
+
+    let start = Instant::now();
+    while start.elapsed() < 2 * config.duration {
+        printer();
     }
     exit.store(true, Ordering::Relaxed);
 
