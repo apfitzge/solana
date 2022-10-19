@@ -106,9 +106,9 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
     let num_contentious_transactions_sent = Arc::new(AtomicUsize::new(0));
     let num_regular_transactions_sent = Arc::new(AtomicUsize::new(0));
     let exit = Arc::new(AtomicBool::new(false));
-    let ready_count = Arc::new(AtomicUsize::new(0));
-    let thread_count =
-        config.num_contentious_transfer_threads + config.num_regular_transfer_threads;
+    let contentious_ready_count = Arc::new(AtomicUsize::new(0));
+    let regular_ready_count = Arc::new(AtomicUsize::new(0));
+
     let done_count = Arc::new(AtomicUsize::new(0));
 
     let contentious_threads = (0..config.num_contentious_transfer_threads)
@@ -118,7 +118,8 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
             let accounts = accounts.clone();
             let num_transactions_sent = num_contentious_transactions_sent.clone();
             let exit = exit.clone();
-            let ready_count = ready_count.clone();
+            let ready_count = contentious_ready_count.clone();
+            let thread_count = config.num_contentious_transfer_threads;
             let done_count = done_count.clone();
             std::thread::Builder::new()
                 .name(format!("conSnd-{idx}"))
@@ -134,6 +135,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
                         &ready_count,
                         thread_count,
                         100_000,
+                        1,
                     );
                     exit.store(true, Ordering::Relaxed);
                     done_count.fetch_add(1, Ordering::Relaxed);
@@ -149,8 +151,8 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
             let accounts = accounts.clone();
             let num_transactions_sent = num_regular_transactions_sent.clone();
             let exit = exit.clone();
-            let ready_count = ready_count.clone();
-            let done_count = done_count.clone();
+            let ready_count = regular_ready_count.clone();
+            let thread_count = config.num_regular_transfer_threads;
             std::thread::Builder::new()
                 .name(format!("regSnd-{idx}"))
                 .spawn(move || {
@@ -166,16 +168,17 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
                         &ready_count,
                         thread_count,
                         1000,
+                        usize::MAX,
                     );
                     exit.store(true, Ordering::Relaxed);
-                    done_count.fetch_add(1, Ordering::Relaxed);
                 })
                 .unwrap()
         })
         .collect::<Vec<_>>();
 
+    let contentious_thread_count = config.num_contentious_transfer_threads;
     // Wait until we start sending
-    while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
+    while contentious_ready_count.load(Ordering::Relaxed) % contentious_thread_count == 0 {}
 
     let printer = move || {
         let num_contentious_transactions_sent =
@@ -191,7 +194,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
         std::thread::sleep(Duration::from_millis(100));
     };
 
-    while done_count.load(Ordering::Relaxed) < thread_count {
+    while done_count.load(Ordering::Relaxed) < contentious_thread_count {
         printer();
     }
 
@@ -218,22 +221,26 @@ fn sender_loop(
     ready_count: &AtomicUsize,
     thread_count: usize,
     chunk_size: usize,
+    loop_count: usize,
 ) -> Result<(), TransportError> {
     let mut rng = rand::thread_rng();
+    let mut iter_count = 0;
+    while iter_count < loop_count && !exit.load(Ordering::Relaxed) {
+        let (unsigned_txs, signers) =
+            generate_transactions(from_accounts, to_accounts, fee_range, chunk_size, &mut rng);
 
-    // while !exit.load(Ordering::Relaxed) {
-    let (unsigned_txs, signers) =
-        generate_transactions(from_accounts, to_accounts, fee_range, chunk_size, &mut rng);
+        let (recent_blockhash, get_blockhash_time) = measure!(client.get_recent_blockhash());
+        let (txs, sign_time) =
+            measure!(sign_transactions(&unsigned_txs, &signers, recent_blockhash));
+        ready_count.fetch_add(1, Ordering::Relaxed);
+        while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
 
-    let (recent_blockhash, get_blockhash_time) = measure!(client.get_recent_blockhash());
-    let (txs, sign_time) = measure!(sign_transactions(&unsigned_txs, &signers, recent_blockhash));
-    ready_count.fetch_add(1, Ordering::Relaxed);
-    while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
+        let (_, send_time) = measure!(client.send_transactions(&txs).unwrap());
 
-    let (_, send_time) = measure!(client.send_transactions(&txs).unwrap());
-
-    num_transactions_sent.fetch_add(txs.len(), Ordering::Relaxed);
-    // }
+        num_transactions_sent.fetch_add(txs.len(), Ordering::Relaxed);
+        iter_count += 1;
+        std::thread::sleep(Duration::from_millis(1000));
+    }
 
     Ok(())
 }
