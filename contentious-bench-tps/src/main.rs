@@ -131,7 +131,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
                         &exit,
                         &ready_count,
                         thread_count,
-                        16384,
+                        100_000,
                     );
                     exit.store(true, Ordering::Relaxed);
                 })
@@ -161,7 +161,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
                         &exit,
                         &ready_count,
                         thread_count,
-                        128,
+                        1000,
                     );
                     exit.store(true, Ordering::Relaxed);
                 })
@@ -173,7 +173,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
     while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
 
     let start = Instant::now();
-    while start.elapsed() < config.duration {
+    while start.elapsed() < 2 * config.duration {
         let num_contentious_transactions_sent =
             num_contentious_transactions_sent.load(Ordering::Relaxed);
         let num_regular_transactions_sent = num_regular_transactions_sent.load(Ordering::Relaxed);
@@ -205,20 +205,19 @@ fn sender_loop(
 ) -> Result<(), TransportError> {
     let mut rng = rand::thread_rng();
 
-    while !exit.load(Ordering::Relaxed) {
-        let (unsigned_txs, signers) =
-            generate_transactions(from_accounts, to_accounts, fee_range, chunk_size, &mut rng);
+    // while !exit.load(Ordering::Relaxed) {
+    let (unsigned_txs, signers) =
+        generate_transactions(from_accounts, to_accounts, fee_range, chunk_size, &mut rng);
 
-        let (recent_blockhash, get_blockhash_time) = measure!(client.get_recent_blockhash());
-        let (txs, sign_time) =
-            measure!(sign_transactions(&unsigned_txs, &signers, recent_blockhash));
-        ready_count.fetch_add(1, Ordering::Relaxed);
-        while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
+    let (recent_blockhash, get_blockhash_time) = measure!(client.get_recent_blockhash());
+    let (txs, sign_time) = measure!(sign_transactions(&unsigned_txs, &signers, recent_blockhash));
+    ready_count.fetch_add(1, Ordering::Relaxed);
+    while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
 
-        let (_, send_time) = measure!(client.send_transactions(&txs).unwrap());
+    let (_, send_time) = measure!(client.send_transactions(&txs).unwrap());
 
-        num_transactions_sent.fetch_add(txs.len(), Ordering::Relaxed);
-    }
+    num_transactions_sent.fetch_add(txs.len(), Ordering::Relaxed);
+    // }
 
     Ok(())
 }
