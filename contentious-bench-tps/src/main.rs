@@ -106,6 +106,9 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
     let num_contentious_transactions_sent = Arc::new(AtomicUsize::new(0));
     let num_regular_transactions_sent = Arc::new(AtomicUsize::new(0));
     let exit = Arc::new(AtomicBool::new(false));
+    let ready_count = Arc::new(AtomicUsize::new(0));
+    let thread_count =
+        config.num_contentious_transfer_threads + config.num_regular_transfer_threads;
 
     let contentious_threads = (0..config.num_contentious_transfer_threads)
         .map(|idx| {
@@ -114,6 +117,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
             let accounts = accounts.clone();
             let num_transactions_sent = num_contentious_transactions_sent.clone();
             let exit = exit.clone();
+            let ready_count = ready_count.clone();
             std::thread::Builder::new()
                 .name(format!("conSnd-{idx}"))
                 .spawn(move || {
@@ -125,6 +129,9 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
                         &config.contentious_transfer_fee_range,
                         &num_transactions_sent,
                         &exit,
+                        &ready_count,
+                        thread_count,
+                        16384,
                     );
                     exit.store(true, Ordering::Relaxed);
                 })
@@ -139,6 +146,7 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
             let accounts = accounts.clone();
             let num_transactions_sent = num_regular_transactions_sent.clone();
             let exit = exit.clone();
+            let ready_count = ready_count.clone();
             std::thread::Builder::new()
                 .name(format!("regSnd-{idx}"))
                 .spawn(move || {
@@ -151,6 +159,9 @@ fn benchmark(config: &Arc<Config>, client: Arc<Client>, accounts: Arc<Accounts>)
                         &config.regular_transfer_fee_range,
                         &num_transactions_sent,
                         &exit,
+                        &ready_count,
+                        thread_count,
+                        1024, // chunk is 1k
                     );
                     exit.store(true, Ordering::Relaxed);
                 })
@@ -198,36 +209,23 @@ fn sender_loop(
     fee_range: &Option<RangeInclusive<u64>>,
     num_transactions_sent: &AtomicUsize,
     exit: &AtomicBool,
+    ready_count: &AtomicUsize,
+    thread_count: usize,
+    chunk_size: usize,
 ) -> Result<(), TransportError> {
-    const TRANSACTION_CHUNK_SIZE: usize = 128;
-
     let mut rng = rand::thread_rng();
 
-    let should_log = thread_idx == 0;
-
     while !exit.load(Ordering::Relaxed) {
-        let (unsigned_txs, signers) = generate_transactions(
-            from_accounts,
-            to_accounts,
-            fee_range,
-            TRANSACTION_CHUNK_SIZE,
-            &mut rng,
-        );
+        let (unsigned_txs, signers) =
+            generate_transactions(from_accounts, to_accounts, fee_range, chunk_size, &mut rng);
 
         let (recent_blockhash, get_blockhash_time) = measure!(client.get_recent_blockhash());
         let (txs, sign_time) =
             measure!(sign_transactions(&unsigned_txs, &signers, recent_blockhash));
-        let (_, send_time) = measure!(client.send_transactions(&txs).unwrap());
+        ready_count.fetch_add(1, Ordering::Relaxed);
+        while ready_count.load(Ordering::Relaxed) % thread_count == 0 {}
 
-        if should_log {
-            //            info!(
-            //                "thread_idx={} get_blockhash_time={}ms sign_time={}ms send_time={}ms",
-            //                thread_idx,
-            //                get_blockhash_time.as_ms(),
-            //                sign_time.as_ms(),
-            //                send_time.as_ms(),
-            //            );
-        }
+        let (_, send_time) = measure!(client.send_transactions(&txs).unwrap());
 
         num_transactions_sent.fetch_add(txs.len(), Ordering::Relaxed);
     }
