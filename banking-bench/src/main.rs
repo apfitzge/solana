@@ -118,12 +118,14 @@ fn make_accounts_txs(
             );
             // siumulated mint transactions have higher compute-unit-price
             let compute_unit_price = if is_simulated_mint { 5 } else { 1 };
-            let mut new = make_transfer_transaction_with_compute_unit_price(
+            let multiplier = if is_simulated_mint { 10 } else { 1 }; // nft mint 10x more expensive than normal tx
+            let mut new = make_transfer_transaction_with_compute_unit_price_multiplier(
                 &payer_key,
                 &to_pubkey,
                 1,
                 hash,
                 compute_unit_price,
+                multiplier,
             );
             let sig: Vec<u8> = (0..64).map(|_| thread_rng().gen::<u8>()).collect();
             new.message.account_keys[0] = pubkey::new_rand();
@@ -156,14 +158,24 @@ fn is_simulated_mint_transaction(
     !simulate_mint || (index % packets_per_batch <= packets_per_batch * mint_txs_percentage / 100)
 }
 
-fn make_transfer_transaction_with_compute_unit_price(
+fn make_transfer_transaction_with_compute_unit_price_multiplier(
     from_keypair: &Keypair,
     to: &Pubkey,
     lamports: u64,
     recent_blockhash: Hash,
     compute_unit_price: u64,
+    multiplier: usize,
 ) -> Transaction {
     let from_pubkey = from_keypair.pubkey();
+    let mut instructions =
+        vec![system_instruction::transfer(&from_pubkey, to, lamports); multiplier];
+    instructions.push(ComputeBudgetInstruction::set_compute_unit_price(
+        compute_unit_price,
+    ));
+    instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(
+        2000 * multiplier as u32,
+    ));
+
     let instructions = vec![
         system_instruction::transfer(&from_pubkey, to, lamports),
         ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
