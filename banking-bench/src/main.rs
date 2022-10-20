@@ -178,10 +178,6 @@ fn make_transfer_transaction_with_compute_unit_price_multiplier(
         2000 * multiplier as u32,
     ));
 
-    let instructions = vec![
-        system_instruction::transfer(&from_pubkey, to, lamports),
-        ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
-    ];
     let message = Message::new(&instructions, Some(&from_pubkey));
     Transaction::new(&[from_keypair], message, recent_blockhash)
 }
