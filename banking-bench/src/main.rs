@@ -100,7 +100,7 @@ fn make_accounts_txs(
     hash: Hash,
     contention: WriteLockContention,
     simulate_mint: bool,
-    mint_txs_percentage: usize,
+    mint_txs_percentage: f64,
 ) -> Vec<Transaction> {
     let to_pubkey = pubkey::new_rand();
     let chunk_pubkeys: Vec<pubkey::Pubkey> = (0..total_num_transactions / packets_per_batch)
@@ -153,9 +153,11 @@ fn is_simulated_mint_transaction(
     simulate_mint: bool,
     index: usize,
     packets_per_batch: usize,
-    mint_txs_percentage: usize,
+    mint_txs_percentage: f64,
 ) -> bool {
-    !simulate_mint || (index % packets_per_batch <= packets_per_batch * mint_txs_percentage / 100)
+    !simulate_mint
+        || (index % packets_per_batch
+            <= (packets_per_batch as f64 * (mint_txs_percentage / 100.0)) as usize)
 }
 
 fn make_transfer_transaction_with_compute_unit_price_multiplier(
@@ -197,7 +199,7 @@ impl PacketsPerIteration {
         genesis_hash: Hash,
         write_lock_contention: WriteLockContention,
         simulate_mint: bool,
-        mint_txs_percentage: usize,
+        mint_txs_percentage: f64,
     ) -> Self {
         let total_num_transactions = packets_per_batch * batches_per_iteration;
         let transactions = make_accounts_txs(
@@ -316,8 +318,8 @@ fn main() {
         .value_of_t::<WriteLockContention>("write_lock_contention")
         .unwrap_or(WriteLockContention::None);
     let mint_txs_percentage = matches
-        .value_of_t::<usize>("mint_txs_percentage")
-        .unwrap_or(99);
+        .value_of_t::<f64>("mint_txs_percentage")
+        .unwrap_or(99.9);
 
     let mint_total = 1_000_000_000_000;
     let GenesisConfigInfo {
