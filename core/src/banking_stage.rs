@@ -3,6 +3,7 @@
 //! can do its processing in parallel with signature verification on the GPU.
 
 use {
+    self::banking_stage_executor::BankingStageExecutor,
     crate::{
         forward_packet_batches_by_accounts::ForwardPacketBatchesByAccounts,
         immutable_deserialized_packet::ImmutableDeserializedPacket,
@@ -83,6 +84,8 @@ use {
         time::{Duration, Instant},
     },
 };
+
+pub mod banking_stage_executor;
 
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;
@@ -498,17 +501,17 @@ impl BankingStage {
                     .spawn(move || {
                         Self::process_loop(
                             &mut packet_deserializer,
-                            &poh_recorder,
-                            &cluster_info,
+                            poh_recorder,
+                            cluster_info,
                             &mut recv_start,
                             i,
                             transaction_status_sender,
                             gossip_vote_sender,
-                            &data_budget,
+                            data_budget,
                             cost_model,
                             log_messages_bytes_limit,
                             connection_cache,
-                            &bank_forks,
+                            bank_forks,
                             unprocessed_transaction_storage,
                         );
                     })
@@ -1055,51 +1058,59 @@ impl BankingStage {
     #[allow(clippy::too_many_arguments)]
     fn process_loop(
         packet_deserializer: &mut PacketDeserializer,
-        poh_recorder: &Arc<RwLock<PohRecorder>>,
-        cluster_info: &ClusterInfo,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        cluster_info: Arc<ClusterInfo>,
         recv_start: &mut Instant,
         id: u32,
         transaction_status_sender: Option<TransactionStatusSender>,
         gossip_vote_sender: ReplayVoteSender,
-        data_budget: &DataBudget,
+        data_budget: Arc<DataBudget>,
         cost_model: Arc<RwLock<CostModel>>,
         log_messages_bytes_limit: Option<usize>,
         connection_cache: Arc<ConnectionCache>,
-        bank_forks: &Arc<RwLock<BankForks>>,
+        bank_forks: Arc<RwLock<BankForks>>,
         mut unprocessed_transaction_storage: UnprocessedTransactionStorage,
     ) {
         let recorder = poh_recorder.read().unwrap().recorder();
-        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let mut banking_stage_stats = BankingStageStats::new(id);
         let mut tracer_packet_stats = TracerPacketStats::new(id);
         let qos_service = QosService::new(cost_model, id);
+        let my_pubkey = cluster_info.id();
 
+        let executor = BankingStageExecutor::new(
+            cluster_info,
+            transaction_status_sender,
+            gossip_vote_sender,
+            data_budget,
+            qos_service,
+            log_messages_bytes_limit,
+            connection_cache,
+        );
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::new(id);
         let mut last_metrics_update = Instant::now();
 
         loop {
-            let my_pubkey = cluster_info.id();
             if !unprocessed_transaction_storage.is_empty()
                 || last_metrics_update.elapsed() >= SLOT_BOUNDARY_CHECK_PERIOD
             {
                 let (_, process_buffered_packets_time) = measure!(
                     Self::process_buffered_packets(
                         &my_pubkey,
-                        &socket,
-                        poh_recorder,
-                        cluster_info,
+                        &executor.socket,
+                        &poh_recorder,
+                        &executor.cluster_info,
                         &mut unprocessed_transaction_storage,
-                        &transaction_status_sender,
-                        &gossip_vote_sender,
+                        &executor.transaction_status_sender,
+                        &executor.gossip_vote_sender,
                         &banking_stage_stats,
                         &recorder,
-                        data_budget,
-                        &qos_service,
+                        &executor.data_budget,
+                        &executor.qos_service,
                         &mut slot_metrics_tracker,
                         log_messages_bytes_limit,
-                        &connection_cache,
+                        &executor.connection_cache,
                         &mut tracer_packet_stats,
-                        bank_forks,
+                        &bank_forks,
                     ),
                     "process_buffered_packets",
                 );
