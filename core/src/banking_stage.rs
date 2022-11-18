@@ -3,6 +3,7 @@
 //! can do its processing in parallel with signature verification on the GPU.
 
 use {
+    self::banking_stage_consume_state::BankingStageConsumeState,
     crate::{
         forward_packet_batches_by_accounts::ForwardPacketBatchesByAccounts,
         immutable_deserialized_packet::ImmutableDeserializedPacket,
@@ -83,6 +84,8 @@ use {
         time::{Duration, Instant},
     },
 };
+
+pub mod banking_stage_consume_state;
 
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;
@@ -1073,6 +1076,12 @@ impl BankingStage {
         let mut banking_stage_stats = BankingStageStats::new(id);
         let mut tracer_packet_stats = TracerPacketStats::new(id);
         let qos_service = QosService::new(cost_model, id);
+        let consume_state = BankingStageConsumeState::new(
+            transaction_status_sender,
+            gossip_vote_sender,
+            qos_service,
+            log_messages_bytes_limit,
+        );
 
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::new(id);
         let mut last_metrics_update = Instant::now();
@@ -1089,12 +1098,12 @@ impl BankingStage {
                         poh_recorder,
                         cluster_info,
                         &mut unprocessed_transaction_storage,
-                        &transaction_status_sender,
-                        &gossip_vote_sender,
+                        &consume_state.transaction_status_sender,
+                        &consume_state.gossip_vote_sender,
                         &banking_stage_stats,
                         &recorder,
                         data_budget,
-                        &qos_service,
+                        &consume_state.qos_service,
                         &mut slot_metrics_tracker,
                         log_messages_bytes_limit,
                         &connection_cache,
