@@ -827,19 +827,16 @@ impl BankingStage {
 
     #[allow(clippy::too_many_arguments)]
     fn process_buffered_packets(
+        consume_state: &BankingStageConsumeState,
         my_pubkey: &Pubkey,
         socket: &UdpSocket,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         cluster_info: &ClusterInfo,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
-        transaction_status_sender: &Option<TransactionStatusSender>,
-        gossip_vote_sender: &ReplayVoteSender,
         banking_stage_stats: &BankingStageStats,
         recorder: &TransactionRecorder,
         data_budget: &DataBudget,
-        qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-        log_messages_bytes_limit: Option<usize>,
         connection_cache: &ConnectionCache,
         tracer_packet_stats: &mut TracerPacketStats,
         bank_forks: &Arc<RwLock<BankForks>>,
@@ -897,14 +894,14 @@ impl BankingStage {
                         max_tx_ingestion_ns,
                         poh_recorder,
                         unprocessed_transaction_storage,
-                        transaction_status_sender,
-                        gossip_vote_sender,
+                        &consume_state.transaction_status_sender,
+                        &consume_state.gossip_vote_sender,
                         None::<Box<dyn Fn()>>,
                         banking_stage_stats,
                         recorder,
-                        qos_service,
+                        &consume_state.qos_service,
                         slot_metrics_tracker,
-                        log_messages_bytes_limit
+                        consume_state.log_messages_bytes_limit
                     ),
                     "consume_buffered_packets",
                 );
@@ -1093,19 +1090,16 @@ impl BankingStage {
             {
                 let (_, process_buffered_packets_time) = measure!(
                     Self::process_buffered_packets(
+                        &consume_state,
                         &my_pubkey,
                         &socket,
                         poh_recorder,
                         cluster_info,
                         &mut unprocessed_transaction_storage,
-                        &consume_state.transaction_status_sender,
-                        &consume_state.gossip_vote_sender,
                         &banking_stage_stats,
                         &recorder,
                         data_budget,
-                        &consume_state.qos_service,
                         &mut slot_metrics_tracker,
-                        log_messages_bytes_limit,
                         &connection_cache,
                         &mut tracer_packet_stats,
                         bank_forks,
