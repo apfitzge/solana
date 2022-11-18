@@ -486,7 +486,7 @@ impl BankingStage {
                         ),
                     };
 
-                let mut packet_deserializer = PacketDeserializer::new(verified_receiver);
+                let packet_deserializer = PacketDeserializer::new(verified_receiver);
                 let poh_recorder = poh_recorder.clone();
                 let cluster_info = cluster_info.clone();
                 let mut recv_start = Instant::now();
@@ -500,7 +500,7 @@ impl BankingStage {
                     .name(format!("solBanknStgTx{:02}", i))
                     .spawn(move || {
                         Self::process_loop(
-                            &mut packet_deserializer,
+                            packet_deserializer,
                             &poh_recorder,
                             &cluster_info,
                             &mut recv_start,
@@ -1057,7 +1057,7 @@ impl BankingStage {
 
     #[allow(clippy::too_many_arguments)]
     fn process_loop(
-        packet_deserializer: &mut PacketDeserializer,
+        packet_deserializer: PacketDeserializer,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         cluster_info: &ClusterInfo,
         recv_start: &mut Instant,
@@ -1071,6 +1071,7 @@ impl BankingStage {
         bank_forks: &Arc<RwLock<BankForks>>,
         mut unprocessed_transaction_storage: UnprocessedTransactionStorage,
     ) {
+        let mut packet_receiver = PacketReceiver::new(id, packet_deserializer);
         let recorder = poh_recorder.read().unwrap().recorder();
         let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let mut banking_stage_stats = BankingStageStats::new(id);
@@ -1113,10 +1114,8 @@ impl BankingStage {
 
             tracer_packet_stats.report(1000);
 
-            match PacketReceiver::do_packet_receiving_and_buffering(
-                packet_deserializer,
+            match packet_receiver.do_packet_receiving_and_buffering(
                 recv_start,
-                id,
                 &mut unprocessed_transaction_storage,
                 &mut banking_stage_stats,
                 &mut tracer_packet_stats,

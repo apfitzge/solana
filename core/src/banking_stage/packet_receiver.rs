@@ -19,13 +19,22 @@ use {
     },
 };
 
-pub struct PacketReceiver;
+pub struct PacketReceiver {
+    id: u32,
+    packet_deserializer: PacketDeserializer,
+}
 
 impl PacketReceiver {
+    pub fn new(id: u32, packet_deserializer: PacketDeserializer) -> Self {
+        Self {
+            id,
+            packet_deserializer,
+        }
+    }
+
     pub fn do_packet_receiving_and_buffering(
-        packet_deserializer: &mut PacketDeserializer,
+        &mut self,
         recv_start: &mut Instant,
-        id: u32,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         banking_stage_stats: &mut BankingStageStats,
         tracer_packet_stats: &mut TracerPacketStats,
@@ -43,11 +52,9 @@ impl PacketReceiver {
             Duration::from_millis(100)
         };
 
-        let (res, receive_and_buffer_packets_time) = measure!(Self::receive_and_buffer_packets(
-            packet_deserializer,
+        let (res, receive_and_buffer_packets_time) = measure!(self.receive_and_buffer_packets(
             recv_start,
             recv_timeout,
-            id,
             unprocessed_transaction_storage,
             banking_stage_stats,
             tracer_packet_stats,
@@ -62,10 +69,9 @@ impl PacketReceiver {
     #[allow(clippy::too_many_arguments)]
     /// Receive incoming packets, push into unprocessed buffer with packet indexes
     fn receive_and_buffer_packets(
-        packet_deserializer: &mut PacketDeserializer,
+        &mut self,
         recv_start: &mut Instant,
         recv_timeout: Duration,
-        id: u32,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         banking_stage_stats: &mut BankingStageStats,
         tracer_packet_stats: &mut TracerPacketStats,
@@ -77,7 +83,7 @@ impl PacketReceiver {
             new_tracer_stats_option,
             passed_sigverify_count,
             failed_sigverify_count,
-        } = packet_deserializer.handle_received_packets(
+        } = self.packet_deserializer.handle_received_packets(
             recv_timeout,
             unprocessed_transaction_storage.max_receive_size(),
         )?;
@@ -87,7 +93,7 @@ impl PacketReceiver {
             timestamp(),
             duration_as_ms(&recv_start.elapsed()),
             packet_count,
-            id,
+            self.id,
         );
 
         if let Some(new_sigverify_stats) = &new_tracer_stats_option {
