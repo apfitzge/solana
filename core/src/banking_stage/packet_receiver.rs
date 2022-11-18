@@ -22,6 +22,7 @@ use {
 pub struct PacketReceiver {
     id: u32,
     packet_deserializer: PacketDeserializer,
+    last_receive_time: Instant,
 }
 
 impl PacketReceiver {
@@ -29,12 +30,12 @@ impl PacketReceiver {
         Self {
             id,
             packet_deserializer,
+            last_receive_time: Instant::now(),
         }
     }
 
     pub fn do_packet_receiving_and_buffering(
         &mut self,
-        recv_start: &mut Instant,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         banking_stage_stats: &mut BankingStageStats,
         tracer_packet_stats: &mut TracerPacketStats,
@@ -53,7 +54,6 @@ impl PacketReceiver {
         };
 
         let (res, receive_and_buffer_packets_time) = measure!(self.receive_and_buffer_packets(
-            recv_start,
             recv_timeout,
             unprocessed_transaction_storage,
             banking_stage_stats,
@@ -70,7 +70,6 @@ impl PacketReceiver {
     /// Receive incoming packets, push into unprocessed buffer with packet indexes
     fn receive_and_buffer_packets(
         &mut self,
-        recv_start: &mut Instant,
         recv_timeout: Duration,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         banking_stage_stats: &mut BankingStageStats,
@@ -91,7 +90,7 @@ impl PacketReceiver {
         debug!(
             "@{:?} process start stalled for: {:?}ms txs: {} id: {}",
             timestamp(),
-            duration_as_ms(&recv_start.elapsed()),
+            duration_as_ms(&self.last_receive_time.elapsed()),
             packet_count,
             self.id,
         );
@@ -132,7 +131,7 @@ impl PacketReceiver {
         banking_stage_stats
             .current_buffered_packets_count
             .swap(unprocessed_transaction_storage.len(), Ordering::Relaxed);
-        *recv_start = Instant::now();
+        self.last_receive_time = Instant::now();
         Ok(())
     }
 
