@@ -160,26 +160,25 @@ where
 
     /// Moves the iterator to its' next position. If we've reached the end of the slice, we return None
     fn march_iterator(&mut self, starting_index: usize) -> Option<usize> {
-        let mut found = None;
-        for index in starting_index..self.slice.len() {
-            if !self.already_handled[index] {
-                match (self.should_process)(&self.slice[index], &mut self.payload) {
-                    ProcessingDecision::Now => {
-                        self.already_handled[index] = true;
-                        found = Some(index);
-                        break;
+        (starting_index..self.slice.len())
+            .into_iter()
+            .find(|index| {
+                !self.already_handled[*index]
+                    && match (self.should_process)(&self.slice[*index], &mut self.payload) {
+                        ProcessingDecision::Now => {
+                            self.already_handled[*index] = true;
+                            true
+                        }
+                        ProcessingDecision::Later => {
+                            // Do nothing - iterator will try this element in a future batch
+                            false
+                        }
+                        ProcessingDecision::Never => {
+                            self.already_handled[*index] = true;
+                            false
+                        }
                     }
-                    ProcessingDecision::Later => {
-                        // Do nothing - iterator will try this element in a future batch
-                    }
-                    ProcessingDecision::Never => {
-                        self.already_handled[index] = true;
-                    }
-                }
-            }
-        }
-
-        found
+            })
     }
 }
 
