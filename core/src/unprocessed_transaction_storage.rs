@@ -671,14 +671,6 @@ impl ThreadLocalUnprocessedPackets {
         self.unprocessed_packet_batches.packet_priority_queue = new_priority_queue;
         self.verify_priority_queue(original_capacity);
 
-        // Assert unprocessed queue is still consistent
-        assert_eq!(
-            self.unprocessed_packet_batches.packet_priority_queue.len(),
-            self.unprocessed_packet_batches
-                .message_hash_to_transaction
-                .len()
-        );
-
         inc_new_counter_info!(
             "banking_stage-dropped_tx_before_forwarding",
             dropped_tx_before_forwarding_count
