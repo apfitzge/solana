@@ -61,6 +61,7 @@ pub mod consume_executor;
 pub mod decision_maker;
 pub mod forward_executor;
 pub mod packet_receiver;
+pub mod record_executor;
 
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;
