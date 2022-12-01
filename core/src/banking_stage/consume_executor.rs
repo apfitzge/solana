@@ -36,20 +36,35 @@ use {
     },
 };
 
-pub struct ConsumeExecutor;
+pub struct ConsumeExecutor {
+    record_executor: RecordExecutor,
+    commit_executor: CommitExecutor,
+    qos_service: QosService,
+    log_messages_bytes_limit: Option<usize>,
+}
 
 impl ConsumeExecutor {
-    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        record_executor: RecordExecutor,
+        commit_executor: CommitExecutor,
+        qos_service: QosService,
+        log_messages_bytes_limit: Option<usize>,
+    ) -> Self {
+        Self {
+            record_executor,
+            commit_executor,
+            qos_service,
+            log_messages_bytes_limit,
+        }
+    }
+
     pub fn consume_buffered_packets(
+        &self,
         bank_start: &BankStart,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         test_fn: Option<impl Fn()>,
         banking_stage_stats: &BankingStageStats,
-        record_executor: &RecordExecutor,
-        commit_executor: &CommitExecutor,
-        qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-        log_messages_bytes_limit: Option<usize>,
     ) {
         let mut rebuffered_packet_count = 0;
         let mut consumed_buffered_packets_count = 0;
@@ -61,14 +76,10 @@ impl ConsumeExecutor {
             banking_stage_stats,
             slot_metrics_tracker,
             |packets_to_process, payload| {
-                Self::do_process_packets(
+                self.do_process_packets(
                     bank_start,
                     payload,
-                    record_executor,
-                    commit_executor,
                     banking_stage_stats,
-                    qos_service,
-                    log_messages_bytes_limit,
                     &mut consumed_buffered_packets_count,
                     &mut rebuffered_packet_count,
                     &test_fn,
@@ -105,13 +116,10 @@ impl ConsumeExecutor {
     }
 
     fn do_process_packets(
+        &self,
         bank_start: &BankStart,
         payload: &mut ConsumeScannerPayload,
-        record_executor: &RecordExecutor,
-        commit_executor: &CommitExecutor,
         banking_stage_stats: &BankingStageStats,
-        qos_service: &QosService,
-        log_messages_bytes_limit: Option<usize>,
         consumed_buffered_packets_count: &mut usize,
         rebuffered_packet_count: &mut usize,
         test_fn: &Option<impl Fn()>,
@@ -123,16 +131,12 @@ impl ConsumeExecutor {
 
         let packets_to_process_len = packets_to_process.len();
         let (process_transactions_summary, process_packets_transactions_time) = measure!(
-            Self::process_packets_transactions(
+            self.process_packets_transactions(
                 &bank_start.working_bank,
                 &bank_start.bank_creation_time,
-                record_executor,
-                commit_executor,
                 &payload.sanitized_transactions,
                 banking_stage_stats,
-                qos_service,
                 payload.slot_metrics_tracker,
-                log_messages_bytes_limit
             ),
             "process_packets_transactions",
         );
@@ -179,27 +183,16 @@ impl ConsumeExecutor {
     }
 
     fn process_packets_transactions<'a>(
+        &self,
         bank: &'a Arc<Bank>,
         bank_creation_time: &Instant,
-        record_executor: &RecordExecutor,
-        commit_executor: &CommitExecutor,
         sanitized_transactions: &[SanitizedTransaction],
         banking_stage_stats: &'a BankingStageStats,
-        qos_service: &'a QosService,
         slot_metrics_tracker: &'a mut LeaderSlotMetricsTracker,
-        log_messages_bytes_limit: Option<usize>,
     ) -> ProcessTransactionsSummary {
         // Process transactions
         let (mut process_transactions_summary, process_transactions_time) = measure!(
-            Self::process_transactions(
-                bank,
-                bank_creation_time,
-                sanitized_transactions,
-                record_executor,
-                commit_executor,
-                qos_service,
-                log_messages_bytes_limit,
-            ),
+            self.process_transactions(bank, bank_creation_time, sanitized_transactions,),
             "process_transaction_time",
         );
         let process_transactions_us = process_transactions_time.as_us();
@@ -258,13 +251,10 @@ impl ConsumeExecutor {
     /// Returns the number of transactions successfully processed by the bank, which may be less
     /// than the total number if max PoH height was reached and the bank halted
     fn process_transactions(
+        &self,
         bank: &Arc<Bank>,
         bank_creation_time: &Instant,
         transactions: &[SanitizedTransaction],
-        record_executor: &RecordExecutor,
-        commit_executor: &CommitExecutor,
-        qos_service: &QosService,
-        log_messages_bytes_limit: Option<usize>,
     ) -> ProcessTransactionsSummary {
         let mut chunk_start = 0;
         let mut all_retryable_tx_indexes = vec![];
@@ -288,14 +278,10 @@ impl ConsumeExecutor {
                 transactions.len(),
                 chunk_start + MAX_NUM_TRANSACTIONS_PER_BATCH,
             );
-            let process_transaction_batch_output = Self::process_and_record_transactions(
+            let process_transaction_batch_output = self.process_and_record_transactions(
                 bank,
                 &transactions[chunk_start..chunk_end],
-                record_executor,
-                commit_executor,
                 chunk_start,
-                qos_service,
-                log_messages_bytes_limit,
             );
 
             let ProcessTransactionBatchOutput {
@@ -388,18 +374,17 @@ impl ConsumeExecutor {
     }
 
     pub fn process_and_record_transactions(
+        &self,
         bank: &Arc<Bank>,
         txs: &[SanitizedTransaction],
-        record_executor: &RecordExecutor,
-        commit_executor: &CommitExecutor,
         chunk_offset: usize,
-        qos_service: &QosService,
-        log_messages_bytes_limit: Option<usize>,
     ) -> ProcessTransactionBatchOutput {
         let (
             (transaction_costs, transactions_qos_results, cost_model_throttled_transactions_count),
             cost_model_time,
-        ) = measure!(qos_service.select_and_accumulate_transaction_costs(bank, txs));
+        ) = measure!(self
+            .qos_service
+            .select_and_accumulate_transaction_costs(bank, txs));
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -412,13 +397,7 @@ impl ConsumeExecutor {
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
         // and WouldExceedMaxAccountDataCostLimit
         let mut execute_and_commit_transactions_output =
-            Self::execute_and_commit_transactions_locked(
-                bank,
-                record_executor,
-                commit_executor,
-                &batch,
-                log_messages_bytes_limit,
-            );
+            self.execute_and_commit_transactions_locked(bank, &batch);
 
         // Once the accounts are new transactions can enter the pipeline to process them
         let (_, unlock_time) = measure!(drop(batch));
@@ -443,11 +422,11 @@ impl ConsumeExecutor {
 
         let (cu, us) =
             Self::accumulate_execute_units_and_time(&execute_and_commit_timings.execute_timings);
-        qos_service.accumulate_actual_execute_cu(cu);
-        qos_service.accumulate_actual_execute_time(us);
+        self.qos_service.accumulate_actual_execute_cu(cu);
+        self.qos_service.accumulate_actual_execute_time(us);
 
         // reports qos service stats for this batch
-        qos_service.report_metrics(bank.clone());
+        self.qos_service.report_metrics(bank.clone());
 
         debug!(
             "bank: {} lock: {}us unlock: {}us txs_len: {}",
@@ -465,13 +444,11 @@ impl ConsumeExecutor {
     }
 
     fn execute_and_commit_transactions_locked(
+        &self,
         bank: &Arc<Bank>,
-        record_executor: &RecordExecutor,
-        commit_executor: &CommitExecutor,
         batch: &TransactionBatch,
-        log_messages_bytes_limit: Option<usize>,
     ) -> ExecuteAndCommitTransactionsOutput {
-        let has_status_sender = commit_executor.has_status_sender();
+        let has_status_sender = self.commit_executor.has_status_sender();
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
 
         let mut pre_balance_info = PreBalanceInfo::default();
@@ -498,7 +475,7 @@ impl ConsumeExecutor {
                 has_status_sender,
                 &mut execute_and_commit_timings.execute_timings,
                 None, // account_overrides
-                log_messages_bytes_limit
+                self.log_messages_bytes_limit
             ),
             "load_execute",
         );
@@ -534,8 +511,9 @@ impl ConsumeExecutor {
         let (freeze_lock, freeze_lock_time) = measure!(bank.freeze_lock(), "freeze_lock");
         execute_and_commit_timings.freeze_lock_us = freeze_lock_time.as_us();
 
-        let (record_transactions_summary, record_us) =
-            measure_us!(record_executor.record_transactions(bank.slot(), executed_transactions));
+        let (record_transactions_summary, record_us) = measure_us!(self
+            .record_executor
+            .record_transactions(bank.slot(), executed_transactions));
         execute_and_commit_timings.record_us = record_us;
 
         let RecordTransactionsSummary {
@@ -571,7 +549,7 @@ impl ConsumeExecutor {
 
         let sanitized_txs = batch.sanitized_transactions();
         let (commit_time_us, commit_transaction_statuses) = if executed_transactions_count != 0 {
-            commit_executor.commit_transactions(
+            self.commit_executor.commit_transactions(
                 batch,
                 &mut loaded_transactions,
                 execution_results,
@@ -822,17 +800,11 @@ mod tests {
             poh_recorder.write().unwrap().set_bank(&bank, false);
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
             let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
+            let consume_executor =
+                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
             let process_transactions_batch_output =
-                ConsumeExecutor::process_and_record_transactions(
-                    &bank,
-                    &transactions,
-                    &record_executor,
-                    &commit_executor,
-                    0,
-                    &QosService::new(1),
-                    None,
-                );
+                consume_executor.process_and_record_transactions(&bank, &transactions, 0);
 
             let ExecuteAndCommitTransactionsOutput {
                 transactions_attempted_execution_count,
@@ -877,15 +849,7 @@ mod tests {
             )]);
 
             let process_transactions_batch_output =
-                ConsumeExecutor::process_and_record_transactions(
-                    &bank,
-                    &transactions,
-                    &record_executor,
-                    &commit_executor,
-                    0,
-                    &QosService::new(1),
-                    None,
-                );
+                consume_executor.process_and_record_transactions(&bank, &transactions, 0);
 
             let ExecuteAndCommitTransactionsOutput {
                 transactions_attempted_execution_count,
@@ -960,17 +924,11 @@ mod tests {
             poh_recorder.write().unwrap().set_bank(&bank, false);
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
             let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
+            let consume_executor =
+                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
             let process_transactions_batch_output =
-                ConsumeExecutor::process_and_record_transactions(
-                    &bank,
-                    &transactions,
-                    &record_executor,
-                    &commit_executor,
-                    0,
-                    &QosService::new(1),
-                    None,
-                );
+                consume_executor.process_and_record_transactions(&bank, &transactions, 0);
 
             let ExecuteAndCommitTransactionsOutput {
                 transactions_attempted_execution_count,
@@ -1035,7 +993,8 @@ mod tests {
             poh_recorder.write().unwrap().set_bank(&bank, false);
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
             let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
-            let qos_service = QosService::new(1);
+            let consume_executor =
+                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
             let get_block_cost = || bank.read_cost_tracker().unwrap().block_cost();
             let get_tx_count = || bank.read_cost_tracker().unwrap().transaction_count();
@@ -1054,15 +1013,7 @@ mod tests {
             )]);
 
             let process_transactions_batch_output =
-                ConsumeExecutor::process_and_record_transactions(
-                    &bank,
-                    &transactions,
-                    &record_executor,
-                    &commit_executor,
-                    0,
-                    &qos_service,
-                    None,
-                );
+                consume_executor.process_and_record_transactions(&bank, &transactions, 0);
 
             let ExecuteAndCommitTransactionsOutput {
                 executed_with_successful_result_count,
@@ -1094,15 +1045,7 @@ mod tests {
             ]);
 
             let process_transactions_batch_output =
-                ConsumeExecutor::process_and_record_transactions(
-                    &bank,
-                    &transactions,
-                    &record_executor,
-                    &commit_executor,
-                    0,
-                    &qos_service,
-                    None,
-                );
+                consume_executor.process_and_record_transactions(&bank, &transactions, 0);
 
             let ExecuteAndCommitTransactionsOutput {
                 executed_with_successful_result_count,
@@ -1169,17 +1112,11 @@ mod tests {
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
             let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
+            let consume_executor =
+                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
             let process_transactions_batch_output =
-                ConsumeExecutor::process_and_record_transactions(
-                    &bank,
-                    &transactions,
-                    &record_executor,
-                    &commit_executor,
-                    0,
-                    &QosService::new(1),
-                    None,
-                );
+                consume_executor.process_and_record_transactions(&bank, &transactions, 0);
 
             poh_recorder
                 .read()
@@ -1249,16 +1186,11 @@ mod tests {
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
             let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
+            let consume_executor =
+                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
-            let process_transactions_summary = ConsumeExecutor::process_transactions(
-                &bank,
-                &Instant::now(),
-                &transactions,
-                &record_executor,
-                &commit_executor,
-                &QosService::new(1),
-                None,
-            );
+            let process_transactions_summary =
+                consume_executor.process_transactions(&bank, &Instant::now(), &transactions);
 
             let ProcessTransactionsSummary {
                 reached_max_poh_height,
@@ -1320,16 +1252,11 @@ mod tests {
 
         let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
         let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
+        let consume_executor =
+            ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
-        let process_transactions_summary = ConsumeExecutor::process_transactions(
-            &bank,
-            &Instant::now(),
-            &transactions,
-            &record_executor,
-            &commit_executor,
-            &QosService::new(1),
-            None,
-        );
+        let process_transactions_summary =
+            consume_executor.process_transactions(&bank, &Instant::now(), &transactions);
 
         poh_recorder
             .read()
@@ -1556,16 +1483,14 @@ mod tests {
                     }),
                     gossip_vote_sender,
                 );
-
-                let _ = ConsumeExecutor::process_and_record_transactions(
-                    &bank,
-                    &transactions,
-                    &record_executor,
-                    &commit_executor,
-                    0,
-                    &QosService::new(1),
+                let consume_executor = ConsumeExecutor::new(
+                    record_executor,
+                    commit_executor,
+                    QosService::new(1),
                     None,
                 );
+
+                let _ = consume_executor.process_and_record_transactions(&bank, &transactions, 0);
             }
 
             transaction_status_service.join().unwrap();
@@ -1703,14 +1628,16 @@ mod tests {
                     }),
                     gossip_vote_sender,
                 );
-                let _ = ConsumeExecutor::process_and_record_transactions(
+                let consume_executor = ConsumeExecutor::new(
+                    record_executor,
+                    commit_executor,
+                    QosService::new(1),
+                    None,
+                );
+                let _ = consume_executor.process_and_record_transactions(
                     &bank,
                     &[sanitized_tx.clone()],
-                    &record_executor,
-                    &commit_executor,
                     0,
-                    &QosService::new(1),
-                    None,
                 );
             }
 
@@ -1767,6 +1694,8 @@ mod tests {
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
             let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
+            let consume_executor =
+                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
             // When the working bank in poh_recorder is None, no packets should be processed (consume will not be called)
             assert!(!poh_recorder.read().unwrap().has_bank());
@@ -1775,16 +1704,12 @@ mod tests {
             // Multi-Iterator will process them 1-by-1 if all txs are conflicting.
             poh_recorder.write().unwrap().set_bank(&bank, false);
             let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
-            ConsumeExecutor::consume_buffered_packets(
+            consume_executor.consume_buffered_packets(
                 &bank_start,
                 &mut buffered_packet_batches,
                 None::<Box<dyn Fn()>>,
                 &BankingStageStats::default(),
-                &record_executor,
-                &commit_executor,
-                &QosService::new(1),
                 &mut LeaderSlotMetricsTracker::new(0),
-                None,
             );
             assert!(buffered_packet_batches.is_empty());
             poh_recorder
@@ -1825,6 +1750,8 @@ mod tests {
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
             let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
+            let consume_executor =
+                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
             // When the working bank in poh_recorder is None, no packets should be processed
             assert!(!poh_recorder.read().unwrap().has_bank());
@@ -1833,16 +1760,12 @@ mod tests {
             // Multi-Iterator will process them 1-by-1 if all txs are conflicting.
             poh_recorder.write().unwrap().set_bank(&bank, false);
             let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
-            ConsumeExecutor::consume_buffered_packets(
+            consume_executor.consume_buffered_packets(
                 &bank_start,
                 &mut buffered_packet_batches,
                 None::<Box<dyn Fn()>>,
                 &BankingStageStats::default(),
-                &record_executor,
-                &commit_executor,
-                &QosService::new(1),
                 &mut LeaderSlotMetricsTracker::new(0),
-                None,
             );
             assert!(buffered_packet_batches.is_empty());
             poh_recorder
@@ -1875,6 +1798,8 @@ mod tests {
             let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
             let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
+            let consume_executor =
+                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
             // Start up thread to process the banks
             let t_consume = Builder::new()
@@ -1895,16 +1820,12 @@ mod tests {
                             ),
                             ThreadType::Transactions,
                         );
-                    ConsumeExecutor::consume_buffered_packets(
+                    consume_executor.consume_buffered_packets(
                         &bank_start,
                         &mut buffered_packet_batches,
                         test_fn,
                         &BankingStageStats::default(),
-                        &record_executor,
-                        &commit_executor,
-                        &QosService::new(1),
                         &mut LeaderSlotMetricsTracker::new(0),
-                        None,
                     );
 
                     // Check everything is correct. All valid packets should be processed.

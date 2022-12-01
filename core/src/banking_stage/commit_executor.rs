@@ -37,9 +37,7 @@ impl CommitExecutor {
     }
 
     pub fn has_status_sender(&self) -> bool {
-        let result = self.transaction_status_sender.is_some();
-        error!("has_status_sender: {}", result);
-        result
+        self.transaction_status_sender.is_some()
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -95,19 +95,17 @@ fn bench_consume_buffered(bencher: &mut Bencher) {
         );
         let (s, _r) = unbounded();
         let commit_executor = CommitExecutor::new(None, s);
+        let consume_executor =
+            ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
         // This tests the performance of buffering packets.
         // If the packet buffers are copied, performance will be poor.
         bencher.iter(move || {
-            ConsumeExecutor::consume_buffered_packets(
+            consume_executor.consume_buffered_packets(
                 &bank_start,
                 &mut transaction_buffer,
                 None::<Box<dyn Fn()>>,
                 &BankingStageStats::default(),
-                &record_executor,
-                &commit_executor,
-                &QosService::new(1),
                 &mut LeaderSlotMetricsTracker::new(0),
-                None,
             );
         });
 

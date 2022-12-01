@@ -474,17 +474,13 @@ impl BankingStage {
         Self { bank_thread_hdls }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn process_buffered_packets(
         decision_maker: &mut DecisionMaker,
         forward_executor: &ForwardExecutor,
-        record_executor: &RecordExecutor,
-        commit_executor: &CommitExecutor,
+        consume_executor: &ConsumeExecutor,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         banking_stage_stats: &BankingStageStats,
-        qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-        log_messages_bytes_limit: Option<usize>,
         tracer_packet_stats: &mut TracerPacketStats,
     ) {
         if unprocessed_transaction_storage.should_not_process() {
@@ -502,16 +498,12 @@ impl BankingStage {
                 // of the previous slot
                 slot_metrics_tracker.apply_action(metrics_action);
                 let (_, consume_buffered_packets_time) = measure!(
-                    ConsumeExecutor::consume_buffered_packets(
+                    consume_executor.consume_buffered_packets(
                         &bank_start,
                         unprocessed_transaction_storage,
                         None::<Box<dyn Fn()>>,
                         banking_stage_stats,
-                        record_executor,
-                        commit_executor,
-                        qos_service,
                         slot_metrics_tracker,
-                        log_messages_bytes_limit
                     ),
                     "consume_buffered_packets",
                 );
@@ -573,10 +565,15 @@ impl BankingStage {
         );
         let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
         let commit_executor = CommitExecutor::new(transaction_status_sender, gossip_vote_sender);
+        let consume_executor = ConsumeExecutor::new(
+            record_executor,
+            commit_executor,
+            QosService::new(id),
+            log_messages_bytes_limit,
+        );
 
         let mut banking_stage_stats = BankingStageStats::new(id);
         let mut tracer_packet_stats = TracerPacketStats::new(id);
-        let qos_service = QosService::new(id);
 
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::new(id);
         let mut last_metrics_update = Instant::now();
@@ -589,13 +586,10 @@ impl BankingStage {
                     Self::process_buffered_packets(
                         &mut decision_maker,
                         &forward_executor,
-                        &record_executor,
-                        &commit_executor,
+                        &consume_executor,
                         &mut unprocessed_transaction_storage,
                         &banking_stage_stats,
-                        &qos_service,
                         &mut slot_metrics_tracker,
-                        log_messages_bytes_limit,
                         &mut tracer_packet_stats,
                     ),
                     "process_buffered_packets",
