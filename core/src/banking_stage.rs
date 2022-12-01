@@ -35,7 +35,7 @@ use {
     solana_ledger::{
         blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
     },
-    solana_measure::{measure, measure::Measure},
+    solana_measure::{measure, measure::Measure, measure_us},
     solana_metrics::inc_new_counter_info,
     solana_perf::{
         data_budget::DataBudget,
@@ -486,11 +486,11 @@ impl BankingStage {
                         Self::process_loop(
                             packet_deserializer,
                             &poh_recorder,
-                            &cluster_info,
+                            cluster_info,
                             i,
                             transaction_status_sender,
                             gossip_vote_sender,
-                            &data_budget,
+                            data_budget,
                             log_messages_bytes_limit,
                             connection_cache,
                             &bank_forks,
@@ -650,21 +650,16 @@ impl BankingStage {
     #[allow(clippy::too_many_arguments)]
     fn process_buffered_packets(
         decision_maker: &mut DecisionMaker,
-        socket: &UdpSocket,
-        poh_recorder: &Arc<RwLock<PohRecorder>>,
-        cluster_info: &ClusterInfo,
+        forward_executor: &ForwardExecutor,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         transaction_status_sender: &Option<TransactionStatusSender>,
         gossip_vote_sender: &ReplayVoteSender,
         banking_stage_stats: &BankingStageStats,
         recorder: &TransactionRecorder,
-        data_budget: &DataBudget,
         qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         log_messages_bytes_limit: Option<usize>,
-        connection_cache: &ConnectionCache,
         tracer_packet_stats: &mut TracerPacketStats,
-        bank_forks: &Arc<RwLock<BankForks>>,
     ) {
         if unprocessed_transaction_storage.should_not_process() {
             return;
@@ -699,45 +694,27 @@ impl BankingStage {
                     .increment_consume_buffered_packets_us(consume_buffered_packets_time.as_us());
             }
             BufferedPacketsDecision::Forward => {
-                let (_, forward_time) = measure!(
-                    ForwardExecutor::handle_forwarding(
-                        cluster_info,
-                        unprocessed_transaction_storage,
-                        poh_recorder,
-                        socket,
-                        false,
-                        data_budget,
-                        slot_metrics_tracker,
-                        banking_stage_stats,
-                        connection_cache,
-                        tracer_packet_stats,
-                        bank_forks,
-                    ),
-                    "forward",
-                );
-                slot_metrics_tracker.increment_forward_us(forward_time.as_us());
+                let (_, forward_us) = measure_us!(forward_executor.handle_forwarding(
+                    unprocessed_transaction_storage,
+                    false,
+                    slot_metrics_tracker,
+                    banking_stage_stats,
+                    tracer_packet_stats,
+                ));
+                slot_metrics_tracker.increment_forward_us(forward_us);
                 // Take metrics action after forwarding packets to include forwarded
                 // metrics into current slot
                 slot_metrics_tracker.apply_action(metrics_action);
             }
             BufferedPacketsDecision::ForwardAndHold => {
-                let (_, forward_and_hold_time) = measure!(
-                    ForwardExecutor::handle_forwarding(
-                        cluster_info,
-                        unprocessed_transaction_storage,
-                        poh_recorder,
-                        socket,
-                        true,
-                        data_budget,
-                        slot_metrics_tracker,
-                        banking_stage_stats,
-                        connection_cache,
-                        tracer_packet_stats,
-                        bank_forks,
-                    ),
-                    "forward_and_hold",
-                );
-                slot_metrics_tracker.increment_forward_and_hold_us(forward_and_hold_time.as_us());
+                let (_, forward_and_hold_us) = measure_us!(forward_executor.handle_forwarding(
+                    unprocessed_transaction_storage,
+                    true,
+                    slot_metrics_tracker,
+                    banking_stage_stats,
+                    tracer_packet_stats,
+                ));
+                slot_metrics_tracker.increment_forward_and_hold_us(forward_and_hold_us);
                 // Take metrics action after forwarding packets
                 slot_metrics_tracker.apply_action(metrics_action);
             }
@@ -749,11 +726,11 @@ impl BankingStage {
     fn process_loop(
         packet_deserializer: PacketDeserializer,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
-        cluster_info: &ClusterInfo,
+        cluster_info: Arc<ClusterInfo>,
         id: u32,
         transaction_status_sender: Option<TransactionStatusSender>,
         gossip_vote_sender: ReplayVoteSender,
-        data_budget: &DataBudget,
+        data_budget: Arc<DataBudget>,
         log_messages_bytes_limit: Option<usize>,
         connection_cache: Arc<ConnectionCache>,
         bank_forks: &Arc<RwLock<BankForks>>,
@@ -761,8 +738,16 @@ impl BankingStage {
     ) {
         let mut packet_receiver = PacketReceiver::new(id, packet_deserializer);
         let mut decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
+        let forward_executor = ForwardExecutor::new(
+            poh_recorder.clone(),
+            bank_forks.clone(),
+            UdpSocket::bind("0.0.0.0:0").unwrap(),
+            cluster_info.clone(),
+            connection_cache.clone(),
+            data_budget,
+        );
+
         let recorder = poh_recorder.read().unwrap().recorder();
-        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let mut banking_stage_stats = BankingStageStats::new(id);
         let mut tracer_packet_stats = TracerPacketStats::new(id);
         let qos_service = QosService::new(id);
@@ -777,21 +762,16 @@ impl BankingStage {
                 let (_, process_buffered_packets_time) = measure!(
                     Self::process_buffered_packets(
                         &mut decision_maker,
-                        &socket,
-                        poh_recorder,
-                        cluster_info,
+                        &forward_executor,
                         &mut unprocessed_transaction_storage,
                         &transaction_status_sender,
                         &gossip_vote_sender,
                         &banking_stage_stats,
                         &recorder,
-                        data_budget,
                         &qos_service,
                         &mut slot_metrics_tracker,
                         log_messages_bytes_limit,
-                        &connection_cache,
                         &mut tracer_packet_stats,
-                        bank_forks,
                     ),
                     "process_buffered_packets",
                 );
