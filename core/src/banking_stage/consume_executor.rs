@@ -30,10 +30,7 @@ use {
         timing::timestamp,
         transaction::{self, SanitizedTransaction, TransactionError},
     },
-    std::{
-        sync::{atomic::Ordering, Arc},
-        time::Instant,
-    },
+    std::sync::{atomic::Ordering, Arc},
 };
 
 pub struct ConsumeExecutor {
@@ -132,8 +129,7 @@ impl ConsumeExecutor {
         let packets_to_process_len = packets_to_process.len();
         let (process_transactions_summary, process_packets_transactions_time) = measure!(
             self.process_packets_transactions(
-                &bank_start.working_bank,
-                &bank_start.bank_creation_time,
+                bank_start,
                 &payload.sanitized_transactions,
                 banking_stage_stats,
                 payload.slot_metrics_tracker,
@@ -184,15 +180,14 @@ impl ConsumeExecutor {
 
     fn process_packets_transactions<'a>(
         &self,
-        bank: &'a Arc<Bank>,
-        bank_creation_time: &Instant,
+        bank_start: &BankStart,
         sanitized_transactions: &[SanitizedTransaction],
         banking_stage_stats: &'a BankingStageStats,
         slot_metrics_tracker: &'a mut LeaderSlotMetricsTracker,
     ) -> ProcessTransactionsSummary {
         // Process transactions
         let (mut process_transactions_summary, process_transactions_time) = measure!(
-            self.process_transactions(bank, bank_creation_time, sanitized_transactions,),
+            self.process_transactions(bank_start, sanitized_transactions,),
             "process_transaction_time",
         );
         let process_transactions_us = process_transactions_time.as_us();
@@ -216,7 +211,7 @@ impl ConsumeExecutor {
         // Filter out the retryable transactions that are too old
         let (filtered_retryable_transaction_indexes, filter_retryable_packets_time) = measure!(
             Self::filter_pending_packets_from_pending_txs(
-                bank,
+                &bank_start.working_bank,
                 sanitized_transactions,
                 retryable_transaction_indexes,
             ),
@@ -252,8 +247,7 @@ impl ConsumeExecutor {
     /// than the total number if max PoH height was reached and the bank halted
     fn process_transactions(
         &self,
-        bank: &Arc<Bank>,
-        bank_creation_time: &Instant,
+        bank_start: &BankStart,
         transactions: &[SanitizedTransaction],
     ) -> ProcessTransactionsSummary {
         let mut chunk_start = 0;
@@ -279,7 +273,7 @@ impl ConsumeExecutor {
                 chunk_start + MAX_NUM_TRANSACTIONS_PER_BATCH,
             );
             let process_transaction_batch_output = self.process_and_record_transactions(
-                bank,
+                &bank_start.working_bank,
                 &transactions[chunk_start..chunk_end],
                 chunk_start,
             );
@@ -334,7 +328,7 @@ impl ConsumeExecutor {
             // If `bank_creation_time` is None, it's a test so ignore the option so
             // allow processing
             let should_bank_still_be_processing_txs =
-                Bank::should_bank_still_be_processing_txs(bank_creation_time, bank.ns_per_slot);
+                bank_start.should_working_bank_still_be_processing_txs();
             match (
                 new_commit_transactions_result,
                 should_bank_still_be_processing_txs,
@@ -342,8 +336,8 @@ impl ConsumeExecutor {
                 (Err(PohRecorderError::MaxHeightReached), _) | (_, false) => {
                     info!(
                         "process transactions: max height reached slot: {} height: {}",
-                        bank.slot(),
-                        bank.tick_height()
+                        bank_start.working_bank.slot(),
+                        bank_start.working_bank.tick_height()
                     );
                     // process_and_record_transactions has returned all retryable errors in
                     // transactions[chunk_start..chunk_end], so we just need to push the remaining
@@ -701,6 +695,7 @@ mod tests {
                 RwLock,
             },
             thread::Builder,
+            time::Instant,
         },
     };
 
@@ -1189,8 +1184,13 @@ mod tests {
             let consume_executor =
                 ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
 
-            let process_transactions_summary =
-                consume_executor.process_transactions(&bank, &Instant::now(), &transactions);
+            let process_transactions_summary = consume_executor.process_transactions(
+                &BankStart {
+                    working_bank: bank,
+                    bank_creation_time: Arc::new(Instant::now()),
+                },
+                &transactions,
+            );
 
             let ProcessTransactionsSummary {
                 reached_max_poh_height,
@@ -1254,9 +1254,13 @@ mod tests {
         let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
         let consume_executor =
             ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
-
-        let process_transactions_summary =
-            consume_executor.process_transactions(&bank, &Instant::now(), &transactions);
+        let process_transactions_summary = consume_executor.process_transactions(
+            &BankStart {
+                working_bank: bank,
+                bank_creation_time: Arc::new(Instant::now()),
+            },
+            &transactions,
+        );
 
         poh_recorder
             .read()
