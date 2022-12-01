@@ -56,6 +56,7 @@ use {
     },
 };
 
+pub mod commit_executor;
 pub mod consume_executor;
 pub mod decision_maker;
 pub mod forward_executor;
@@ -285,7 +286,7 @@ impl BankingStageStats {
 }
 
 #[derive(Default)]
-struct PreBalanceInfo {
+pub(self) struct PreBalanceInfo {
     native: Vec<Vec<u64>>,
     token: Vec<Vec<TransactionTokenBalance>>,
     mint_decimals: HashMap<Pubkey, u8>,
