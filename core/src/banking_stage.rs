@@ -4,12 +4,10 @@
 
 use {
     self::{
-        commit_executor::CommitExecutor,
-        consume_executor::ConsumeExecutor,
-        decision_maker::{BufferedPacketsDecision, DecisionMaker},
-        forward_executor::ForwardExecutor,
-        packet_receiver::PacketReceiver,
-        record_executor::RecordExecutor,
+        commit_executor::CommitExecutor, consume_executor::ConsumeExecutor,
+        decision_maker::DecisionMaker, forward_executor::ForwardExecutor,
+        packet_receiver::PacketReceiver, record_executor::RecordExecutor,
+        scheduler_handle::SchedulerHandle,
     },
     crate::{
         latest_unprocessed_votes::{LatestUnprocessedVotes, VoteSource},
@@ -22,14 +20,11 @@ use {
         unprocessed_packet_batches::*,
         unprocessed_transaction_storage::{ThreadType, UnprocessedTransactionStorage},
     },
-    crossbeam_channel::{
-        Receiver as CrossbeamReceiver, RecvTimeoutError, Sender as CrossbeamSender,
-    },
+    crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender},
     histogram::Histogram,
     solana_client::connection_cache::ConnectionCache,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::blockstore_processor::TransactionStatusSender,
-    solana_measure::{measure, measure_us},
     solana_perf::{
         data_budget::DataBudget,
         packet::{PacketBatch, PACKETS_PER_BATCH},
@@ -54,7 +49,7 @@ use {
             Arc, RwLock,
         },
         thread::{self, Builder, JoinHandle},
-        time::{Duration, Instant},
+        time::Duration,
     },
 };
 
@@ -64,6 +59,9 @@ pub mod decision_maker;
 pub mod forward_executor;
 pub mod packet_receiver;
 pub mod record_executor;
+pub mod scheduler_error;
+pub mod scheduler_handle;
+pub mod thread_local_scheduler;
 
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;
@@ -474,71 +472,6 @@ impl BankingStage {
         Self { bank_thread_hdls }
     }
 
-    fn process_buffered_packets(
-        decision_maker: &mut DecisionMaker,
-        forward_executor: &ForwardExecutor,
-        consume_executor: &ConsumeExecutor,
-        unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
-        banking_stage_stats: &BankingStageStats,
-        slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-        tracer_packet_stats: &mut TracerPacketStats,
-    ) {
-        if unprocessed_transaction_storage.should_not_process() {
-            return;
-        }
-        let ((metrics_action, decision), make_decision_time) =
-            measure!(decision_maker.make_consume_or_forward_decision(slot_metrics_tracker));
-        slot_metrics_tracker.increment_make_decision_us(make_decision_time.as_us());
-
-        match decision {
-            BufferedPacketsDecision::Consume(bank_start) => {
-                // Take metrics action before consume packets (potentially resetting the
-                // slot metrics tracker to the next slot) so that we don't count the
-                // packet processing metrics from the next slot towards the metrics
-                // of the previous slot
-                slot_metrics_tracker.apply_action(metrics_action);
-                let (_, consume_buffered_packets_time) = measure!(
-                    consume_executor.consume_buffered_packets(
-                        &bank_start,
-                        unprocessed_transaction_storage,
-                        None::<Box<dyn Fn()>>,
-                        banking_stage_stats,
-                        slot_metrics_tracker,
-                    ),
-                    "consume_buffered_packets",
-                );
-                slot_metrics_tracker
-                    .increment_consume_buffered_packets_us(consume_buffered_packets_time.as_us());
-            }
-            BufferedPacketsDecision::Forward => {
-                let (_, forward_us) = measure_us!(forward_executor.handle_forwarding(
-                    unprocessed_transaction_storage,
-                    false,
-                    slot_metrics_tracker,
-                    banking_stage_stats,
-                    tracer_packet_stats,
-                ));
-                slot_metrics_tracker.increment_forward_us(forward_us);
-                // Take metrics action after forwarding packets to include forwarded
-                // metrics into current slot
-                slot_metrics_tracker.apply_action(metrics_action);
-            }
-            BufferedPacketsDecision::ForwardAndHold => {
-                let (_, forward_and_hold_us) = measure_us!(forward_executor.handle_forwarding(
-                    unprocessed_transaction_storage,
-                    true,
-                    slot_metrics_tracker,
-                    banking_stage_stats,
-                    tracer_packet_stats,
-                ));
-                slot_metrics_tracker.increment_forward_and_hold_us(forward_and_hold_us);
-                // Take metrics action after forwarding packets
-                slot_metrics_tracker.apply_action(metrics_action);
-            }
-            _ => (),
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn process_loop(
         packet_deserializer: PacketDeserializer,
@@ -551,10 +484,10 @@ impl BankingStage {
         log_messages_bytes_limit: Option<usize>,
         connection_cache: Arc<ConnectionCache>,
         bank_forks: &Arc<RwLock<BankForks>>,
-        mut unprocessed_transaction_storage: UnprocessedTransactionStorage,
+        unprocessed_transaction_storage: UnprocessedTransactionStorage,
     ) {
-        let mut packet_receiver = PacketReceiver::new(id, packet_deserializer);
-        let mut decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
+        let packet_receiver = PacketReceiver::new(id, packet_deserializer);
+        let decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
         let forward_executor = ForwardExecutor::new(
             poh_recorder.clone(),
             bank_forks.clone(),
@@ -571,46 +504,38 @@ impl BankingStage {
             QosService::new(id),
             log_messages_bytes_limit,
         );
+        let mut scheduler_handle = SchedulerHandle::new_thread_local_scheduler(
+            decision_maker,
+            unprocessed_transaction_storage,
+            packet_receiver,
+        );
 
         let mut banking_stage_stats = BankingStageStats::new(id);
         let mut tracer_packet_stats = TracerPacketStats::new(id);
-
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::new(id);
-        let mut last_metrics_update = Instant::now();
 
         loop {
-            if !unprocessed_transaction_storage.is_empty()
-                || last_metrics_update.elapsed() >= SLOT_BOUNDARY_CHECK_PERIOD
-            {
-                let (_, process_buffered_packets_time) = measure!(
-                    Self::process_buffered_packets(
-                        &mut decision_maker,
-                        &forward_executor,
-                        &consume_executor,
-                        &mut unprocessed_transaction_storage,
-                        &banking_stage_stats,
-                        &mut slot_metrics_tracker,
-                        &mut tracer_packet_stats,
-                    ),
-                    "process_buffered_packets",
-                );
-                slot_metrics_tracker
-                    .increment_process_buffered_packets_us(process_buffered_packets_time.as_us());
-                last_metrics_update = Instant::now();
-            }
+            // Do scheduled work (processing packets)
+            scheduler_handle.do_scheduled_work(
+                &consume_executor,
+                &forward_executor,
+                &mut banking_stage_stats,
+                &mut tracer_packet_stats,
+                &mut slot_metrics_tracker,
+            );
 
-            tracer_packet_stats.report(1000);
-
-            match packet_receiver.do_packet_receiving_and_buffering(
-                &mut unprocessed_transaction_storage,
+            // Do any necessary updates - check if scheduler is still valid
+            if let Err(err) = scheduler_handle.tick(
                 &mut banking_stage_stats,
                 &mut tracer_packet_stats,
                 &mut slot_metrics_tracker,
             ) {
-                Ok(()) | Err(RecvTimeoutError::Timeout) => (),
-                Err(RecvTimeoutError::Disconnected) => break,
+                warn!("Banking stage scheduler error: {:?}", err);
+                break;
             }
+
             banking_stage_stats.report(1000);
+            tracer_packet_stats.report(1000);
         }
     }
 
