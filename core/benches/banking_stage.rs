@@ -1,7 +1,9 @@
 #![allow(clippy::integer_arithmetic)]
 #![feature(test)]
 
-use solana_core::banking_stage::consume_executor::ConsumeExecutor;
+use solana_core::banking_stage::{
+    consume_executor::ConsumeExecutor, record_executor::RecordExecutor,
+};
 
 extern crate test;
 
@@ -79,7 +81,7 @@ fn bench_consume_buffered(bencher: &mut Bencher) {
         let (exit, poh_recorder, poh_service, _signal_receiver) =
             create_test_recorder(&bank, &blockstore, None, None);
 
-        let recorder = poh_recorder.read().unwrap().recorder();
+        let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
         let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
 
         let tx = test_tx();
@@ -101,7 +103,7 @@ fn bench_consume_buffered(bencher: &mut Bencher) {
                 &s,
                 None::<Box<dyn Fn()>>,
                 &BankingStageStats::default(),
-                &recorder,
+                &record_executor,
                 &QosService::new(1),
                 &mut LeaderSlotMetricsTracker::new(0),
                 None,

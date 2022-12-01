@@ -15,13 +15,19 @@ pub struct RecordTransactionsSummary {
     pub starting_transaction_index: Option<usize>,
 }
 
-pub struct RecordExecutor;
+pub struct RecordExecutor {
+    recorder: TransactionRecorder,
+}
 
 impl RecordExecutor {
+    pub fn new(recorder: TransactionRecorder) -> Self {
+        Self { recorder }
+    }
+
     pub fn record_transactions(
+        &self,
         bank_slot: Slot,
         transactions: Vec<VersionedTransaction>,
-        recorder: &TransactionRecorder,
     ) -> RecordTransactionsSummary {
         let mut record_transactions_timings = RecordTransactionsTimings::default();
         let mut starting_transaction_index = None;
@@ -35,7 +41,7 @@ impl RecordExecutor {
             record_transactions_timings.hash_us = hash_time.as_us();
 
             let (res, poh_record_time) =
-                measure!(recorder.record(bank_slot, hash, transactions), "hash");
+                measure!(self.recorder.record(bank_slot, hash, transactions), "hash");
             record_transactions_timings.poh_record_us = poh_record_time.as_us();
 
             match res {
@@ -131,7 +137,9 @@ mod tests {
                 system_transaction::transfer(&keypair2, &pubkey2, 1, genesis_config.hash()).into(),
             ];
 
-            let _ = RecordExecutor::record_transactions(bank.slot(), txs.clone(), &recorder);
+            let record_executor = RecordExecutor::new(recorder);
+
+            let _ = record_executor.record_transactions(bank.slot(), txs.clone());
             let (_bank, (entry, _tick_height)) = entry_receiver.recv().unwrap();
             assert_eq!(entry.transactions, txs);
 
@@ -139,7 +147,7 @@ mod tests {
             // record_transactions should throw MaxHeightReached
             let next_slot = bank.slot() + 1;
             let RecordTransactionsSummary { result, .. } =
-                RecordExecutor::record_transactions(next_slot, txs, &recorder);
+                record_executor.record_transactions(next_slot, txs);
             assert_matches!(result, Err(PohRecorderError::MaxHeightReached));
             // Should receive nothing from PohRecorder b/c record failed
             assert!(entry_receiver.try_recv().is_err());

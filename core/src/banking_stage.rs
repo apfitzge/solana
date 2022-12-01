@@ -8,6 +8,7 @@ use {
         decision_maker::{BufferedPacketsDecision, DecisionMaker},
         forward_executor::ForwardExecutor,
         packet_receiver::PacketReceiver,
+        record_executor::RecordExecutor,
     },
     crate::{
         latest_unprocessed_votes::{LatestUnprocessedVotes, VoteSource},
@@ -32,7 +33,7 @@ use {
         data_budget::DataBudget,
         packet::{PacketBatch, PACKETS_PER_BATCH},
     },
-    solana_poh::poh_recorder::{PohRecorder, PohRecorderError, TransactionRecorder},
+    solana_poh::poh_recorder::{PohRecorder, PohRecorderError},
     solana_runtime::{
         self, bank_forks::BankForks, transaction_error_metrics::TransactionErrorMetrics,
         vote_sender_types::ReplayVoteSender,
@@ -476,11 +477,11 @@ impl BankingStage {
     fn process_buffered_packets(
         decision_maker: &mut DecisionMaker,
         forward_executor: &ForwardExecutor,
+        record_executor: &RecordExecutor,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         transaction_status_sender: &Option<TransactionStatusSender>,
         gossip_vote_sender: &ReplayVoteSender,
         banking_stage_stats: &BankingStageStats,
-        recorder: &TransactionRecorder,
         qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         log_messages_bytes_limit: Option<usize>,
@@ -508,7 +509,7 @@ impl BankingStage {
                         gossip_vote_sender,
                         None::<Box<dyn Fn()>>,
                         banking_stage_stats,
-                        recorder,
+                        record_executor,
                         qos_service,
                         slot_metrics_tracker,
                         log_messages_bytes_limit
@@ -571,8 +572,8 @@ impl BankingStage {
             connection_cache,
             data_budget,
         );
+        let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
 
-        let recorder = poh_recorder.read().unwrap().recorder();
         let mut banking_stage_stats = BankingStageStats::new(id);
         let mut tracer_packet_stats = TracerPacketStats::new(id);
         let qos_service = QosService::new(id);
@@ -588,11 +589,11 @@ impl BankingStage {
                     Self::process_buffered_packets(
                         &mut decision_maker,
                         &forward_executor,
+                        &record_executor,
                         &mut unprocessed_transaction_storage,
                         &transaction_status_sender,
                         &gossip_vote_sender,
                         &banking_stage_stats,
-                        &recorder,
                         &qos_service,
                         &mut slot_metrics_tracker,
                         log_messages_bytes_limit,

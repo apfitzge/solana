@@ -19,8 +19,8 @@ use {
     solana_ledger::{
         blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
     },
-    solana_measure::{measure, measure::Measure},
-    solana_poh::poh_recorder::{BankStart, PohRecorderError, TransactionRecorder},
+    solana_measure::{measure, measure::Measure, measure_us},
+    solana_poh::poh_recorder::{BankStart, PohRecorderError},
     solana_program_runtime::timings::ExecuteTimings,
     solana_runtime::{
         bank::{Bank, LoadAndExecuteTransactionsOutput, TransactionCheckResult},
@@ -50,7 +50,7 @@ impl ConsumeExecutor {
         gossip_vote_sender: &ReplayVoteSender,
         test_fn: Option<impl Fn()>,
         banking_stage_stats: &BankingStageStats,
-        recorder: &TransactionRecorder,
+        record_executor: &RecordExecutor,
         qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         log_messages_bytes_limit: Option<usize>,
@@ -68,7 +68,7 @@ impl ConsumeExecutor {
                 Self::do_process_packets(
                     bank_start,
                     payload,
-                    recorder,
+                    record_executor,
                     transaction_status_sender,
                     gossip_vote_sender,
                     banking_stage_stats,
@@ -112,7 +112,7 @@ impl ConsumeExecutor {
     fn do_process_packets(
         bank_start: &BankStart,
         payload: &mut ConsumeScannerPayload,
-        recorder: &TransactionRecorder,
+        record_executor: &RecordExecutor,
         transaction_status_sender: &Option<TransactionStatusSender>,
         gossip_vote_sender: &ReplayVoteSender,
         banking_stage_stats: &BankingStageStats,
@@ -132,7 +132,7 @@ impl ConsumeExecutor {
             Self::process_packets_transactions(
                 &bank_start.working_bank,
                 &bank_start.bank_creation_time,
-                recorder,
+                record_executor,
                 &payload.sanitized_transactions,
                 transaction_status_sender,
                 gossip_vote_sender,
@@ -189,7 +189,7 @@ impl ConsumeExecutor {
     fn process_packets_transactions<'a>(
         bank: &'a Arc<Bank>,
         bank_creation_time: &Instant,
-        poh: &'a TransactionRecorder,
+        record_executor: &RecordExecutor,
         sanitized_transactions: &[SanitizedTransaction],
         transaction_status_sender: &Option<TransactionStatusSender>,
         gossip_vote_sender: &'a ReplayVoteSender,
@@ -204,7 +204,7 @@ impl ConsumeExecutor {
                 bank,
                 bank_creation_time,
                 sanitized_transactions,
-                poh,
+                record_executor,
                 transaction_status_sender,
                 gossip_vote_sender,
                 qos_service,
@@ -271,7 +271,7 @@ impl ConsumeExecutor {
         bank: &Arc<Bank>,
         bank_creation_time: &Instant,
         transactions: &[SanitizedTransaction],
-        poh: &TransactionRecorder,
+        record_executor: &RecordExecutor,
         transaction_status_sender: &Option<TransactionStatusSender>,
         gossip_vote_sender: &ReplayVoteSender,
         qos_service: &QosService,
@@ -302,7 +302,7 @@ impl ConsumeExecutor {
             let process_transaction_batch_output = Self::process_and_record_transactions(
                 bank,
                 &transactions[chunk_start..chunk_end],
-                poh,
+                record_executor,
                 chunk_start,
                 transaction_status_sender,
                 gossip_vote_sender,
@@ -402,7 +402,7 @@ impl ConsumeExecutor {
     pub fn process_and_record_transactions(
         bank: &Arc<Bank>,
         txs: &[SanitizedTransaction],
-        poh: &TransactionRecorder,
+        record_executor: &RecordExecutor,
         chunk_offset: usize,
         transaction_status_sender: &Option<TransactionStatusSender>,
         gossip_vote_sender: &ReplayVoteSender,
@@ -427,7 +427,7 @@ impl ConsumeExecutor {
         let mut execute_and_commit_transactions_output =
             Self::execute_and_commit_transactions_locked(
                 bank,
-                poh,
+                record_executor,
                 &batch,
                 transaction_status_sender,
                 gossip_vote_sender,
@@ -480,7 +480,7 @@ impl ConsumeExecutor {
 
     fn execute_and_commit_transactions_locked(
         bank: &Arc<Bank>,
-        poh: &TransactionRecorder,
+        record_executor: &RecordExecutor,
         batch: &TransactionBatch,
         transaction_status_sender: &Option<TransactionStatusSender>,
         gossip_vote_sender: &ReplayVoteSender,
@@ -548,11 +548,9 @@ impl ConsumeExecutor {
         let (freeze_lock, freeze_lock_time) = measure!(bank.freeze_lock(), "freeze_lock");
         execute_and_commit_timings.freeze_lock_us = freeze_lock_time.as_us();
 
-        let (record_transactions_summary, record_time) = measure!(
-            RecordExecutor::record_transactions(bank.slot(), executed_transactions, poh),
-            "record_transactions",
-        );
-        execute_and_commit_timings.record_us = record_time.as_us();
+        let (record_transactions_summary, record_us) =
+            measure_us!(record_executor.record_transactions(bank.slot(), executed_transactions));
+        execute_and_commit_timings.record_us = record_us;
 
         let RecordTransactionsSummary {
             result: record_transactions_result,
@@ -615,7 +613,7 @@ impl ConsumeExecutor {
             "bank: {} process_and_record_locked: {}us record: {}us commit: {}us txs_len: {}",
             bank.slot(),
             load_execute_time.as_us(),
-            record_time.as_us(),
+            record_us,
             commit_time_us,
             sanitized_txs.len(),
         );
@@ -831,7 +829,7 @@ mod tests {
                 &Arc::new(PohConfig::default()),
                 Arc::new(AtomicBool::default()),
             );
-            let recorder = poh_recorder.recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.recorder());
             let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
             let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
@@ -843,7 +841,7 @@ mod tests {
                 ConsumeExecutor::process_and_record_transactions(
                     &bank,
                     &transactions,
-                    &recorder,
+                    &record_executor,
                     0,
                     &None,
                     &gossip_vote_sender,
@@ -897,7 +895,7 @@ mod tests {
                 ConsumeExecutor::process_and_record_transactions(
                     &bank,
                     &transactions,
-                    &recorder,
+                    &record_executor,
                     0,
                     &None,
                     &gossip_vote_sender,
@@ -970,7 +968,7 @@ mod tests {
                 &Arc::new(PohConfig::default()),
                 Arc::new(AtomicBool::default()),
             );
-            let recorder = poh_recorder.recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.recorder());
             let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
             let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
@@ -982,7 +980,7 @@ mod tests {
                 ConsumeExecutor::process_and_record_transactions(
                     &bank,
                     &transactions,
-                    &recorder,
+                    &record_executor,
                     0,
                     &None,
                     &gossip_vote_sender,
@@ -1045,7 +1043,7 @@ mod tests {
                 &Arc::new(PohConfig::default()),
                 Arc::new(AtomicBool::default()),
             );
-            let recorder = poh_recorder.recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.recorder());
             let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
             let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
@@ -1075,7 +1073,7 @@ mod tests {
                 ConsumeExecutor::process_and_record_transactions(
                     &bank,
                     &transactions,
-                    &recorder,
+                    &record_executor,
                     0,
                     &None,
                     &gossip_vote_sender,
@@ -1116,7 +1114,7 @@ mod tests {
                 ConsumeExecutor::process_and_record_transactions(
                     &bank,
                     &transactions,
-                    &recorder,
+                    &record_executor,
                     0,
                     &None,
                     &gossip_vote_sender,
@@ -1180,7 +1178,7 @@ mod tests {
                 &Arc::new(PohConfig::default()),
                 Arc::new(AtomicBool::default()),
             );
-            let recorder = poh_recorder.recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.recorder());
             let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
             poh_recorder.write().unwrap().set_bank(&bank, false);
@@ -1193,7 +1191,7 @@ mod tests {
                 ConsumeExecutor::process_and_record_transactions(
                     &bank,
                     &transactions,
-                    &recorder,
+                    &record_executor,
                     0,
                     &None,
                     &gossip_vote_sender,
@@ -1262,9 +1260,10 @@ mod tests {
 
             // Poh Recorder has no working bank, so should throw MaxHeightReached error on
             // record
-            let recorder = poh_recorder.recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.recorder());
+            let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
-            let poh_simulator = simulate_poh(record_receiver, &Arc::new(RwLock::new(poh_recorder)));
+            let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
 
@@ -1272,7 +1271,7 @@ mod tests {
                 &bank,
                 &Instant::now(),
                 &transactions,
-                &recorder,
+                &record_executor,
                 &None,
                 &gossip_vote_sender,
                 &QosService::new(1),
@@ -1299,7 +1298,11 @@ mod tests {
             let expected: Vec<usize> = (0..transactions.len()).collect();
             assert_eq!(retryable_transaction_indexes, expected);
 
-            recorder.is_exited.store(true, Ordering::Relaxed);
+            poh_recorder
+                .read()
+                .unwrap()
+                .is_exited
+                .store(true, Ordering::Relaxed);
             let _ = poh_simulator.join();
         }
 
@@ -1326,7 +1329,7 @@ mod tests {
             &Arc::new(PohConfig::default()),
             Arc::new(AtomicBool::default()),
         );
-        let recorder = poh_recorder.recorder();
+        let record_executor = RecordExecutor::new(poh_recorder.recorder());
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
         poh_recorder.write().unwrap().set_bank(&bank, false);
@@ -1339,7 +1342,7 @@ mod tests {
             &bank,
             &Instant::now(),
             &transactions,
-            &recorder,
+            &record_executor,
             &None,
             &gossip_vote_sender,
             &QosService::new(1),
@@ -1532,7 +1535,7 @@ mod tests {
                 &Arc::new(PohConfig::default()),
                 Arc::new(AtomicBool::default()),
             );
-            let recorder = poh_recorder.recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.recorder());
             let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
             let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
@@ -1566,7 +1569,7 @@ mod tests {
             let _ = ConsumeExecutor::process_and_record_transactions(
                 &bank,
                 &transactions,
-                &recorder,
+                &record_executor,
                 0,
                 &Some(TransactionStatusSender {
                     sender: transaction_status_sender,
@@ -1672,7 +1675,7 @@ mod tests {
                 &Arc::new(PohConfig::default()),
                 Arc::new(AtomicBool::default()),
             );
-            let recorder = poh_recorder.recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.recorder());
             let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
             let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
@@ -1706,7 +1709,7 @@ mod tests {
             let _ = ConsumeExecutor::process_and_record_transactions(
                 &bank,
                 &[sanitized_tx.clone()],
-                &recorder,
+                &record_executor,
                 0,
                 &Some(TransactionStatusSender {
                     sender: transaction_status_sender,
@@ -1752,7 +1755,7 @@ mod tests {
         {
             let (transactions, bank, poh_recorder, _entry_receiver, poh_simulator) =
                 setup_conflicting_transactions(ledger_path.path());
-            let recorder = poh_recorder.read().unwrap().recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
             let num_conflicting_transactions = transactions.len();
             let deserialized_packets =
                 unprocessed_packet_batches::transactions_to_deserialized_packets(&transactions)
@@ -1783,7 +1786,7 @@ mod tests {
                 &gossip_vote_sender,
                 None::<Box<dyn Fn()>>,
                 &BankingStageStats::default(),
-                &recorder,
+                &record_executor,
                 &QosService::new(1),
                 &mut LeaderSlotMetricsTracker::new(0),
                 None,
@@ -1810,7 +1813,7 @@ mod tests {
                 .message
                 .account_keys
                 .push(duplicate_account_key); // corrupt transaction
-            let recorder = poh_recorder.read().unwrap().recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
             let num_conflicting_transactions = transactions.len();
             let deserialized_packets =
                 unprocessed_packet_batches::transactions_to_deserialized_packets(&transactions)
@@ -1841,7 +1844,7 @@ mod tests {
                 &gossip_vote_sender,
                 None::<Box<dyn Fn()>>,
                 &BankingStageStats::default(),
-                &recorder,
+                &record_executor,
                 &QosService::new(1),
                 &mut LeaderSlotMetricsTracker::new(0),
                 None,
@@ -1873,8 +1876,7 @@ mod tests {
             // When the poh recorder has a bank, it should process all buffered packets.
             let num_conflicting_transactions = transactions.len();
             poh_recorder.write().unwrap().set_bank(&bank, false);
-            let poh_recorder_ = poh_recorder.clone();
-            let recorder = poh_recorder_.read().unwrap().recorder();
+            let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
             let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
             // Start up thread to process the banks
@@ -1903,7 +1905,7 @@ mod tests {
                         &gossip_vote_sender,
                         test_fn,
                         &BankingStageStats::default(),
-                        &recorder,
+                        &record_executor,
                         &QosService::new(1),
                         &mut LeaderSlotMetricsTracker::new(0),
                         None,
