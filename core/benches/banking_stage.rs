@@ -1,6 +1,8 @@
 #![allow(clippy::integer_arithmetic)]
 #![feature(test)]
 
+use solana_core::banking_stage::consume_executor::ConsumeExecutor;
+
 extern crate test;
 
 use {
@@ -92,7 +94,7 @@ fn bench_consume_buffered(bencher: &mut Bencher) {
         // This tests the performance of buffering packets.
         // If the packet buffers are copied, performance will be poor.
         bencher.iter(move || {
-            BankingStage::consume_buffered_packets(
+            ConsumeExecutor::consume_buffered_packets(
                 &bank_start,
                 &mut transaction_buffer,
                 &None,
