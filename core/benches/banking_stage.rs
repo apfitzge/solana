@@ -2,7 +2,8 @@
 #![feature(test)]
 
 use solana_core::banking_stage::{
-    consume_executor::ConsumeExecutor, record_executor::RecordExecutor,
+    commit_executor::CommitExecutor, consume_executor::ConsumeExecutor,
+    record_executor::RecordExecutor,
 };
 
 extern crate test;
@@ -93,17 +94,17 @@ fn bench_consume_buffered(bencher: &mut Bencher) {
             ThreadType::Transactions,
         );
         let (s, _r) = unbounded();
+        let commit_executor = CommitExecutor::new(None, s);
         // This tests the performance of buffering packets.
         // If the packet buffers are copied, performance will be poor.
         bencher.iter(move || {
             ConsumeExecutor::consume_buffered_packets(
                 &bank_start,
                 &mut transaction_buffer,
-                &None,
-                &s,
                 None::<Box<dyn Fn()>>,
                 &BankingStageStats::default(),
                 &record_executor,
+                &commit_executor,
                 &QosService::new(1),
                 &mut LeaderSlotMetricsTracker::new(0),
                 None,

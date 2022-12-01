@@ -4,6 +4,7 @@
 
 use {
     self::{
+        commit_executor::CommitExecutor,
         consume_executor::ConsumeExecutor,
         decision_maker::{BufferedPacketsDecision, DecisionMaker},
         forward_executor::ForwardExecutor,
@@ -478,9 +479,8 @@ impl BankingStage {
         decision_maker: &mut DecisionMaker,
         forward_executor: &ForwardExecutor,
         record_executor: &RecordExecutor,
+        commit_executor: &CommitExecutor,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
-        transaction_status_sender: &Option<TransactionStatusSender>,
-        gossip_vote_sender: &ReplayVoteSender,
         banking_stage_stats: &BankingStageStats,
         qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
@@ -505,11 +505,10 @@ impl BankingStage {
                     ConsumeExecutor::consume_buffered_packets(
                         &bank_start,
                         unprocessed_transaction_storage,
-                        transaction_status_sender,
-                        gossip_vote_sender,
                         None::<Box<dyn Fn()>>,
                         banking_stage_stats,
                         record_executor,
+                        commit_executor,
                         qos_service,
                         slot_metrics_tracker,
                         log_messages_bytes_limit
@@ -573,6 +572,7 @@ impl BankingStage {
             data_budget,
         );
         let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
+        let commit_executor = CommitExecutor::new(transaction_status_sender, gossip_vote_sender);
 
         let mut banking_stage_stats = BankingStageStats::new(id);
         let mut tracer_packet_stats = TracerPacketStats::new(id);
@@ -590,9 +590,8 @@ impl BankingStage {
                         &mut decision_maker,
                         &forward_executor,
                         &record_executor,
+                        &commit_executor,
                         &mut unprocessed_transaction_storage,
-                        &transaction_status_sender,
-                        &gossip_vote_sender,
                         &banking_stage_stats,
                         &qos_service,
                         &mut slot_metrics_tracker,

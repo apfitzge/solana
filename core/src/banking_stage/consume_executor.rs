@@ -16,9 +16,7 @@ use {
         unprocessed_transaction_storage::{ConsumeScannerPayload, UnprocessedTransactionStorage},
     },
     itertools::Itertools,
-    solana_ledger::{
-        blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
-    },
+    solana_ledger::token_balances::collect_token_balances,
     solana_measure::{measure, measure::Measure, measure_us},
     solana_poh::poh_recorder::{BankStart, PohRecorderError},
     solana_program_runtime::timings::ExecuteTimings,
@@ -26,7 +24,6 @@ use {
         bank::{Bank, LoadAndExecuteTransactionsOutput, TransactionCheckResult},
         transaction_batch::TransactionBatch,
         transaction_error_metrics::TransactionErrorMetrics,
-        vote_sender_types::ReplayVoteSender,
     },
     solana_sdk::{
         clock::{FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
@@ -46,11 +43,10 @@ impl ConsumeExecutor {
     pub fn consume_buffered_packets(
         bank_start: &BankStart,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
-        transaction_status_sender: &Option<TransactionStatusSender>,
-        gossip_vote_sender: &ReplayVoteSender,
         test_fn: Option<impl Fn()>,
         banking_stage_stats: &BankingStageStats,
         record_executor: &RecordExecutor,
+        commit_executor: &CommitExecutor,
         qos_service: &QosService,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         log_messages_bytes_limit: Option<usize>,
@@ -69,8 +65,7 @@ impl ConsumeExecutor {
                     bank_start,
                     payload,
                     record_executor,
-                    transaction_status_sender,
-                    gossip_vote_sender,
+                    commit_executor,
                     banking_stage_stats,
                     qos_service,
                     log_messages_bytes_limit,
@@ -113,8 +108,7 @@ impl ConsumeExecutor {
         bank_start: &BankStart,
         payload: &mut ConsumeScannerPayload,
         record_executor: &RecordExecutor,
-        transaction_status_sender: &Option<TransactionStatusSender>,
-        gossip_vote_sender: &ReplayVoteSender,
+        commit_executor: &CommitExecutor,
         banking_stage_stats: &BankingStageStats,
         qos_service: &QosService,
         log_messages_bytes_limit: Option<usize>,
@@ -133,9 +127,8 @@ impl ConsumeExecutor {
                 &bank_start.working_bank,
                 &bank_start.bank_creation_time,
                 record_executor,
+                commit_executor,
                 &payload.sanitized_transactions,
-                transaction_status_sender,
-                gossip_vote_sender,
                 banking_stage_stats,
                 qos_service,
                 payload.slot_metrics_tracker,
@@ -185,14 +178,12 @@ impl ConsumeExecutor {
         Some(retryable_transaction_indexes)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn process_packets_transactions<'a>(
         bank: &'a Arc<Bank>,
         bank_creation_time: &Instant,
         record_executor: &RecordExecutor,
+        commit_executor: &CommitExecutor,
         sanitized_transactions: &[SanitizedTransaction],
-        transaction_status_sender: &Option<TransactionStatusSender>,
-        gossip_vote_sender: &'a ReplayVoteSender,
         banking_stage_stats: &'a BankingStageStats,
         qos_service: &'a QosService,
         slot_metrics_tracker: &'a mut LeaderSlotMetricsTracker,
@@ -205,8 +196,7 @@ impl ConsumeExecutor {
                 bank_creation_time,
                 sanitized_transactions,
                 record_executor,
-                transaction_status_sender,
-                gossip_vote_sender,
+                commit_executor,
                 qos_service,
                 log_messages_bytes_limit,
             ),
@@ -272,8 +262,7 @@ impl ConsumeExecutor {
         bank_creation_time: &Instant,
         transactions: &[SanitizedTransaction],
         record_executor: &RecordExecutor,
-        transaction_status_sender: &Option<TransactionStatusSender>,
-        gossip_vote_sender: &ReplayVoteSender,
+        commit_executor: &CommitExecutor,
         qos_service: &QosService,
         log_messages_bytes_limit: Option<usize>,
     ) -> ProcessTransactionsSummary {
@@ -303,9 +292,8 @@ impl ConsumeExecutor {
                 bank,
                 &transactions[chunk_start..chunk_end],
                 record_executor,
+                commit_executor,
                 chunk_start,
-                transaction_status_sender,
-                gossip_vote_sender,
                 qos_service,
                 log_messages_bytes_limit,
             );
@@ -403,9 +391,8 @@ impl ConsumeExecutor {
         bank: &Arc<Bank>,
         txs: &[SanitizedTransaction],
         record_executor: &RecordExecutor,
+        commit_executor: &CommitExecutor,
         chunk_offset: usize,
-        transaction_status_sender: &Option<TransactionStatusSender>,
-        gossip_vote_sender: &ReplayVoteSender,
         qos_service: &QosService,
         log_messages_bytes_limit: Option<usize>,
     ) -> ProcessTransactionBatchOutput {
@@ -428,9 +415,8 @@ impl ConsumeExecutor {
             Self::execute_and_commit_transactions_locked(
                 bank,
                 record_executor,
+                commit_executor,
                 &batch,
-                transaction_status_sender,
-                gossip_vote_sender,
                 log_messages_bytes_limit,
             );
 
@@ -481,11 +467,11 @@ impl ConsumeExecutor {
     fn execute_and_commit_transactions_locked(
         bank: &Arc<Bank>,
         record_executor: &RecordExecutor,
+        commit_executor: &CommitExecutor,
         batch: &TransactionBatch,
-        transaction_status_sender: &Option<TransactionStatusSender>,
-        gossip_vote_sender: &ReplayVoteSender,
         log_messages_bytes_limit: Option<usize>,
     ) -> ExecuteAndCommitTransactionsOutput {
+        let has_status_sender = commit_executor.has_status_sender();
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
 
         let mut pre_balance_info = PreBalanceInfo::default();
@@ -493,7 +479,7 @@ impl ConsumeExecutor {
             {
                 // If the extra meta-data services are enabled for RPC, collect the
                 // pre-balances for native and token programs.
-                if transaction_status_sender.is_some() {
+                if has_status_sender {
                     pre_balance_info.native = bank.collect_balances(batch);
                     pre_balance_info.token =
                         collect_token_balances(bank, batch, &mut pre_balance_info.mint_decimals)
@@ -507,9 +493,9 @@ impl ConsumeExecutor {
             bank.load_and_execute_transactions(
                 batch,
                 MAX_PROCESSING_AGE,
-                transaction_status_sender.is_some(),
-                transaction_status_sender.is_some(),
-                transaction_status_sender.is_some(),
+                has_status_sender,
+                has_status_sender,
+                has_status_sender,
                 &mut execute_and_commit_timings.execute_timings,
                 None, // account_overrides
                 log_messages_bytes_limit
@@ -585,7 +571,7 @@ impl ConsumeExecutor {
 
         let sanitized_txs = batch.sanitized_transactions();
         let (commit_time_us, commit_transaction_statuses) = if executed_transactions_count != 0 {
-            CommitExecutor::commit_transactions(
+            commit_executor.commit_transactions(
                 batch,
                 &mut loaded_transactions,
                 execution_results,
@@ -594,8 +580,6 @@ impl ConsumeExecutor {
                 bank,
                 &mut pre_balance_info,
                 &mut execute_and_commit_timings,
-                transaction_status_sender,
-                gossip_vote_sender,
                 signature_count,
                 executed_transactions_count,
                 executed_with_successful_result_count,
@@ -714,6 +698,7 @@ mod tests {
         solana_entry::entry::{next_entry, next_versioned_entry},
         solana_ledger::{
             blockstore::{entries_to_test_shreds, Blockstore},
+            blockstore_processor::TransactionStatusSender,
             genesis_utils::GenesisConfigInfo,
             get_tmp_ledger_path_auto_delete,
             leader_schedule_cache::LeaderScheduleCache,
@@ -836,15 +821,15 @@ mod tests {
 
             poh_recorder.write().unwrap().set_bank(&bank, false);
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
+            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
 
             let process_transactions_batch_output =
                 ConsumeExecutor::process_and_record_transactions(
                     &bank,
                     &transactions,
                     &record_executor,
+                    &commit_executor,
                     0,
-                    &None,
-                    &gossip_vote_sender,
                     &QosService::new(1),
                     None,
                 );
@@ -896,9 +881,8 @@ mod tests {
                     &bank,
                     &transactions,
                     &record_executor,
+                    &commit_executor,
                     0,
-                    &None,
-                    &gossip_vote_sender,
                     &QosService::new(1),
                     None,
                 );
@@ -975,15 +959,15 @@ mod tests {
 
             poh_recorder.write().unwrap().set_bank(&bank, false);
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
+            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
 
             let process_transactions_batch_output =
                 ConsumeExecutor::process_and_record_transactions(
                     &bank,
                     &transactions,
                     &record_executor,
+                    &commit_executor,
                     0,
-                    &None,
-                    &gossip_vote_sender,
                     &QosService::new(1),
                     None,
                 );
@@ -1050,7 +1034,7 @@ mod tests {
 
             poh_recorder.write().unwrap().set_bank(&bank, false);
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
-
+            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
             let qos_service = QosService::new(1);
 
             let get_block_cost = || bank.read_cost_tracker().unwrap().block_cost();
@@ -1074,9 +1058,8 @@ mod tests {
                     &bank,
                     &transactions,
                     &record_executor,
+                    &commit_executor,
                     0,
-                    &None,
-                    &gossip_vote_sender,
                     &qos_service,
                     None,
                 );
@@ -1115,9 +1098,8 @@ mod tests {
                     &bank,
                     &transactions,
                     &record_executor,
+                    &commit_executor,
                     0,
-                    &None,
-                    &gossip_vote_sender,
                     &qos_service,
                     None,
                 );
@@ -1186,15 +1168,15 @@ mod tests {
             let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
+            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
 
             let process_transactions_batch_output =
                 ConsumeExecutor::process_and_record_transactions(
                     &bank,
                     &transactions,
                     &record_executor,
+                    &commit_executor,
                     0,
-                    &None,
-                    &gossip_vote_sender,
                     &QosService::new(1),
                     None,
                 );
@@ -1266,14 +1248,14 @@ mod tests {
             let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
+            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
 
             let process_transactions_summary = ConsumeExecutor::process_transactions(
                 &bank,
                 &Instant::now(),
                 &transactions,
                 &record_executor,
-                &None,
-                &gossip_vote_sender,
+                &commit_executor,
                 &QosService::new(1),
                 None,
             );
@@ -1337,14 +1319,14 @@ mod tests {
         let poh_simulator = simulate_poh(record_receiver, &poh_recorder);
 
         let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
+        let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
 
         let process_transactions_summary = ConsumeExecutor::process_transactions(
             &bank,
             &Instant::now(),
             &transactions,
             &record_executor,
-            &None,
-            &gossip_vote_sender,
+            &commit_executor,
             &QosService::new(1),
             None,
         );
@@ -1566,18 +1548,25 @@ mod tests {
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
 
-            let _ = ConsumeExecutor::process_and_record_transactions(
-                &bank,
-                &transactions,
-                &record_executor,
-                0,
-                &Some(TransactionStatusSender {
-                    sender: transaction_status_sender,
-                }),
-                &gossip_vote_sender,
-                &QosService::new(1),
-                None,
-            );
+            {
+                // scope so sender on commit_executor is dropped
+                let commit_executor = CommitExecutor::new(
+                    Some(TransactionStatusSender {
+                        sender: transaction_status_sender,
+                    }),
+                    gossip_vote_sender,
+                );
+
+                let _ = ConsumeExecutor::process_and_record_transactions(
+                    &bank,
+                    &transactions,
+                    &record_executor,
+                    &commit_executor,
+                    0,
+                    &QosService::new(1),
+                    None,
+                );
+            }
 
             transaction_status_service.join().unwrap();
 
@@ -1706,18 +1695,24 @@ mod tests {
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
 
-            let _ = ConsumeExecutor::process_and_record_transactions(
-                &bank,
-                &[sanitized_tx.clone()],
-                &record_executor,
-                0,
-                &Some(TransactionStatusSender {
-                    sender: transaction_status_sender,
-                }),
-                &gossip_vote_sender,
-                &QosService::new(1),
-                None,
-            );
+            {
+                // scope so sender on commit_executor is dropped
+                let commit_executor = CommitExecutor::new(
+                    Some(TransactionStatusSender {
+                        sender: transaction_status_sender,
+                    }),
+                    gossip_vote_sender,
+                );
+                let _ = ConsumeExecutor::process_and_record_transactions(
+                    &bank,
+                    &[sanitized_tx.clone()],
+                    &record_executor,
+                    &commit_executor,
+                    0,
+                    &QosService::new(1),
+                    None,
+                );
+            }
 
             transaction_status_service.join().unwrap();
 
@@ -1771,6 +1766,7 @@ mod tests {
                 );
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
+            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
 
             // When the working bank in poh_recorder is None, no packets should be processed (consume will not be called)
             assert!(!poh_recorder.read().unwrap().has_bank());
@@ -1782,11 +1778,10 @@ mod tests {
             ConsumeExecutor::consume_buffered_packets(
                 &bank_start,
                 &mut buffered_packet_batches,
-                &None,
-                &gossip_vote_sender,
                 None::<Box<dyn Fn()>>,
                 &BankingStageStats::default(),
                 &record_executor,
+                &commit_executor,
                 &QosService::new(1),
                 &mut LeaderSlotMetricsTracker::new(0),
                 None,
@@ -1829,6 +1824,7 @@ mod tests {
                 );
 
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
+            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
 
             // When the working bank in poh_recorder is None, no packets should be processed
             assert!(!poh_recorder.read().unwrap().has_bank());
@@ -1840,11 +1836,10 @@ mod tests {
             ConsumeExecutor::consume_buffered_packets(
                 &bank_start,
                 &mut buffered_packet_batches,
-                &None,
-                &gossip_vote_sender,
                 None::<Box<dyn Fn()>>,
                 &BankingStageStats::default(),
                 &record_executor,
+                &commit_executor,
                 &QosService::new(1),
                 &mut LeaderSlotMetricsTracker::new(0),
                 None,
@@ -1879,6 +1874,8 @@ mod tests {
             let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
             let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
             let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
+            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
+
             // Start up thread to process the banks
             let t_consume = Builder::new()
                 .name("consume-buffered-packets".to_string())
@@ -1901,11 +1898,10 @@ mod tests {
                     ConsumeExecutor::consume_buffered_packets(
                         &bank_start,
                         &mut buffered_packet_batches,
-                        &None,
-                        &gossip_vote_sender,
                         test_fn,
                         &BankingStageStats::default(),
                         &record_executor,
+                        &commit_executor,
                         &QosService::new(1),
                         &mut LeaderSlotMetricsTracker::new(0),
                         None,

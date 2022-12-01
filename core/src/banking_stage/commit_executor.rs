@@ -20,11 +20,31 @@ use {
     std::sync::Arc,
 };
 
-pub struct CommitExecutor;
+pub struct CommitExecutor {
+    transaction_status_sender: Option<TransactionStatusSender>,
+    gossip_vote_sender: ReplayVoteSender,
+}
 
 impl CommitExecutor {
+    pub fn new(
+        transaction_status_sender: Option<TransactionStatusSender>,
+        gossip_vote_sender: ReplayVoteSender,
+    ) -> Self {
+        Self {
+            transaction_status_sender,
+            gossip_vote_sender,
+        }
+    }
+
+    pub fn has_status_sender(&self) -> bool {
+        let result = self.transaction_status_sender.is_some();
+        error!("has_status_sender: {}", result);
+        result
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_transactions(
+        &self,
         batch: &TransactionBatch,
         loaded_transactions: &mut [TransactionLoadResult],
         execution_results: Vec<TransactionExecutionResult>,
@@ -33,8 +53,6 @@ impl CommitExecutor {
         bank: &Arc<Bank>,
         pre_balance_info: &mut PreBalanceInfo,
         execute_and_commit_timings: &mut LeaderExecuteAndCommitTimings,
-        transaction_status_sender: &Option<TransactionStatusSender>,
-        gossip_vote_sender: &ReplayVoteSender,
         signature_count: u64,
         executed_transactions_count: usize,
         executed_with_successful_result_count: usize,
@@ -84,10 +102,9 @@ impl CommitExecutor {
                 bank_utils::find_and_send_votes(
                     sanitized_txs,
                     &tx_results,
-                    Some(gossip_vote_sender),
+                    Some(&self.gossip_vote_sender),
                 );
-                Self::collect_balances_and_send_status_batch(
-                    transaction_status_sender,
+                self.collect_balances_and_send_status_batch(
                     tx_results,
                     bank,
                     batch,
@@ -102,14 +119,15 @@ impl CommitExecutor {
     }
 
     fn collect_balances_and_send_status_batch(
-        transaction_status_sender: &Option<TransactionStatusSender>,
+        &self,
         tx_results: TransactionResults,
         bank: &Arc<Bank>,
         batch: &TransactionBatch,
         pre_balance_info: &mut PreBalanceInfo,
         starting_transaction_index: Option<usize>,
     ) {
-        if let Some(transaction_status_sender) = transaction_status_sender {
+        if let Some(transaction_status_sender) = &self.transaction_status_sender {
+            error!("doing send status batch...");
             let txs = batch.sanitized_transactions().to_vec();
             let post_balances = bank.collect_balances(batch);
             let post_token_balances =
@@ -143,6 +161,7 @@ impl CommitExecutor {
                 tx_results.rent_debits,
                 batch_transaction_indexes,
             );
+            error!("finished send status batch...");
         }
     }
 }
