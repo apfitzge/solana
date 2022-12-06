@@ -40,14 +40,12 @@ impl ThreadLocalScheduler {
 
     pub fn tick(
         &mut self,
-        banking_stage_stats: &mut BankingStageStats,
         tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), SchedulerError> {
         if matches!(
             self.packet_receiver.do_packet_receiving_and_buffering(
                 &mut self.unprocessed_transaction_storage,
-                banking_stage_stats,
                 tracer_packet_stats,
                 slot_metrics_tracker,
             ),

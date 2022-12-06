@@ -21,14 +21,10 @@ use {
         unprocessed_transaction_storage::{ThreadType, UnprocessedTransactionStorage},
     },
     crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender},
-    histogram::Histogram,
     solana_client::connection_cache::ConnectionCache,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::blockstore_processor::TransactionStatusSender,
-    solana_perf::{
-        data_budget::DataBudget,
-        packet::{PacketBatch, PACKETS_PER_BATCH},
-    },
+    solana_perf::{data_budget::DataBudget, packet::PacketBatch},
     solana_poh::poh_recorder::{PohRecorder, PohRecorderError},
     solana_runtime::{
         self, bank_forks::BankForks, transaction_error_metrics::TransactionErrorMetrics,
@@ -116,20 +112,13 @@ pub struct ExecuteAndCommitTransactionsOutput {
 pub struct BankingStageStats {
     last_report: AtomicInterval,
     id: u32,
-    receive_and_buffer_packets_count: AtomicUsize,
-    dropped_packets_count: AtomicUsize,
-    pub(crate) dropped_duplicated_packets_count: AtomicUsize,
-    newly_buffered_packets_count: AtomicUsize,
-    current_buffered_packets_count: AtomicUsize,
     rebuffered_packets_count: AtomicUsize,
     consumed_buffered_packets_count: AtomicUsize,
     forwarded_transaction_count: AtomicUsize,
     forwarded_vote_count: AtomicUsize,
-    batch_packet_indexes_len: Histogram,
 
     // Timing
     consume_buffered_packets_elapsed: AtomicU64,
-    receive_and_buffer_packets_elapsed: AtomicU64,
     filter_pending_packets_elapsed: AtomicU64,
     pub(crate) packet_conversion_elapsed: AtomicU64,
     transaction_processing_elapsed: AtomicU64,
@@ -139,38 +128,21 @@ impl BankingStageStats {
     pub fn new(id: u32) -> Self {
         BankingStageStats {
             id,
-            batch_packet_indexes_len: Histogram::configure()
-                .max_value(PACKETS_PER_BATCH as u64)
-                .build()
-                .unwrap(),
             ..BankingStageStats::default()
         }
     }
 
     fn is_empty(&self) -> bool {
-        0 == self
-            .receive_and_buffer_packets_count
-            .load(Ordering::Relaxed) as u64
-            + self.dropped_packets_count.load(Ordering::Relaxed) as u64
-            + self
-                .dropped_duplicated_packets_count
-                .load(Ordering::Relaxed) as u64
-            + self.newly_buffered_packets_count.load(Ordering::Relaxed) as u64
-            + self.current_buffered_packets_count.load(Ordering::Relaxed) as u64
-            + self.rebuffered_packets_count.load(Ordering::Relaxed) as u64
+        0 == self.rebuffered_packets_count.load(Ordering::Relaxed) as u64
             + self.consumed_buffered_packets_count.load(Ordering::Relaxed) as u64
             + self
                 .consume_buffered_packets_elapsed
-                .load(Ordering::Relaxed)
-            + self
-                .receive_and_buffer_packets_elapsed
                 .load(Ordering::Relaxed)
             + self.filter_pending_packets_elapsed.load(Ordering::Relaxed)
             + self.packet_conversion_elapsed.load(Ordering::Relaxed)
             + self.transaction_processing_elapsed.load(Ordering::Relaxed)
             + self.forwarded_transaction_count.load(Ordering::Relaxed) as u64
             + self.forwarded_vote_count.load(Ordering::Relaxed) as u64
-            + self.batch_packet_indexes_len.entries()
     }
 
     fn report(&mut self, report_interval_ms: u64) {
@@ -182,34 +154,6 @@ impl BankingStageStats {
             datapoint_info!(
                 "banking_stage-loop-stats",
                 ("id", self.id as i64, i64),
-                (
-                    "receive_and_buffer_packets_count",
-                    self.receive_and_buffer_packets_count
-                        .swap(0, Ordering::Relaxed) as i64,
-                    i64
-                ),
-                (
-                    "dropped_packets_count",
-                    self.dropped_packets_count.swap(0, Ordering::Relaxed) as i64,
-                    i64
-                ),
-                (
-                    "dropped_duplicated_packets_count",
-                    self.dropped_duplicated_packets_count
-                        .swap(0, Ordering::Relaxed) as i64,
-                    i64
-                ),
-                (
-                    "newly_buffered_packets_count",
-                    self.newly_buffered_packets_count.swap(0, Ordering::Relaxed) as i64,
-                    i64
-                ),
-                (
-                    "current_buffered_packets_count",
-                    self.current_buffered_packets_count
-                        .swap(0, Ordering::Relaxed) as i64,
-                    i64
-                ),
                 (
                     "rebuffered_packets_count",
                     self.rebuffered_packets_count.swap(0, Ordering::Relaxed) as i64,
@@ -238,12 +182,6 @@ impl BankingStageStats {
                     i64
                 ),
                 (
-                    "receive_and_buffer_packets_elapsed",
-                    self.receive_and_buffer_packets_elapsed
-                        .swap(0, Ordering::Relaxed) as i64,
-                    i64
-                ),
-                (
                     "filter_pending_packets_elapsed",
                     self.filter_pending_packets_elapsed
                         .swap(0, Ordering::Relaxed) as i64,
@@ -259,29 +197,8 @@ impl BankingStageStats {
                     self.transaction_processing_elapsed
                         .swap(0, Ordering::Relaxed) as i64,
                     i64
-                ),
-                (
-                    "packet_batch_indices_len_min",
-                    self.batch_packet_indexes_len.minimum().unwrap_or(0) as i64,
-                    i64
-                ),
-                (
-                    "packet_batch_indices_len_max",
-                    self.batch_packet_indexes_len.maximum().unwrap_or(0) as i64,
-                    i64
-                ),
-                (
-                    "packet_batch_indices_len_mean",
-                    self.batch_packet_indexes_len.mean().unwrap_or(0) as i64,
-                    i64
-                ),
-                (
-                    "packet_batch_indices_len_90pct",
-                    self.batch_packet_indexes_len.percentile(90.0).unwrap_or(0) as i64,
-                    i64
                 )
             );
-            self.batch_packet_indexes_len.clear();
         }
     }
 }
@@ -525,11 +442,9 @@ impl BankingStage {
             );
 
             // Do any necessary updates - check if scheduler is still valid
-            if let Err(err) = scheduler_handle.tick(
-                &mut banking_stage_stats,
-                &mut tracer_packet_stats,
-                &mut slot_metrics_tracker,
-            ) {
+            if let Err(err) =
+                scheduler_handle.tick(&mut tracer_packet_stats, &mut slot_metrics_tracker)
+            {
                 warn!("Banking stage scheduler error: {:?}", err);
                 break;
             }
