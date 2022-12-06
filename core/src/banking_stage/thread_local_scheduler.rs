@@ -24,10 +24,12 @@ pub(crate) struct ThreadLocalScheduler {
     unprocessed_transaction_storage: UnprocessedTransactionStorage,
     packet_receiver: PacketReceiver,
     last_metrics_update: Instant,
+    banking_stage_stats: BankingStageStats,
 }
 
 impl ThreadLocalScheduler {
     pub fn new(
+        id: u32,
         decision_maker: DecisionMaker,
         unprocessed_transaction_storage: UnprocessedTransactionStorage,
         packet_receiver: PacketReceiver,
@@ -37,6 +39,7 @@ impl ThreadLocalScheduler {
             unprocessed_transaction_storage,
             packet_receiver,
             last_metrics_update: Instant::now(),
+            banking_stage_stats: BankingStageStats::new(id),
         }
     }
 
@@ -45,7 +48,7 @@ impl ThreadLocalScheduler {
         tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), SchedulerError> {
-        if matches!(
+        let result = if matches!(
             self.packet_receiver.do_packet_receiving_and_buffering(
                 &mut self.unprocessed_transaction_storage,
                 tracer_packet_stats,
@@ -56,14 +59,17 @@ impl ThreadLocalScheduler {
             Err(SchedulerError::PacketReceiverDisconnected)
         } else {
             Ok(())
-        }
+        };
+
+        self.banking_stage_stats.report(1000);
+
+        result
     }
 
     pub fn do_scheduled_work(
         &mut self,
         consume_executor: &ConsumeExecutor,
         forward_executor: &ForwardExecutor,
-        banking_stage_stats: &mut BankingStageStats,
         tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) {
@@ -73,7 +79,6 @@ impl ThreadLocalScheduler {
             let (_, process_buffered_packets_us) = measure_us!(self.process_buffered_packets(
                 consume_executor,
                 forward_executor,
-                banking_stage_stats,
                 tracer_packet_stats,
                 slot_metrics_tracker,
             ));
@@ -86,7 +91,6 @@ impl ThreadLocalScheduler {
         &mut self,
         consume_executor: &ConsumeExecutor,
         forward_executor: &ForwardExecutor,
-        banking_stage_stats: &mut BankingStageStats,
         tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) {
@@ -111,7 +115,7 @@ impl ThreadLocalScheduler {
                         &bank_start,
                         &mut self.unprocessed_transaction_storage,
                         None::<Box<dyn Fn()>>,
-                        banking_stage_stats,
+                        &self.banking_stage_stats,
                         slot_metrics_tracker,
                     ));
                 slot_metrics_tracker
@@ -122,7 +126,7 @@ impl ThreadLocalScheduler {
                     &mut self.unprocessed_transaction_storage,
                     false,
                     slot_metrics_tracker,
-                    banking_stage_stats,
+                    &self.banking_stage_stats,
                     tracer_packet_stats,
                 ));
                 slot_metrics_tracker.increment_forward_us(forward_us);
@@ -135,7 +139,7 @@ impl ThreadLocalScheduler {
                     &mut self.unprocessed_transaction_storage,
                     true,
                     slot_metrics_tracker,
-                    banking_stage_stats,
+                    &self.banking_stage_stats,
                     tracer_packet_stats,
                 ));
                 slot_metrics_tracker.increment_forward_and_hold_us(forward_and_hold_us);

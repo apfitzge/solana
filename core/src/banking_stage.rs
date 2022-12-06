@@ -422,12 +422,12 @@ impl BankingStage {
             log_messages_bytes_limit,
         );
         let mut scheduler_handle = SchedulerHandle::new_thread_local_scheduler(
+            id,
             decision_maker,
             unprocessed_transaction_storage,
             packet_receiver,
         );
 
-        let mut banking_stage_stats = BankingStageStats::new(id);
         let mut tracer_packet_stats = TracerPacketStats::new(id);
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::new(id);
 
@@ -436,7 +436,6 @@ impl BankingStage {
             scheduler_handle.do_scheduled_work(
                 &consume_executor,
                 &forward_executor,
-                &mut banking_stage_stats,
                 &mut tracer_packet_stats,
                 &mut slot_metrics_tracker,
             );
@@ -449,7 +448,6 @@ impl BankingStage {
                 break;
             }
 
-            banking_stage_stats.report(1000);
             tracer_packet_stats.report(1000);
         }
     }
