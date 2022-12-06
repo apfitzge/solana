@@ -17,6 +17,8 @@ use {
     std::time::Instant,
 };
 
+/// Scheduler that lives in the same thread as executors. Handle is equivalent
+/// to the scheduler itself.
 pub(crate) struct ThreadLocalScheduler {
     decision_maker: DecisionMaker,
     unprocessed_transaction_storage: UnprocessedTransactionStorage,
