@@ -33,12 +33,11 @@ impl SchedulerHandle {
     /// Do necessary updates to the scheduler interface
     pub fn tick(
         &mut self,
-        tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), SchedulerError> {
         match self {
             Self::ThreadLocalScheduler(thread_local_scheduler) => {
-                thread_local_scheduler.tick(tracer_packet_stats, slot_metrics_tracker)
+                thread_local_scheduler.tick(slot_metrics_tracker)
             }
         }
     }

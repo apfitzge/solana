@@ -3,7 +3,7 @@ use {
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
         packet_deserializer::{PacketDeserializer, ReceivePacketResults},
-        tracer_packet_stats::TracerPacketStats,
+        sigverify::SigverifyTracerPacketStats,
         unprocessed_transaction_storage::UnprocessedTransactionStorage,
     },
     crossbeam_channel::RecvTimeoutError,
@@ -126,11 +126,96 @@ impl PacketReceiverStats {
     }
 }
 
+#[derive(Default, Debug)]
+pub struct TracerPacketReceiverStats {
+    id: u32,
+    last_report: AtomicInterval,
+    sigverify_tracer_packet_stats: SigverifyTracerPacketStats,
+    total_exceeded_banking_stage_buffer: AtomicUsize,
+}
+
+impl TracerPacketReceiverStats {
+    pub fn new(id: u32) -> Self {
+        Self {
+            id,
+            ..TracerPacketReceiverStats::default()
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        // If sigverify didn't see any, then nothing to report
+        0 == self
+            .sigverify_tracer_packet_stats
+            .total_tracer_packets_received_in_sigverify_stage
+    }
+
+    fn report(&mut self, report_interval_ms: u64) {
+        if self.is_empty() {
+            return;
+        }
+
+        if self.last_report.should_update(report_interval_ms) {
+            datapoint_info!(
+                "tracer_packet_receiver_stats",
+                ("id", self.id, i64),
+                (
+                    "total_removed_before_sigverify",
+                    self.sigverify_tracer_packet_stats
+                        .total_removed_before_sigverify_stage,
+                    i64
+                ),
+                (
+                    "total_tracer_packets_received_in_sigverify",
+                    self.sigverify_tracer_packet_stats
+                        .total_tracer_packets_received_in_sigverify_stage,
+                    i64
+                ),
+                (
+                    "total_tracer_packets_deduped_in_sigverify",
+                    self.sigverify_tracer_packet_stats
+                        .total_tracer_packets_deduped,
+                    i64
+                ),
+                (
+                    "total_excess_tracer_packets_discarded_in_sigverify",
+                    self.sigverify_tracer_packet_stats
+                        .total_excess_tracer_packets,
+                    i64
+                ),
+                (
+                    "total_tracker_packets_passed_sigverify",
+                    self.sigverify_tracer_packet_stats
+                        .total_tracker_packets_passed_sigverify,
+                    i64
+                ),
+                (
+                    "total_exceeded_banking_stage_buffer",
+                    self.total_exceeded_banking_stage_buffer
+                        .swap(0, Ordering::Relaxed),
+                    i64
+                )
+            );
+
+            *self = Self::new(self.id);
+        }
+    }
+
+    fn aggregate_sigverify_tracer_packet_stats(&mut self, new_stats: &SigverifyTracerPacketStats) {
+        self.sigverify_tracer_packet_stats.aggregate(new_stats);
+    }
+
+    fn increment_total_exceeded_banking_stage_buffer(&mut self, count: usize) {
+        self.total_exceeded_banking_stage_buffer
+            .fetch_add(count, Ordering::Relaxed);
+    }
+}
+
 pub struct PacketReceiver {
     id: u32,
     packet_deserializer: PacketDeserializer,
     last_receive_time: Instant,
     stats: PacketReceiverStats,
+    tracer_stats: TracerPacketReceiverStats,
 }
 
 impl PacketReceiver {
@@ -140,13 +225,13 @@ impl PacketReceiver {
             packet_deserializer,
             last_receive_time: Instant::now(),
             stats: PacketReceiverStats::new(id),
+            tracer_stats: TracerPacketReceiverStats::new(id),
         }
     }
 
     pub fn do_packet_receiving_and_buffering(
         &mut self,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
-        tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), RecvTimeoutError> {
         // Gossip thread will almost always not wait because the transaction storage will most likely not be empty
@@ -164,7 +249,6 @@ impl PacketReceiver {
         let (res, receive_and_buffer_packets_time) = measure!(self.receive_and_buffer_packets(
             recv_timeout,
             unprocessed_transaction_storage,
-            tracer_packet_stats,
             slot_metrics_tracker,
         ));
         slot_metrics_tracker
@@ -172,6 +256,7 @@ impl PacketReceiver {
 
         // Report receiving stats on interval
         self.stats.report(1000);
+        self.tracer_stats.report(1000);
 
         res
     }
@@ -181,7 +266,6 @@ impl PacketReceiver {
         &mut self,
         recv_timeout: Duration,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
-        tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), RecvTimeoutError> {
         let mut recv_time = Measure::start("receive_and_buffer_packets_recv");
@@ -204,7 +288,8 @@ impl PacketReceiver {
         );
 
         if let Some(new_sigverify_stats) = &new_tracer_stats_option {
-            tracer_packet_stats.aggregate_sigverify_tracer_packet_stats(new_sigverify_stats);
+            self.tracer_stats
+                .aggregate_sigverify_tracer_packet_stats(new_sigverify_stats);
         }
 
         // Track all the packets incoming from sigverify, both valid and invalid
@@ -219,7 +304,6 @@ impl PacketReceiver {
             &mut dropped_packets_count,
             &mut newly_buffered_packets_count,
             slot_metrics_tracker,
-            tracer_packet_stats,
         );
         recv_time.stop();
 
@@ -249,7 +333,6 @@ impl PacketReceiver {
         dropped_packets_count: &mut usize,
         newly_buffered_packets_count: &mut usize,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-        tracer_packet_stats: &mut TracerPacketStats,
     ) {
         if !deserialized_packets.is_empty() {
             let _ = self
@@ -269,9 +352,10 @@ impl PacketReceiver {
                 *dropped_packets_count,
                 insert_packet_batches_summary.total_dropped_packets()
             );
-            tracer_packet_stats.increment_total_exceeded_banking_stage_buffer(
-                insert_packet_batches_summary.dropped_tracer_packets(),
-            );
+            self.tracer_stats
+                .increment_total_exceeded_banking_stage_buffer(
+                    insert_packet_batches_summary.dropped_tracer_packets(),
+                );
         }
     }
 }

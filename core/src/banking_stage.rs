@@ -441,9 +441,7 @@ impl BankingStage {
             );
 
             // Do any necessary updates - check if scheduler is still valid
-            if let Err(err) =
-                scheduler_handle.tick(&mut tracer_packet_stats, &mut slot_metrics_tracker)
-            {
+            if let Err(err) = scheduler_handle.tick(&mut slot_metrics_tracker) {
                 warn!("Banking stage scheduler error: {:?}", err);
                 break;
             }

@@ -45,13 +45,11 @@ impl ThreadLocalScheduler {
 
     pub fn tick(
         &mut self,
-        tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> Result<(), SchedulerError> {
         let result = if matches!(
             self.packet_receiver.do_packet_receiving_and_buffering(
                 &mut self.unprocessed_transaction_storage,
-                tracer_packet_stats,
                 slot_metrics_tracker,
             ),
             Err(RecvTimeoutError::Disconnected)
