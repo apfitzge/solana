@@ -43,15 +43,10 @@ impl ThreadLocalScheduler {
         }
     }
 
-    pub fn tick(
-        &mut self,
-        slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-    ) -> Result<(), SchedulerError> {
+    pub fn tick(&mut self) -> Result<(), SchedulerError> {
         let result = if matches!(
-            self.packet_receiver.do_packet_receiving_and_buffering(
-                &mut self.unprocessed_transaction_storage,
-                slot_metrics_tracker,
-            ),
+            self.packet_receiver
+                .do_packet_receiving_and_buffering(&mut self.unprocessed_transaction_storage,),
             Err(RecvTimeoutError::Disconnected)
         ) {
             Err(SchedulerError::PacketReceiverDisconnected)
@@ -100,6 +95,12 @@ impl ThreadLocalScheduler {
             .decision_maker
             .make_consume_or_forward_decision(slot_metrics_tracker));
         slot_metrics_tracker.increment_make_decision_us(make_decision_us);
+
+        let leader_slot = match &decision {
+            BufferedPacketsDecision::Consume(bank_start) => Some(bank_start.working_bank.slot()),
+            _ => None,
+        };
+        self.packet_receiver.check_leader_slot_boundary(leader_slot);
 
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {

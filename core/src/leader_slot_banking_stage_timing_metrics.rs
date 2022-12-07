@@ -133,13 +133,6 @@ pub(crate) struct OuterLoopTimings {
     // Time spent processing buffered packets
     pub process_buffered_packets_us: u64,
 
-    // Time spent processing new incoming packets to the banking thread
-    pub receive_and_buffer_packets_us: u64,
-
-    // The number of times the function to receive and buffer new packets
-    // was called
-    pub receive_and_buffer_packets_invoked_count: u64,
-
     // Elapsed time between bank was detected and slot end was detected
     pub bank_detected_to_slot_end_detected_us: u64,
 }
@@ -150,8 +143,6 @@ impl OuterLoopTimings {
             bank_detected_time: Instant::now(),
             bank_detected_delay_us: bank_creation_time.elapsed().as_micros() as u64,
             process_buffered_packets_us: 0,
-            receive_and_buffer_packets_us: 0,
-            receive_and_buffer_packets_invoked_count: 0,
             bank_detected_to_slot_end_detected_us: 0,
         }
     }
@@ -183,16 +174,6 @@ impl OuterLoopTimings {
                 self.process_buffered_packets_us,
                 i64
             ),
-            (
-                "receive_and_buffer_packets_us",
-                self.receive_and_buffer_packets_us,
-                i64
-            ),
-            (
-                "receive_and_buffer_packets_invoked_count",
-                self.receive_and_buffer_packets_invoked_count,
-                i64
-            )
         );
     }
 }
