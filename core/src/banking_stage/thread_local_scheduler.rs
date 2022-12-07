@@ -91,9 +91,8 @@ impl ThreadLocalScheduler {
             return;
         }
 
-        let ((metrics_action, decision), make_decision_us) = measure_us!(self
-            .decision_maker
-            .make_consume_or_forward_decision(slot_metrics_tracker));
+        let (decision, make_decision_us) =
+            measure_us!(self.decision_maker.make_consume_or_forward_decision());
         slot_metrics_tracker.increment_make_decision_us(make_decision_us);
 
         let leader_slot = match &decision {
@@ -108,7 +107,7 @@ impl ThreadLocalScheduler {
                 // slot metrics tracker to the next slot) so that we don't count the
                 // packet processing metrics from the next slot towards the metrics
                 // of the previous slot
-                slot_metrics_tracker.apply_action(metrics_action);
+                slot_metrics_tracker.apply_working_bank(Some(&bank_start));
                 let (_, consume_buffered_packets_us) = measure_us!(consume_executor
                     .consume_buffered_packets(
                         &bank_start,
@@ -131,7 +130,7 @@ impl ThreadLocalScheduler {
                 slot_metrics_tracker.increment_forward_us(forward_us);
                 // Take metrics action after forwarding packets to include forwarded
                 // metrics into current slot
-                slot_metrics_tracker.apply_action(metrics_action);
+                slot_metrics_tracker.apply_working_bank(None);
             }
             BufferedPacketsDecision::ForwardAndHold => {
                 let (_, forward_and_hold_us) = measure_us!(forward_executor.handle_forwarding(
@@ -143,7 +142,7 @@ impl ThreadLocalScheduler {
                 ));
                 slot_metrics_tracker.increment_forward_and_hold_us(forward_and_hold_us);
                 // Take metrics action after forwarding packets
-                slot_metrics_tracker.apply_action(metrics_action);
+                slot_metrics_tracker.apply_working_bank(None);
             }
             _ => (),
         }
