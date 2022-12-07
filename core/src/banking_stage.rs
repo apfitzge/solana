@@ -318,9 +318,9 @@ impl BankingStage {
             .unwrap_or(false);
         // Many banks that process transactions in parallel.
         let bank_thread_hdls: Vec<JoinHandle<()>> = (0..num_threads)
-            .map(|i| {
+            .map(|id| {
                 let (verified_receiver, unprocessed_transaction_storage) =
-                    match (i, should_split_voting_threads) {
+                    match (id, should_split_voting_threads) {
                         (0, false) => (
                             verified_vote_receiver.clone(),
                             UnprocessedTransactionStorage::new_transaction_storage(
@@ -359,34 +359,71 @@ impl BankingStage {
                     };
 
                 let packet_deserializer = PacketDeserializer::new(verified_receiver);
-                let poh_recorder = poh_recorder.clone();
-                let cluster_info = cluster_info.clone();
-                let transaction_status_sender = transaction_status_sender.clone();
-                let gossip_vote_sender = gossip_vote_sender.clone();
-                let data_budget = data_budget.clone();
-                let connection_cache = connection_cache.clone();
-                let bank_forks = bank_forks.clone();
+                let scheduler_handle = Self::build_thread_local_scheduler_handle(
+                    packet_deserializer,
+                    poh_recorder.clone(),
+                    cluster_info.clone(),
+                    id,
+                    unprocessed_transaction_storage,
+                );
+                let (forward_executor, consume_executor) = Self::build_executors(
+                    id,
+                    poh_recorder.clone(),
+                    bank_forks.clone(),
+                    cluster_info.clone(),
+                    connection_cache.clone(),
+                    data_budget.clone(),
+                    log_messages_bytes_limit,
+                    transaction_status_sender.clone(),
+                    gossip_vote_sender.clone(),
+                );
+
                 Builder::new()
-                    .name(format!("solBanknStgTx{:02}", i))
+                    .name(format!("solBanknStgTx{:02}", id))
                     .spawn(move || {
                         Self::process_loop(
-                            packet_deserializer,
-                            &poh_recorder,
-                            cluster_info,
-                            i,
-                            transaction_status_sender,
-                            gossip_vote_sender,
-                            data_budget,
-                            log_messages_bytes_limit,
-                            connection_cache,
-                            &bank_forks,
-                            unprocessed_transaction_storage,
+                            id,
+                            scheduler_handle,
+                            forward_executor,
+                            consume_executor,
                         );
                     })
                     .unwrap()
             })
             .collect();
         Self { bank_thread_hdls }
+    }
+
+    fn build_executors(
+        id: u32,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        cluster_info: Arc<ClusterInfo>,
+        connection_cache: Arc<ConnectionCache>,
+        data_budget: Arc<DataBudget>,
+        log_messages_bytes_limit: Option<usize>,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        gossip_vote_sender: ReplayVoteSender,
+    ) -> (ForwardExecutor, ConsumeExecutor) {
+        let transaction_recorder = poh_recorder.read().unwrap().recorder();
+        let forward_executor = ForwardExecutor::new(
+            poh_recorder,
+            bank_forks,
+            UdpSocket::bind("0.0.0.0:0").unwrap(),
+            cluster_info,
+            connection_cache,
+            data_budget,
+        );
+        let record_executor = RecordExecutor::new(transaction_recorder);
+        let commit_executor = CommitExecutor::new(transaction_status_sender, gossip_vote_sender);
+        let consume_executor = ConsumeExecutor::new(
+            record_executor,
+            commit_executor,
+            QosService::new(id),
+            log_messages_bytes_limit,
+        );
+
+        (forward_executor, consume_executor)
     }
 
     fn build_thread_local_scheduler_handle(
@@ -406,44 +443,12 @@ impl BankingStage {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn process_loop(
-        packet_deserializer: PacketDeserializer,
-        poh_recorder: &Arc<RwLock<PohRecorder>>,
-        cluster_info: Arc<ClusterInfo>,
         id: u32,
-        transaction_status_sender: Option<TransactionStatusSender>,
-        gossip_vote_sender: ReplayVoteSender,
-        data_budget: Arc<DataBudget>,
-        log_messages_bytes_limit: Option<usize>,
-        connection_cache: Arc<ConnectionCache>,
-        bank_forks: &Arc<RwLock<BankForks>>,
-        unprocessed_transaction_storage: UnprocessedTransactionStorage,
+        mut scheduler_handle: SchedulerHandle,
+        forward_executor: ForwardExecutor,
+        consume_executor: ConsumeExecutor,
     ) {
-        let mut scheduler_handle = Self::build_thread_local_scheduler_handle(
-            packet_deserializer,
-            poh_recorder.clone(),
-            cluster_info.clone(),
-            id,
-            unprocessed_transaction_storage,
-        );
-        let forward_executor = ForwardExecutor::new(
-            poh_recorder.clone(),
-            bank_forks.clone(),
-            UdpSocket::bind("0.0.0.0:0").unwrap(),
-            cluster_info,
-            connection_cache,
-            data_budget,
-        );
-        let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
-        let commit_executor = CommitExecutor::new(transaction_status_sender, gossip_vote_sender);
-        let consume_executor = ConsumeExecutor::new(
-            record_executor,
-            commit_executor,
-            QosService::new(id),
-            log_messages_bytes_limit,
-        );
-
         let mut tracer_packet_stats = TracerPacketStats::new(id);
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::new(id);
 
