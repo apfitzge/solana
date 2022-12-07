@@ -469,6 +469,11 @@ impl BankingStage {
 
             tracer_packet_stats.report(1000);
         }
+
+        // Wait on scheduler thread if it exists
+        if let Err(err) = scheduler_handle.join() {
+            warn!("Banking stage scheduler join error: {:?}", err);
+        }
     }
 
     pub fn num_threads() -> u32 {
