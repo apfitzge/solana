@@ -11,14 +11,14 @@ use {
 };
 
 #[derive(Debug, Clone)]
-pub(crate) enum BufferedPacketsDecision {
+pub enum BufferedPacketsDecision {
     Consume(BankStart),
     Forward,
     ForwardAndHold,
     Hold,
 }
 
-pub(crate) struct DecisionMaker {
+pub struct DecisionMaker {
     my_pubkey: Pubkey,
     poh_recorder: Arc<RwLock<PohRecorder>>,
 }

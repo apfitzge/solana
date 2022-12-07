@@ -13,7 +13,7 @@ use {
             LeaderExecuteAndCommitTimings, RecordTransactionsTimings,
         },
         qos_service::QosService,
-        unprocessed_transaction_storage::{ConsumeScannerPayload, UnprocessedTransactionStorage},
+        unprocessed_transaction_storage::ConsumeScannerPayload,
     },
     itertools::Itertools,
     solana_ledger::token_balances::collect_token_balances,
@@ -27,7 +27,6 @@ use {
     },
     solana_sdk::{
         clock::{FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
-        timing::timestamp,
         transaction::{self, SanitizedTransaction, TransactionError},
     },
     std::sync::{atomic::Ordering, Arc},
@@ -55,64 +54,7 @@ impl ConsumeExecutor {
         }
     }
 
-    pub fn consume_buffered_packets(
-        &self,
-        bank_start: &BankStart,
-        unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
-        test_fn: Option<impl Fn()>,
-        banking_stage_stats: &BankingStageStats,
-        slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-    ) {
-        let mut rebuffered_packet_count = 0;
-        let mut consumed_buffered_packets_count = 0;
-        let mut proc_start = Measure::start("consume_buffered_process");
-        let num_packets_to_process = unprocessed_transaction_storage.len();
-
-        let reached_end_of_slot = unprocessed_transaction_storage.process_packets(
-            bank_start.working_bank.clone(),
-            banking_stage_stats,
-            slot_metrics_tracker,
-            |packets_to_process, payload| {
-                self.do_process_packets(
-                    bank_start,
-                    payload,
-                    banking_stage_stats,
-                    &mut consumed_buffered_packets_count,
-                    &mut rebuffered_packet_count,
-                    &test_fn,
-                    packets_to_process,
-                )
-            },
-        );
-
-        if reached_end_of_slot {
-            slot_metrics_tracker.set_end_of_slot_unprocessed_buffer_len(
-                unprocessed_transaction_storage.len() as u64,
-            );
-        }
-
-        proc_start.stop();
-        debug!(
-            "@{:?} done processing buffered batches: {} time: {:?}ms tx count: {} tx/s: {}",
-            timestamp(),
-            num_packets_to_process,
-            proc_start.as_ms(),
-            consumed_buffered_packets_count,
-            (consumed_buffered_packets_count as f32) / (proc_start.as_s())
-        );
-
-        banking_stage_stats
-            .consume_buffered_packets_elapsed
-            .fetch_add(proc_start.as_us(), Ordering::Relaxed);
-        banking_stage_stats
-            .rebuffered_packets_count
-            .fetch_add(rebuffered_packet_count, Ordering::Relaxed);
-        banking_stage_stats
-            .consumed_buffered_packets_count
-            .fetch_add(consumed_buffered_packets_count, Ordering::Relaxed);
-    }
-
-    fn do_process_packets(
+    pub fn do_process_packets(
         &self,
         bank_start: &BankStart,
         payload: &mut ConsumeScannerPayload,
@@ -657,14 +599,9 @@ impl ConsumeExecutor {
 mod tests {
     use {
         super::*,
-        crate::{
-            banking_stage::tests::{
-                create_slow_genesis_config, generate_new_address_lookup_table,
-                sanitize_transactions, setup_conflicting_transactions, simulate_poh,
-                store_address_lookup_table,
-            },
-            unprocessed_packet_batches::{self, UnprocessedPacketBatches},
-            unprocessed_transaction_storage::ThreadType,
+        crate::banking_stage::tests::{
+            create_slow_genesis_config, generate_new_address_lookup_table, sanitize_transactions,
+            simulate_poh, store_address_lookup_table,
         },
         crossbeam_channel::unbounded,
         solana_entry::entry::{next_entry, next_versioned_entry},
@@ -694,7 +631,6 @@ mod tests {
                 atomic::{AtomicBool, AtomicU64},
                 RwLock,
             },
-            thread::Builder,
             time::Instant,
         },
     };
@@ -1670,187 +1606,6 @@ mod tests {
                 .unwrap()
                 .is_exited
                 .store(true, Ordering::Relaxed);
-            let _ = poh_simulator.join();
-        }
-        Blockstore::destroy(ledger_path.path()).unwrap();
-    }
-
-    #[test]
-    fn test_consume_buffered_packets() {
-        let ledger_path = get_tmp_ledger_path_auto_delete!();
-        {
-            let (transactions, bank, poh_recorder, _entry_receiver, poh_simulator) =
-                setup_conflicting_transactions(ledger_path.path());
-            let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
-            let num_conflicting_transactions = transactions.len();
-            let deserialized_packets =
-                unprocessed_packet_batches::transactions_to_deserialized_packets(&transactions)
-                    .unwrap();
-            assert_eq!(deserialized_packets.len(), num_conflicting_transactions);
-            let mut buffered_packet_batches =
-                UnprocessedTransactionStorage::new_transaction_storage(
-                    UnprocessedPacketBatches::from_iter(
-                        deserialized_packets.into_iter(),
-                        num_conflicting_transactions,
-                    ),
-                    ThreadType::Transactions,
-                );
-
-            let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
-            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
-            let consume_executor =
-                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
-
-            // When the working bank in poh_recorder is None, no packets should be processed (consume will not be called)
-            assert!(!poh_recorder.read().unwrap().has_bank());
-            assert_eq!(buffered_packet_batches.len(), num_conflicting_transactions);
-            // When the working bank in poh_recorder is Some, all packets should be processed.
-            // Multi-Iterator will process them 1-by-1 if all txs are conflicting.
-            poh_recorder.write().unwrap().set_bank(&bank, false);
-            let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
-            consume_executor.consume_buffered_packets(
-                &bank_start,
-                &mut buffered_packet_batches,
-                None::<Box<dyn Fn()>>,
-                &BankingStageStats::default(),
-                &mut LeaderSlotMetricsTracker::new(0),
-            );
-            assert!(buffered_packet_batches.is_empty());
-            poh_recorder
-                .read()
-                .unwrap()
-                .is_exited
-                .store(true, Ordering::Relaxed);
-            let _ = poh_simulator.join();
-        }
-        Blockstore::destroy(ledger_path.path()).unwrap();
-    }
-
-    #[test]
-    fn test_consume_buffered_packets_sanitization_error() {
-        let ledger_path = get_tmp_ledger_path_auto_delete!();
-        {
-            let (mut transactions, bank, poh_recorder, _entry_receiver, poh_simulator) =
-                setup_conflicting_transactions(ledger_path.path());
-            let duplicate_account_key = transactions[0].message.account_keys[0];
-            transactions[0]
-                .message
-                .account_keys
-                .push(duplicate_account_key); // corrupt transaction
-            let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
-            let num_conflicting_transactions = transactions.len();
-            let deserialized_packets =
-                unprocessed_packet_batches::transactions_to_deserialized_packets(&transactions)
-                    .unwrap();
-            assert_eq!(deserialized_packets.len(), num_conflicting_transactions);
-            let mut buffered_packet_batches =
-                UnprocessedTransactionStorage::new_transaction_storage(
-                    UnprocessedPacketBatches::from_iter(
-                        deserialized_packets.into_iter(),
-                        num_conflicting_transactions,
-                    ),
-                    ThreadType::Transactions,
-                );
-
-            let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
-            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
-            let consume_executor =
-                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
-
-            // When the working bank in poh_recorder is None, no packets should be processed
-            assert!(!poh_recorder.read().unwrap().has_bank());
-            assert_eq!(buffered_packet_batches.len(), num_conflicting_transactions);
-            // When the working bank in poh_recorder is Some, all packets should be processed.
-            // Multi-Iterator will process them 1-by-1 if all txs are conflicting.
-            poh_recorder.write().unwrap().set_bank(&bank, false);
-            let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
-            consume_executor.consume_buffered_packets(
-                &bank_start,
-                &mut buffered_packet_batches,
-                None::<Box<dyn Fn()>>,
-                &BankingStageStats::default(),
-                &mut LeaderSlotMetricsTracker::new(0),
-            );
-            assert!(buffered_packet_batches.is_empty());
-            poh_recorder
-                .read()
-                .unwrap()
-                .is_exited
-                .store(true, Ordering::Relaxed);
-            let _ = poh_simulator.join();
-        }
-        Blockstore::destroy(ledger_path.path()).unwrap();
-    }
-
-    #[test]
-    fn test_consume_buffered_packets_interrupted() {
-        let ledger_path = get_tmp_ledger_path_auto_delete!();
-        {
-            let (continue_sender, continue_receiver) = unbounded();
-            let (finished_packet_sender, finished_packet_receiver) = unbounded();
-            let (transactions, bank, poh_recorder, _entry_receiver, poh_simulator) =
-                setup_conflicting_transactions(ledger_path.path());
-
-            let test_fn = Some(move || {
-                finished_packet_sender.send(()).unwrap();
-                continue_receiver.recv().unwrap();
-            });
-            // When the poh recorder has a bank, it should process all buffered packets.
-            let num_conflicting_transactions = transactions.len();
-            poh_recorder.write().unwrap().set_bank(&bank, false);
-            let record_executor = RecordExecutor::new(poh_recorder.read().unwrap().recorder());
-            let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
-            let (gossip_vote_sender, _gossip_vote_receiver) = unbounded();
-            let commit_executor = CommitExecutor::new(None, gossip_vote_sender);
-            let consume_executor =
-                ConsumeExecutor::new(record_executor, commit_executor, QosService::new(1), None);
-
-            // Start up thread to process the banks
-            let t_consume = Builder::new()
-                .name("consume-buffered-packets".to_string())
-                .spawn(move || {
-                    let num_conflicting_transactions = transactions.len();
-                    let deserialized_packets =
-                        unprocessed_packet_batches::transactions_to_deserialized_packets(
-                            &transactions,
-                        )
-                        .unwrap();
-                    assert_eq!(deserialized_packets.len(), num_conflicting_transactions);
-                    let mut buffered_packet_batches =
-                        UnprocessedTransactionStorage::new_transaction_storage(
-                            UnprocessedPacketBatches::from_iter(
-                                deserialized_packets.into_iter(),
-                                num_conflicting_transactions,
-                            ),
-                            ThreadType::Transactions,
-                        );
-                    consume_executor.consume_buffered_packets(
-                        &bank_start,
-                        &mut buffered_packet_batches,
-                        test_fn,
-                        &BankingStageStats::default(),
-                        &mut LeaderSlotMetricsTracker::new(0),
-                    );
-
-                    // Check everything is correct. All valid packets should be processed.
-                    assert!(buffered_packet_batches.is_empty());
-                })
-                .unwrap();
-
-            // Should be calling `test_fn` for each non-conflicting batch.
-            // In this case each batch is of size 1.
-            for i in 0..num_conflicting_transactions {
-                finished_packet_receiver.recv().unwrap();
-                if i + 1 == num_conflicting_transactions {
-                    poh_recorder
-                        .read()
-                        .unwrap()
-                        .is_exited
-                        .store(true, Ordering::Relaxed);
-                }
-                continue_sender.send(()).unwrap();
-            }
-            t_consume.join().unwrap();
             let _ = poh_simulator.join();
         }
         Blockstore::destroy(ledger_path.path()).unwrap();
