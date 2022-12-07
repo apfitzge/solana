@@ -9,6 +9,8 @@ use {
         tracer_packet_stats::TracerPacketStats,
         unprocessed_transaction_storage::UnprocessedTransactionStorage,
     },
+    solana_runtime::bank_forks::BankForks,
+    std::sync::{Arc, RwLock},
 };
 
 pub(crate) enum SchedulerHandle {
@@ -20,12 +22,14 @@ impl SchedulerHandle {
         id: u32,
         decision_maker: DecisionMaker,
         unprocessed_transaction_storage: UnprocessedTransactionStorage,
+        bank_forks: Arc<RwLock<BankForks>>,
         packet_receiver: PacketReceiver,
     ) -> Self {
         Self::ThreadLocalScheduler(ThreadLocalScheduler::new(
             id,
             decision_maker,
             unprocessed_transaction_storage,
+            bank_forks,
             packet_receiver,
         ))
     }

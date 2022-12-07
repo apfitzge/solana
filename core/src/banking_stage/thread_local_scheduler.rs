@@ -8,6 +8,7 @@ use {
         BankingStageStats, SLOT_BOUNDARY_CHECK_PERIOD,
     },
     crate::{
+        forward_packet_batches_by_accounts::ForwardPacketBatchesByAccounts,
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         leader_slot_banking_stage_metrics::{LeaderSlotMetricsTracker, ProcessTransactionsSummary},
         tracer_packet_stats::TracerPacketStats,
@@ -16,9 +17,10 @@ use {
     crossbeam_channel::RecvTimeoutError,
     solana_measure::{measure, measure::Measure, measure_us},
     solana_poh::poh_recorder::BankStart,
+    solana_runtime::bank_forks::BankForks,
     solana_sdk::timing::timestamp,
     std::{
-        sync::{atomic::Ordering, Arc},
+        sync::{atomic::Ordering, Arc, RwLock},
         time::Instant,
     },
 };
@@ -28,6 +30,7 @@ use {
 pub struct ThreadLocalScheduler {
     decision_maker: DecisionMaker,
     unprocessed_transaction_storage: UnprocessedTransactionStorage,
+    bank_forks: Arc<RwLock<BankForks>>,
     packet_receiver: PacketReceiver,
     last_metrics_update: Instant,
     banking_stage_stats: BankingStageStats,
@@ -38,11 +41,13 @@ impl ThreadLocalScheduler {
         id: u32,
         decision_maker: DecisionMaker,
         unprocessed_transaction_storage: UnprocessedTransactionStorage,
+        bank_forks: Arc<RwLock<BankForks>>,
         packet_receiver: PacketReceiver,
     ) -> Self {
         Self {
             decision_maker,
             unprocessed_transaction_storage,
+            bank_forks,
             packet_receiver,
             last_metrics_update: Instant::now(),
             banking_stage_stats: BankingStageStats::new(id),
@@ -126,8 +131,10 @@ impl ThreadLocalScheduler {
                     .increment_consume_buffered_packets_us(consume_buffered_packets_us);
             }
             BufferedPacketsDecision::Forward => {
-                let (_, forward_us) = measure_us!(forward_executor.handle_forwarding(
+                let (_, forward_us) = measure_us!(Self::handle_forwarding(
+                    forward_executor,
                     &mut self.unprocessed_transaction_storage,
+                    &self.bank_forks,
                     false,
                     slot_metrics_tracker,
                     &self.banking_stage_stats,
@@ -139,8 +146,10 @@ impl ThreadLocalScheduler {
                 slot_metrics_tracker.apply_working_bank(None);
             }
             BufferedPacketsDecision::ForwardAndHold => {
-                let (_, forward_and_hold_us) = measure_us!(forward_executor.handle_forwarding(
+                let (_, forward_and_hold_us) = measure_us!(Self::handle_forwarding(
+                    forward_executor,
                     &mut self.unprocessed_transaction_storage,
+                    &self.bank_forks,
                     true,
                     slot_metrics_tracker,
                     &self.banking_stage_stats,
@@ -275,6 +284,93 @@ impl ThreadLocalScheduler {
 
         Some(retryable_transaction_indexes)
     }
+
+    pub fn handle_forwarding(
+        forward_executor: &ForwardExecutor,
+        unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
+        bank_forks: &RwLock<BankForks>,
+        hold: bool,
+        slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
+        banking_stage_stats: &BankingStageStats,
+        tracer_packet_stats: &mut TracerPacketStats,
+    ) {
+        let forward_option = unprocessed_transaction_storage.forward_option();
+
+        // get current root bank from bank_forks, use it to sanitize transaction and
+        // load all accounts from address loader;
+        let current_bank = bank_forks.read().unwrap().root_bank();
+
+        let mut forward_packet_batches_by_accounts =
+            ForwardPacketBatchesByAccounts::new_with_default_batch_limits();
+
+        // sanitize and filter packets that are no longer valid (could be too old, a duplicate of something
+        // already processed), then add to forwarding buffer.
+        let filter_forwarding_result = unprocessed_transaction_storage
+            .filter_forwardable_packets_and_add_batches(
+                current_bank,
+                &mut forward_packet_batches_by_accounts,
+            );
+        slot_metrics_tracker.increment_transactions_from_packets_us(
+            filter_forwarding_result.total_packet_conversion_us,
+        );
+        banking_stage_stats.packet_conversion_elapsed.fetch_add(
+            filter_forwarding_result.total_packet_conversion_us,
+            Ordering::Relaxed,
+        );
+        banking_stage_stats
+            .filter_pending_packets_elapsed
+            .fetch_add(
+                filter_forwarding_result.total_filter_packets_us,
+                Ordering::Relaxed,
+            );
+
+        forward_packet_batches_by_accounts
+            .iter_batches()
+            .filter(|&batch| !batch.is_empty())
+            .for_each(|forward_batch| {
+                slot_metrics_tracker.increment_forwardable_batches_count(1);
+
+                let batched_forwardable_packets_count = forward_batch.len();
+                let (_forward_result, sucessful_forwarded_packets_count, leader_pubkey) =
+                    forward_executor.forward_buffered_packets(
+                        &forward_option,
+                        forward_batch.get_forwardable_packets(),
+                        banking_stage_stats,
+                    );
+
+                if let Some(leader_pubkey) = leader_pubkey {
+                    tracer_packet_stats.increment_total_forwardable_tracer_packets(
+                        filter_forwarding_result.total_forwardable_tracer_packets,
+                        leader_pubkey,
+                    );
+                }
+                let failed_forwarded_packets_count = batched_forwardable_packets_count
+                    .saturating_sub(sucessful_forwarded_packets_count);
+
+                if failed_forwarded_packets_count > 0 {
+                    slot_metrics_tracker.increment_failed_forwarded_packets_count(
+                        failed_forwarded_packets_count as u64,
+                    );
+                    slot_metrics_tracker.increment_packet_batch_forward_failure_count(1);
+                }
+
+                if sucessful_forwarded_packets_count > 0 {
+                    slot_metrics_tracker.increment_successful_forwarded_packets_count(
+                        sucessful_forwarded_packets_count as u64,
+                    );
+                }
+            });
+
+        if !hold {
+            slot_metrics_tracker.increment_cleared_from_buffer_after_forward_count(
+                filter_forwarding_result.total_forwardable_packets as u64,
+            );
+            tracer_packet_stats.increment_total_cleared_from_buffer_after_forward(
+                filter_forwarding_result.total_tracer_packets_in_buffer,
+            );
+            unprocessed_transaction_storage.clear_forwarded_packets();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -283,16 +379,36 @@ mod tests {
         super::*,
         crate::{
             banking_stage::{
-                commit_executor::CommitExecutor, record_executor::RecordExecutor,
-                tests::setup_conflicting_transactions,
+                commit_executor::CommitExecutor,
+                record_executor::RecordExecutor,
+                tests::{
+                    create_slow_genesis_config, new_test_cluster_info,
+                    setup_conflicting_transactions,
+                },
             },
             qos_service::QosService,
-            unprocessed_packet_batches::{self, UnprocessedPacketBatches},
+            unprocessed_packet_batches::{self, DeserializedPacket, UnprocessedPacketBatches},
             unprocessed_transaction_storage::ThreadType,
         },
         crossbeam_channel::unbounded,
-        solana_ledger::{blockstore::Blockstore, get_tmp_ledger_path_auto_delete},
-        std::thread::Builder,
+        solana_client::connection_cache::ConnectionCache,
+        solana_gossip::cluster_info::Node,
+        solana_ledger::{
+            blockstore::Blockstore, genesis_utils::GenesisConfigInfo,
+            get_tmp_ledger_path_auto_delete,
+        },
+        solana_perf::{
+            data_budget::DataBudget,
+            packet::{Packet, PacketFlags},
+        },
+        solana_poh::poh_recorder::create_test_recorder,
+        solana_runtime::bank::Bank,
+        solana_sdk::{
+            hash::Hash, poh_config::PohConfig, signature::Keypair, system_transaction,
+            transaction::VersionedTransaction,
+        },
+        solana_streamer::recvmmsg::recv_mmsg,
+        std::{net::UdpSocket, thread::Builder},
     };
 
     #[test]
@@ -475,6 +591,216 @@ mod tests {
             }
             t_consume.join().unwrap();
             let _ = poh_simulator.join();
+        }
+        Blockstore::destroy(ledger_path.path()).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn test_forwarder_budget() {
+        solana_logger::setup();
+        // Create `PacketBatch` with 1 unprocessed packet
+        let tx = system_transaction::transfer(
+            &Keypair::new(),
+            &solana_sdk::pubkey::new_rand(),
+            1,
+            Hash::new_unique(),
+        );
+        let packet = Packet::from_data(None, tx).unwrap();
+        let deserialized_packet = DeserializedPacket::new(packet).unwrap();
+
+        let genesis_config_info = create_slow_genesis_config(10_000);
+        let GenesisConfigInfo {
+            genesis_config,
+            validator_pubkey,
+            ..
+        } = &genesis_config_info;
+
+        let bank = Bank::new_no_wallclock_throttle_for_tests(genesis_config);
+        let bank_forks = Arc::new(RwLock::new(BankForks::new(bank)));
+        let bank = Arc::new(bank_forks.read().unwrap().get(0).unwrap());
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        {
+            let blockstore = Arc::new(
+                Blockstore::open(ledger_path.path())
+                    .expect("Expected to be able to open database ledger"),
+            );
+            let poh_config = PohConfig {
+                // limit tick count to avoid clearing working_bank at
+                // PohRecord then PohRecorderError(MaxHeightReached) at BankingStage
+                target_tick_count: Some(bank.max_tick_height() - 1),
+                ..PohConfig::default()
+            };
+
+            let (exit, poh_recorder, poh_service, _entry_receiver) =
+                create_test_recorder(&bank, &blockstore, Some(poh_config), None);
+
+            let local_node = Node::new_localhost_with_pubkey(validator_pubkey);
+            let cluster_info = Arc::new(new_test_cluster_info(local_node.info));
+            let recv_socket = &local_node.sockets.tpu_forwards[0];
+
+            let test_cases = vec![
+                ("budget-restricted", DataBudget::restricted(), 0),
+                ("budget-available", DataBudget::default(), 1),
+            ];
+            for (name, data_budget, expected_num_forwarded) in test_cases {
+                let forward_executor = ForwardExecutor::new(
+                    poh_recorder.clone(),
+                    UdpSocket::bind("0.0.0.0:0").unwrap(),
+                    cluster_info.clone(),
+                    Arc::new(ConnectionCache::default()),
+                    Arc::new(data_budget),
+                );
+                let unprocessed_packet_batches: UnprocessedPacketBatches =
+                    UnprocessedPacketBatches::from_iter(
+                        vec![deserialized_packet.clone()].into_iter(),
+                        1,
+                    );
+                let stats = BankingStageStats::default();
+                ThreadLocalScheduler::handle_forwarding(
+                    &forward_executor,
+                    &mut UnprocessedTransactionStorage::new_transaction_storage(
+                        unprocessed_packet_batches,
+                        ThreadType::Transactions,
+                    ),
+                    &bank_forks,
+                    true,
+                    &mut LeaderSlotMetricsTracker::new(0),
+                    &stats,
+                    &mut TracerPacketStats::new(0),
+                );
+
+                recv_socket
+                    .set_nonblocking(expected_num_forwarded == 0)
+                    .unwrap();
+
+                let mut packets = vec![Packet::default(); 2];
+                let num_received = recv_mmsg(recv_socket, &mut packets[..]).unwrap_or_default();
+                assert_eq!(num_received, expected_num_forwarded, "{}", name);
+            }
+
+            exit.store(true, Ordering::Relaxed);
+            poh_service.join().unwrap();
+        }
+        Blockstore::destroy(ledger_path.path()).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn test_handle_forwarding() {
+        solana_logger::setup();
+        // packets are deserialized upon receiving, failed packets will not be
+        // forwarded; Therefore need to create real packets here.
+        let keypair = Keypair::new();
+        let pubkey = solana_sdk::pubkey::new_rand();
+
+        let fwd_block_hash = Hash::new_unique();
+        let forwarded_packet = {
+            let transaction = system_transaction::transfer(&keypair, &pubkey, 1, fwd_block_hash);
+            let mut packet = Packet::from_data(None, transaction).unwrap();
+            packet.meta.flags |= PacketFlags::FORWARDED;
+            DeserializedPacket::new(packet).unwrap()
+        };
+
+        let normal_block_hash = Hash::new_unique();
+        let normal_packet = {
+            let transaction = system_transaction::transfer(&keypair, &pubkey, 1, normal_block_hash);
+            let packet = Packet::from_data(None, transaction).unwrap();
+            DeserializedPacket::new(packet).unwrap()
+        };
+
+        let mut unprocessed_packet_batches = UnprocessedTransactionStorage::new_transaction_storage(
+            UnprocessedPacketBatches::from_iter(
+                vec![forwarded_packet, normal_packet].into_iter(),
+                2,
+            ),
+            ThreadType::Transactions,
+        );
+
+        let genesis_config_info = create_slow_genesis_config(10_000);
+        let GenesisConfigInfo {
+            genesis_config,
+            validator_pubkey,
+            ..
+        } = &genesis_config_info;
+        let bank = Bank::new_no_wallclock_throttle_for_tests(genesis_config);
+        let bank_forks = Arc::new(RwLock::new(BankForks::new(bank)));
+        let bank = Arc::new(bank_forks.read().unwrap().get(0).unwrap());
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        {
+            let blockstore = Arc::new(
+                Blockstore::open(ledger_path.path())
+                    .expect("Expected to be able to open database ledger"),
+            );
+            let poh_config = PohConfig {
+                // limit tick count to avoid clearing working_bank at
+                // PohRecord then PohRecorderError(MaxHeightReached) at BankingStage
+                target_tick_count: Some(bank.max_tick_height() - 1),
+                ..PohConfig::default()
+            };
+
+            let (exit, poh_recorder, poh_service, _entry_receiver) =
+                create_test_recorder(&bank, &blockstore, Some(poh_config), None);
+
+            let local_node = Node::new_localhost_with_pubkey(validator_pubkey);
+            let cluster_info = new_test_cluster_info(local_node.info);
+            let recv_socket = &local_node.sockets.tpu_forwards[0];
+            let connection_cache = ConnectionCache::default();
+
+            let test_cases = vec![
+                ("fwd-normal", true, vec![normal_block_hash], 2),
+                ("fwd-no-op", true, vec![], 2),
+                ("fwd-no-hold", false, vec![], 0),
+            ];
+
+            let forward_executor = ForwardExecutor::new(
+                poh_recorder,
+                UdpSocket::bind("0.0.0.0:0").unwrap(),
+                Arc::new(cluster_info),
+                Arc::new(connection_cache),
+                Arc::new(DataBudget::default()),
+            );
+            for (name, hold, expected_ids, expected_num_unprocessed) in test_cases {
+                let stats = BankingStageStats::default();
+                ThreadLocalScheduler::handle_forwarding(
+                    &forward_executor,
+                    &mut unprocessed_packet_batches,
+                    &bank_forks,
+                    hold,
+                    &mut LeaderSlotMetricsTracker::new(0),
+                    &stats,
+                    &mut TracerPacketStats::new(0),
+                );
+
+                recv_socket
+                    .set_nonblocking(expected_ids.is_empty())
+                    .unwrap();
+
+                let mut packets = vec![Packet::default(); 2];
+                let num_received = recv_mmsg(recv_socket, &mut packets[..]).unwrap_or_default();
+                assert_eq!(num_received, expected_ids.len(), "{}", name);
+                for (i, expected_id) in expected_ids.iter().enumerate() {
+                    assert_eq!(packets[i].meta.size, 215);
+                    let recv_transaction: VersionedTransaction =
+                        packets[i].deserialize_slice(..).unwrap();
+                    assert_eq!(
+                        recv_transaction.message.recent_blockhash(),
+                        expected_id,
+                        "{}",
+                        name
+                    );
+                }
+
+                let num_unprocessed_packets: usize = unprocessed_packet_batches.len();
+                assert_eq!(
+                    num_unprocessed_packets, expected_num_unprocessed,
+                    "{}",
+                    name
+                );
+            }
+
+            exit.store(true, Ordering::Relaxed);
+            poh_service.join().unwrap();
         }
         Blockstore::destroy(ledger_path.path()).unwrap();
     }

@@ -362,6 +362,7 @@ impl BankingStage {
                 let scheduler_handle = Self::build_thread_local_scheduler_handle(
                     packet_deserializer,
                     poh_recorder.clone(),
+                    bank_forks.clone(),
                     cluster_info.clone(),
                     id,
                     unprocessed_transaction_storage,
@@ -369,7 +370,6 @@ impl BankingStage {
                 let (forward_executor, consume_executor) = Self::build_executors(
                     id,
                     poh_recorder.clone(),
-                    bank_forks.clone(),
                     cluster_info.clone(),
                     connection_cache.clone(),
                     data_budget.clone(),
@@ -397,7 +397,6 @@ impl BankingStage {
     fn build_executors(
         id: u32,
         poh_recorder: Arc<RwLock<PohRecorder>>,
-        bank_forks: Arc<RwLock<BankForks>>,
         cluster_info: Arc<ClusterInfo>,
         connection_cache: Arc<ConnectionCache>,
         data_budget: Arc<DataBudget>,
@@ -408,7 +407,6 @@ impl BankingStage {
         let transaction_recorder = poh_recorder.read().unwrap().recorder();
         let forward_executor = ForwardExecutor::new(
             poh_recorder,
-            bank_forks,
             UdpSocket::bind("0.0.0.0:0").unwrap(),
             cluster_info,
             connection_cache,
@@ -429,6 +427,7 @@ impl BankingStage {
     fn build_thread_local_scheduler_handle(
         packet_deserializer: PacketDeserializer,
         poh_recorder: Arc<RwLock<PohRecorder>>,
+        bank_forks: Arc<RwLock<BankForks>>,
         cluster_info: Arc<ClusterInfo>,
         id: u32,
         unprocessed_transaction_storage: UnprocessedTransactionStorage,
@@ -439,6 +438,7 @@ impl BankingStage {
             id,
             decision_maker,
             unprocessed_transaction_storage,
+            bank_forks,
             packet_receiver,
         )
     }
