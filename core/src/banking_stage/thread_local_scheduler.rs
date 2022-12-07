@@ -8,15 +8,19 @@ use {
         BankingStageStats, SLOT_BOUNDARY_CHECK_PERIOD,
     },
     crate::{
-        leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
+        immutable_deserialized_packet::ImmutableDeserializedPacket,
+        leader_slot_banking_stage_metrics::{LeaderSlotMetricsTracker, ProcessTransactionsSummary},
         tracer_packet_stats::TracerPacketStats,
-        unprocessed_transaction_storage::UnprocessedTransactionStorage,
+        unprocessed_transaction_storage::{ConsumeScannerPayload, UnprocessedTransactionStorage},
     },
     crossbeam_channel::RecvTimeoutError,
     solana_measure::{measure, measure::Measure, measure_us},
     solana_poh::poh_recorder::BankStart,
     solana_sdk::timing::timestamp,
-    std::{sync::atomic::Ordering, time::Instant},
+    std::{
+        sync::{atomic::Ordering, Arc},
+        time::Instant,
+    },
 };
 
 /// Scheduler that lives in the same thread as executors. Handle is equivalent
@@ -168,7 +172,8 @@ impl ThreadLocalScheduler {
             banking_stage_stats,
             slot_metrics_tracker,
             |packets_to_process, payload| {
-                consume_executor.do_process_packets(
+                Self::do_process_packets(
+                    consume_executor,
                     bank_start,
                     payload,
                     banking_stage_stats,
@@ -205,6 +210,72 @@ impl ThreadLocalScheduler {
         banking_stage_stats
             .consumed_buffered_packets_count
             .fetch_add(consumed_buffered_packets_count, Ordering::Relaxed);
+    }
+
+    fn do_process_packets(
+        consume_executor: &ConsumeExecutor,
+        bank_start: &BankStart,
+        payload: &mut ConsumeScannerPayload,
+        banking_stage_stats: &BankingStageStats,
+        consumed_buffered_packets_count: &mut usize,
+        rebuffered_packet_count: &mut usize,
+        test_fn: &Option<impl Fn()>,
+        packets_to_process: &Vec<Arc<ImmutableDeserializedPacket>>,
+    ) -> Option<Vec<usize>> {
+        if payload.reached_end_of_slot {
+            return None;
+        }
+
+        let packets_to_process_len = packets_to_process.len();
+        let (process_transactions_summary, process_packets_transactions_time) = measure!(
+            consume_executor.process_packets_transactions(
+                bank_start,
+                &payload.sanitized_transactions,
+                banking_stage_stats,
+                payload.slot_metrics_tracker,
+            ),
+            "process_packets_transactions",
+        );
+        payload
+            .slot_metrics_tracker
+            .increment_process_packets_transactions_us(process_packets_transactions_time.as_us());
+
+        // Clear payload for next iteration
+        payload.sanitized_transactions.clear();
+        payload.account_locks.clear();
+
+        let ProcessTransactionsSummary {
+            reached_max_poh_height,
+            retryable_transaction_indexes,
+            ..
+        } = process_transactions_summary;
+
+        if reached_max_poh_height || !bank_start.should_working_bank_still_be_processing_txs() {
+            payload.reached_end_of_slot = true;
+        }
+
+        // The difference between all transactions passed to execution and the ones that
+        // are retryable were the ones that were either:
+        // 1) Committed into the block
+        // 2) Dropped without being committed because they had some fatal error (too old,
+        // duplicate signature, etc.)
+        //
+        // Note: This assumes that every packet deserializes into one transaction!
+        *consumed_buffered_packets_count +=
+            packets_to_process_len.saturating_sub(retryable_transaction_indexes.len());
+
+        // Out of the buffered packets just retried, collect any still unprocessed
+        // transactions in this batch for forwarding
+        *rebuffered_packet_count += retryable_transaction_indexes.len();
+        if let Some(test_fn) = test_fn {
+            test_fn();
+        }
+
+        payload
+            .slot_metrics_tracker
+            .increment_retryable_packets_count(retryable_transaction_indexes.len() as u64);
+
+        Some(retryable_transaction_indexes)
     }
 }
 
