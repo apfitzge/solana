@@ -76,7 +76,7 @@ impl ThreadLocalScheduler {
         forward_executor: &ForwardExecutor,
         tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-    ) {
+    ) -> Result<(), SchedulerError> {
         if !self.unprocessed_transaction_storage.is_empty()
             || self.last_metrics_update.elapsed() >= SLOT_BOUNDARY_CHECK_PERIOD
         {
@@ -89,6 +89,8 @@ impl ThreadLocalScheduler {
             slot_metrics_tracker.increment_process_buffered_packets_us(process_buffered_packets_us);
             self.last_metrics_update = Instant::now();
         }
+
+        Ok(())
     }
 
     fn process_buffered_packets(

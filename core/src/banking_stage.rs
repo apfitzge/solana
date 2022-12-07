@@ -52,6 +52,7 @@ use {
 pub mod commit_executor;
 pub mod consume_executor;
 pub mod decision_maker;
+pub mod external_scheduler;
 pub mod forward_executor;
 pub mod packet_receiver;
 pub mod record_executor;
@@ -454,12 +455,15 @@ impl BankingStage {
 
         loop {
             // Do scheduled work (processing packets)
-            scheduler_handle.do_scheduled_work(
+            if let Err(err) = scheduler_handle.do_scheduled_work(
                 &consume_executor,
                 &forward_executor,
                 &mut tracer_packet_stats,
                 &mut slot_metrics_tracker,
-            );
+            ) {
+                warn!("Banking stage scheduler error: {:?}", err);
+                break;
+            }
 
             // Do any necessary updates - check if scheduler is still valid
             if let Err(err) = scheduler_handle.tick() {

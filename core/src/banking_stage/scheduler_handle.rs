@@ -1,8 +1,9 @@
 use {
     super::{
         consume_executor::ConsumeExecutor, decision_maker::DecisionMaker,
-        forward_executor::ForwardExecutor, packet_receiver::PacketReceiver,
-        scheduler_error::SchedulerError, thread_local_scheduler::ThreadLocalScheduler,
+        external_scheduler::ExternalSchedulerHandle, forward_executor::ForwardExecutor,
+        packet_receiver::PacketReceiver, scheduler_error::SchedulerError,
+        thread_local_scheduler::ThreadLocalScheduler,
     },
     crate::{
         leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
@@ -13,8 +14,10 @@ use {
     std::sync::{Arc, RwLock},
 };
 
+#[allow(dead_code)]
 pub(crate) enum SchedulerHandle {
     ThreadLocalScheduler(ThreadLocalScheduler),
+    ExternalScheduler(ExternalSchedulerHandle),
 }
 
 impl SchedulerHandle {
@@ -38,6 +41,7 @@ impl SchedulerHandle {
     pub fn tick(&mut self) -> Result<(), SchedulerError> {
         match self {
             Self::ThreadLocalScheduler(thread_local_scheduler) => thread_local_scheduler.tick(),
+            Self::ExternalScheduler(external_scheduler) => external_scheduler.tick(),
         }
     }
 
@@ -48,7 +52,7 @@ impl SchedulerHandle {
         forward_executor: &ForwardExecutor,
         tracer_packet_stats: &mut TracerPacketStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-    ) {
+    ) -> Result<(), SchedulerError> {
         match self {
             Self::ThreadLocalScheduler(thread_local_scheduler) => thread_local_scheduler
                 .do_scheduled_work(
@@ -57,6 +61,11 @@ impl SchedulerHandle {
                     tracer_packet_stats,
                     slot_metrics_tracker,
                 ),
+            Self::ExternalScheduler(external_scheduler) => external_scheduler.do_scheduled_work(
+                consume_executor,
+                forward_executor,
+                slot_metrics_tracker,
+            ),
         }
     }
 
@@ -64,6 +73,7 @@ impl SchedulerHandle {
     pub fn join(self) -> Result<(), SchedulerError> {
         match self {
             Self::ThreadLocalScheduler(_) => Ok(()),
+            Self::ExternalScheduler(_) => Ok(()),
         }
     }
 }
