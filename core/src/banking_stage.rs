@@ -389,6 +389,23 @@ impl BankingStage {
         Self { bank_thread_hdls }
     }
 
+    fn build_thread_local_scheduler_handle(
+        packet_deserializer: PacketDeserializer,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        cluster_info: Arc<ClusterInfo>,
+        id: u32,
+        unprocessed_transaction_storage: UnprocessedTransactionStorage,
+    ) -> SchedulerHandle {
+        let packet_receiver = PacketReceiver::new(id, packet_deserializer);
+        let decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder);
+        SchedulerHandle::new_thread_local_scheduler(
+            id,
+            decision_maker,
+            unprocessed_transaction_storage,
+            packet_receiver,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn process_loop(
         packet_deserializer: PacketDeserializer,
@@ -403,8 +420,13 @@ impl BankingStage {
         bank_forks: &Arc<RwLock<BankForks>>,
         unprocessed_transaction_storage: UnprocessedTransactionStorage,
     ) {
-        let packet_receiver = PacketReceiver::new(id, packet_deserializer);
-        let decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
+        let mut scheduler_handle = Self::build_thread_local_scheduler_handle(
+            packet_deserializer,
+            poh_recorder.clone(),
+            cluster_info.clone(),
+            id,
+            unprocessed_transaction_storage,
+        );
         let forward_executor = ForwardExecutor::new(
             poh_recorder.clone(),
             bank_forks.clone(),
@@ -420,12 +442,6 @@ impl BankingStage {
             commit_executor,
             QosService::new(id),
             log_messages_bytes_limit,
-        );
-        let mut scheduler_handle = SchedulerHandle::new_thread_local_scheduler(
-            id,
-            decision_maker,
-            unprocessed_transaction_storage,
-            packet_receiver,
         );
 
         let mut tracer_packet_stats = TracerPacketStats::new(id);
