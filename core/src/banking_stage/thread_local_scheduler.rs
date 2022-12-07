@@ -227,18 +227,16 @@ impl ThreadLocalScheduler {
         }
 
         let packets_to_process_len = packets_to_process.len();
-        let (process_transactions_summary, process_packets_transactions_time) = measure!(
-            consume_executor.process_packets_transactions(
+        let (process_transactions_summary, process_packets_transactions_us) =
+            measure_us!(consume_executor.process_packets_transactions(
                 bank_start,
                 &payload.sanitized_transactions,
                 banking_stage_stats,
                 payload.slot_metrics_tracker,
-            ),
-            "process_packets_transactions",
-        );
+            ));
         payload
             .slot_metrics_tracker
-            .increment_process_packets_transactions_us(process_packets_transactions_time.as_us());
+            .increment_process_packets_transactions_us(process_packets_transactions_us);
 
         // Clear payload for next iteration
         payload.sanitized_transactions.clear();
