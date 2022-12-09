@@ -371,8 +371,10 @@ impl BankingStage {
                     id,
                     unprocessed_transaction_storage,
                 );
-                let (forward_executor, consume_executor) = Self::build_executors(
+
+                Self::spawn_banking_thread_with_scheduler(
                     id,
+                    scheduler_handle,
                     poh_recorder.clone(),
                     cluster_info.clone(),
                     connection_cache.clone(),
@@ -380,22 +382,39 @@ impl BankingStage {
                     log_messages_bytes_limit,
                     transaction_status_sender.clone(),
                     gossip_vote_sender.clone(),
-                );
-
-                Builder::new()
-                    .name(format!("solBanknStgTx{:02}", id))
-                    .spawn(move || {
-                        Self::process_loop(
-                            id,
-                            scheduler_handle,
-                            forward_executor,
-                            consume_executor,
-                        );
-                    })
-                    .unwrap()
+                )
             })
             .collect();
         Self { bank_thread_hdls }
+    }
+
+    fn spawn_banking_thread_with_scheduler(
+        id: u32,
+        scheduler_handle: SchedulerHandle,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        cluster_info: Arc<ClusterInfo>,
+        connection_cache: Arc<ConnectionCache>,
+        data_budget: Arc<DataBudget>,
+        log_messages_bytes_limit: Option<usize>,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        gossip_vote_sender: ReplayVoteSender,
+    ) -> JoinHandle<()> {
+        let (forward_executor, consume_executor) = Self::build_executors(
+            id,
+            poh_recorder,
+            cluster_info,
+            connection_cache,
+            data_budget,
+            log_messages_bytes_limit,
+            transaction_status_sender,
+            gossip_vote_sender,
+        );
+        Builder::new()
+            .name(format!("solBanknStgTx{:02}", id))
+            .spawn(move || {
+                Self::process_loop(id, scheduler_handle, forward_executor, consume_executor);
+            })
+            .unwrap()
     }
 
     fn build_executors(
