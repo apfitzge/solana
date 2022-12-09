@@ -309,6 +309,68 @@ impl BankingStage {
         let data_budget = Arc::new(DataBudget::default());
         let batch_limit =
             TOTAL_BUFFERED_PACKETS / ((num_threads - NUM_VOTE_PROCESSING_THREADS) as usize);
+
+        // Many banks that process transactions in parallel.
+        let mut bank_thread_hdls = Self::spawn_voting_threads(
+            cluster_info.clone(),
+            poh_recorder.clone(),
+            tpu_verified_vote_receiver,
+            verified_vote_receiver,
+            transaction_status_sender.clone(),
+            gossip_vote_sender.clone(),
+            log_messages_bytes_limit,
+            connection_cache.clone(),
+            bank_forks.clone(),
+            data_budget.clone(),
+            batch_limit,
+        );
+        // Add non-vote transaction threads
+        for id in 2..num_threads {
+            let unprocessed_transaction_storage =
+                UnprocessedTransactionStorage::new_transaction_storage(
+                    UnprocessedPacketBatches::with_capacity(batch_limit),
+                    ThreadType::Transactions,
+                );
+            let packet_deserializer = PacketDeserializer::new(verified_receiver.clone());
+            let scheduler_handle = Self::build_thread_local_scheduler_handle(
+                packet_deserializer,
+                poh_recorder.clone(),
+                bank_forks.clone(),
+                cluster_info.clone(),
+                id,
+                unprocessed_transaction_storage,
+            );
+
+            bank_thread_hdls.push(Self::spawn_banking_thread_with_scheduler(
+                id,
+                scheduler_handle,
+                poh_recorder.clone(),
+                cluster_info.clone(),
+                connection_cache.clone(),
+                data_budget.clone(),
+                log_messages_bytes_limit,
+                transaction_status_sender.clone(),
+                gossip_vote_sender.clone(),
+            ));
+        }
+
+        Self { bank_thread_hdls }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_voting_threads(
+        cluster_info: Arc<ClusterInfo>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        tpu_verified_vote_receiver: BankingPacketReceiver,
+        verified_vote_receiver: BankingPacketReceiver,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        gossip_vote_sender: ReplayVoteSender,
+        log_messages_bytes_limit: Option<usize>,
+        connection_cache: Arc<ConnectionCache>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        data_budget: Arc<DataBudget>,
+        batch_limit: usize,
+    ) -> Vec<JoinHandle<()>> {
         // Keeps track of extraneous vote transactions for the vote threads
         let latest_unprocessed_votes = Arc::new(LatestUnprocessedVotes::new());
         let should_split_voting_threads = bank_forks
@@ -320,72 +382,90 @@ impl BankingStage {
             })
             .unwrap_or(false);
 
-        // Many banks that process transactions in parallel.
-        let bank_thread_hdls: Vec<JoinHandle<()>> = (0..num_threads)
-            .map(|id| {
-                let (verified_receiver, unprocessed_transaction_storage) =
-                    match (id, should_split_voting_threads) {
-                        (0, false) => (
-                            verified_vote_receiver.clone(),
-                            UnprocessedTransactionStorage::new_transaction_storage(
-                                UnprocessedPacketBatches::with_capacity(batch_limit),
-                                ThreadType::Voting(VoteSource::Gossip),
-                            ),
-                        ),
-                        (0, true) => (
-                            verified_vote_receiver.clone(),
-                            UnprocessedTransactionStorage::new_vote_storage(
-                                latest_unprocessed_votes.clone(),
-                                VoteSource::Gossip,
-                            ),
-                        ),
-                        (1, false) => (
-                            tpu_verified_vote_receiver.clone(),
-                            UnprocessedTransactionStorage::new_transaction_storage(
-                                UnprocessedPacketBatches::with_capacity(batch_limit),
-                                ThreadType::Voting(VoteSource::Tpu),
-                            ),
-                        ),
-                        (1, true) => (
-                            tpu_verified_vote_receiver.clone(),
-                            UnprocessedTransactionStorage::new_vote_storage(
-                                latest_unprocessed_votes.clone(),
-                                VoteSource::Tpu,
-                            ),
-                        ),
-                        _ => (
-                            verified_receiver.clone(),
-                            UnprocessedTransactionStorage::new_transaction_storage(
-                                UnprocessedPacketBatches::with_capacity(batch_limit),
-                                ThreadType::Transactions,
-                            ),
-                        ),
-                    };
+        vec![
+            // Gossip voting thread
+            Self::spawn_voting_thread(
+                0,
+                VoteSource::Gossip,
+                should_split_voting_threads,
+                batch_limit,
+                latest_unprocessed_votes.clone(),
+                PacketDeserializer::new(verified_vote_receiver),
+                poh_recorder.clone(),
+                bank_forks.clone(),
+                cluster_info.clone(),
+                connection_cache.clone(),
+                data_budget.clone(),
+                log_messages_bytes_limit,
+                transaction_status_sender.clone(),
+                gossip_vote_sender.clone(),
+            ),
+            // TPU voting thread
+            Self::spawn_voting_thread(
+                1,
+                VoteSource::Tpu,
+                should_split_voting_threads,
+                batch_limit,
+                latest_unprocessed_votes,
+                PacketDeserializer::new(tpu_verified_vote_receiver),
+                poh_recorder,
+                bank_forks,
+                cluster_info,
+                connection_cache,
+                data_budget,
+                log_messages_bytes_limit,
+                transaction_status_sender,
+                gossip_vote_sender,
+            ),
+        ]
+    }
 
-                let packet_deserializer = PacketDeserializer::new(verified_receiver);
-                let scheduler_handle = Self::build_thread_local_scheduler_handle(
-                    packet_deserializer,
-                    poh_recorder.clone(),
-                    bank_forks.clone(),
-                    cluster_info.clone(),
-                    id,
-                    unprocessed_transaction_storage,
-                );
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_voting_thread(
+        id: u32,
+        voting_source: VoteSource,
+        should_split_voting_threads: bool,
+        buffer_capacity: usize,
+        latest_unprocessed_votes: Arc<LatestUnprocessedVotes>,
+        packet_deserializer: PacketDeserializer,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        cluster_info: Arc<ClusterInfo>,
+        connection_cache: Arc<ConnectionCache>,
+        data_budget: Arc<DataBudget>,
+        log_messages_bytes_limit: Option<usize>,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        gossip_vote_sender: ReplayVoteSender,
+    ) -> JoinHandle<()> {
+        let buffer = if should_split_voting_threads {
+            UnprocessedTransactionStorage::new_vote_storage(latest_unprocessed_votes, voting_source)
+        } else {
+            UnprocessedTransactionStorage::new_transaction_storage(
+                UnprocessedPacketBatches::with_capacity(buffer_capacity),
+                ThreadType::Voting(voting_source),
+            )
+        };
 
-                Self::spawn_banking_thread_with_scheduler(
-                    id,
-                    scheduler_handle,
-                    poh_recorder.clone(),
-                    cluster_info.clone(),
-                    connection_cache.clone(),
-                    data_budget.clone(),
-                    log_messages_bytes_limit,
-                    transaction_status_sender.clone(),
-                    gossip_vote_sender.clone(),
-                )
-            })
-            .collect();
-        Self { bank_thread_hdls }
+        let scheduler_handle = Self::build_thread_local_scheduler_handle(
+            packet_deserializer,
+            poh_recorder.clone(),
+            bank_forks,
+            cluster_info.clone(),
+            id,
+            buffer,
+        );
+
+        Self::spawn_banking_thread_with_scheduler(
+            id,
+            scheduler_handle,
+            poh_recorder,
+            cluster_info,
+            connection_cache,
+            data_budget,
+            log_messages_bytes_limit,
+            transaction_status_sender,
+            gossip_vote_sender,
+        )
     }
 
     fn spawn_banking_thread_with_scheduler(
