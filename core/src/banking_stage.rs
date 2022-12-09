@@ -15,6 +15,7 @@ use {
         leader_slot_banking_stage_timing_metrics::LeaderExecuteAndCommitTimings,
         packet_deserializer::PacketDeserializer,
         qos_service::QosService,
+        scheduler_stage::{ProcessedTransactionsSender, ScheduledTransactionsReceiver},
         sigverify::SigverifyTracerPacketStats,
         tracer_packet_stats::TracerPacketStats,
         unprocessed_packet_batches::*,
@@ -286,6 +287,67 @@ impl BankingStage {
             connection_cache,
             bank_forks,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_external_scheduler(
+        cluster_info: &Arc<ClusterInfo>,
+        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        transactions_receivers: Vec<ScheduledTransactionsReceiver>,
+        processed_transactions_sender: ProcessedTransactionsSender,
+        tpu_verified_vote_receiver: BankingPacketReceiver,
+        verified_vote_receiver: BankingPacketReceiver,
+        num_threads: u32,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        gossip_vote_sender: ReplayVoteSender,
+        log_messages_bytes_limit: Option<usize>,
+        connection_cache: Arc<ConnectionCache>,
+        bank_forks: Arc<RwLock<BankForks>>,
+    ) -> Self {
+        // Single thread to generate entries from many banks.
+        // This thread talks to poh_service and broadcasts the entries once they have been recorded.
+        // Once an entry has been recorded, its blockhash is registered with the bank.
+        let data_budget = Arc::new(DataBudget::default());
+        let batch_limit =
+            TOTAL_BUFFERED_PACKETS / ((num_threads - NUM_VOTE_PROCESSING_THREADS) as usize);
+        // Many banks that process transactions in parallel.
+        let mut bank_thread_hdls = Self::spawn_voting_threads(
+            cluster_info.clone(),
+            poh_recorder.clone(),
+            tpu_verified_vote_receiver,
+            verified_vote_receiver,
+            transaction_status_sender.clone(),
+            gossip_vote_sender.clone(),
+            log_messages_bytes_limit,
+            connection_cache.clone(),
+            bank_forks,
+            data_budget.clone(),
+            batch_limit,
+        );
+
+        // Add non-vote transaction threads
+        let index_to_id_offset = bank_thread_hdls.len() as u32;
+        for (index, transactions_receiver) in transactions_receivers.into_iter().enumerate() {
+            let id = index as u32 + index_to_id_offset;
+            let scheduler_handle = SchedulerHandle::new_external_scheduler(
+                id,
+                transactions_receiver,
+                processed_transactions_sender.clone(),
+            );
+            bank_thread_hdls.push(Self::spawn_banking_thread_with_scheduler(
+                id,
+                scheduler_handle,
+                poh_recorder.clone(),
+                cluster_info.clone(),
+                connection_cache.clone(),
+                data_budget.clone(),
+                log_messages_bytes_limit,
+                transaction_status_sender.clone(),
+                gossip_vote_sender.clone(),
+            ));
+        }
+
+        Self { bank_thread_hdls }
     }
 
     #[allow(clippy::too_many_arguments)]

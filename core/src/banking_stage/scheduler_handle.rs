@@ -7,6 +7,7 @@ use {
     },
     crate::{
         leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
+        scheduler_stage::{ProcessedTransactionsSender, ScheduledTransactionsReceiver},
         tracer_packet_stats::TracerPacketStats,
         unprocessed_transaction_storage::UnprocessedTransactionStorage,
     },
@@ -34,6 +35,18 @@ impl SchedulerHandle {
             unprocessed_transaction_storage,
             bank_forks,
             packet_receiver,
+        ))
+    }
+
+    pub fn new_external_scheduler(
+        id: u32,
+        scheduled_transactions_receiver: ScheduledTransactionsReceiver,
+        processed_transactions_sender: ProcessedTransactionsSender,
+    ) -> Self {
+        Self::ExternalScheduler(ExternalSchedulerHandle::new(
+            id,
+            scheduled_transactions_receiver,
+            processed_transactions_sender,
         ))
     }
 
