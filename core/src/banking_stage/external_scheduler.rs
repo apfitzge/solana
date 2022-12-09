@@ -1,8 +1,8 @@
 use {
     super::{
         consume_executor::ConsumeExecutor, decision_maker::BufferedPacketsDecision,
-        forward_executor::ForwardExecutor, scheduler_error::SchedulerError, BankingStageStats,
-        ForwardOption,
+        forward_executor::ForwardExecutor, scheduler_error::SchedulerError,
+        thread_aware_account_locks::ThreadId, BankingStageStats, ForwardOption,
     },
     crate::{
         immutable_deserialized_packet::ImmutableDeserializedPacket,
@@ -16,16 +16,34 @@ use {
 
 /// Message: Scheduler -> Executor
 pub struct ScheduledTransactions {
+    pub thread_id: ThreadId,
     pub decision: BufferedPacketsDecision,
     pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
     pub transactions: Vec<SanitizedTransaction>,
 }
 
+impl ScheduledTransactions {
+    pub fn with_capacity(
+        thread_id: ThreadId,
+        decision: BufferedPacketsDecision,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            thread_id,
+            decision,
+            packets: Vec::with_capacity(capacity),
+            transactions: Vec::with_capacity(capacity),
+        }
+    }
+}
+
 /// Message: Executor -> Scheduler
 #[derive(Default)]
 pub struct ProcessedTransactions {
-    pub retryable_packets: Vec<Arc<ImmutableDeserializedPacket>>,
-    pub retryable_transactions: Vec<SanitizedTransaction>,
+    pub thread_id: ThreadId,
+    pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
+    pub transactions: Vec<SanitizedTransaction>,
+    pub retryable: Vec<bool>,
 }
 
 pub type ScheduledTransactionsSender = Sender<ScheduledTransactions>;
@@ -111,21 +129,19 @@ impl ExternalSchedulerHandle {
                     .increment_process_packets_transactions_us(process_packets_transactions_us);
 
                 let retryable_transaction_indexes =
-                    &process_transactions_summary.retryable_transaction_indexes;
+                    process_transactions_summary.retryable_transaction_indexes;
                 slot_metrics_tracker
                     .increment_retryable_packets_count(retryable_transaction_indexes.len() as u64);
 
-                let (retryable_packets, retryable_transactions) = scheduled_transactions
-                    .packets
-                    .into_iter()
-                    .zip(scheduled_transactions.transactions.into_iter())
-                    .enumerate()
-                    .filter(|(i, _)| retryable_transaction_indexes.contains(i))
-                    .map(|(_, (packet, transaction))| (packet, transaction))
-                    .unzip();
+                let mut retryable = vec![false; scheduled_transactions.transactions.len()];
+                for retryable_transaction_index in retryable_transaction_indexes {
+                    retryable[retryable_transaction_index] = true;
+                }
                 ProcessedTransactions {
-                    retryable_packets,
-                    retryable_transactions,
+                    thread_id: scheduled_transactions.thread_id,
+                    packets: scheduled_transactions.packets,
+                    transactions: scheduled_transactions.transactions,
+                    retryable,
                 }
             }
             BufferedPacketsDecision::Forward | BufferedPacketsDecision::ForwardAndHold => {

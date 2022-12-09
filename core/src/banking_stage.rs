@@ -54,6 +54,7 @@ pub mod consume_executor;
 pub mod decision_maker;
 pub mod external_scheduler;
 pub mod forward_executor;
+pub mod multi_iterator_scheduler;
 pub mod packet_receiver;
 pub mod record_executor;
 pub mod scheduler_error;

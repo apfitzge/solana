@@ -5,7 +5,7 @@ use {
     solana_sdk::pubkey::Pubkey,
     std::{
         collections::{hash_map::Entry, HashMap},
-        ops::BitAndAssign,
+        ops::{BitAnd, BitAndAssign},
     },
 };
 
@@ -230,11 +230,26 @@ impl ThreadSet {
     pub fn remove(&mut self, thread_id: ThreadId) {
         self.set &= !(1 << thread_id);
     }
+
+    #[inline(always)]
+    pub fn threads_iter(self) -> impl Iterator<Item = ThreadId> {
+        (0..MAX_THREADS as ThreadId).filter(move |thread_id| self.contains(*thread_id))
+    }
 }
 
 impl BitAndAssign for ThreadSet {
     fn bitand_assign(&mut self, rhs: Self) {
         self.set &= rhs.set;
+    }
+}
+
+impl BitAnd for ThreadSet {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self {
+            set: self.set & rhs.set,
+        }
     }
 }
 

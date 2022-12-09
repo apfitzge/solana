@@ -14,4 +14,8 @@ pub enum SchedulerError {
     /// Processed transactions sender was disconnected.
     #[error("Processed transactions sender was disconnected")]
     ProcessedTransactionsSenderDisconnected,
+
+    /// Processed transactions receiver was disconnected.
+    #[error("Processed transactions receiver was disconnected")]
+    ProcessedTransactionsReceiverDisconnected,
 }
