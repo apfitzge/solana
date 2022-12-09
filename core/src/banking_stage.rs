@@ -58,6 +58,7 @@ pub mod packet_receiver;
 pub mod record_executor;
 pub mod scheduler_error;
 pub mod scheduler_handle;
+pub mod thread_aware_account_locks;
 pub mod thread_local_scheduler;
 
 // Fixed thread size seems to be fastest on GCP setup
