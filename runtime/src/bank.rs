@@ -3977,15 +3977,14 @@ impl Bank {
             .is_some()
     }
 
-    fn check_status_cache(
+    fn check_status_cache<'a>(
         &self,
-        sanitized_txs: &[SanitizedTransaction],
+        sanitized_txs: impl Iterator<Item = &'a SanitizedTransaction>,
         lock_results: Vec<TransactionCheckResult>,
         error_counters: &mut TransactionErrorMetrics,
     ) -> Vec<TransactionCheckResult> {
         let rcache = self.status_cache.read().unwrap();
         sanitized_txs
-            .iter()
             .zip(lock_results)
             .map(|(sanitized_tx, (lock_result, nonce))| {
                 if lock_result.is_ok()
@@ -4040,15 +4039,15 @@ impl Bank {
         }
     }
 
-    pub fn check_transactions(
+    pub fn check_transactions<'a>(
         &self,
-        sanitized_txs: &[SanitizedTransaction],
+        sanitized_txs: impl Iterator<Item = &'a SanitizedTransaction> + Clone,
         lock_results: &[Result<()>],
         max_age: usize,
         error_counters: &mut TransactionErrorMetrics,
     ) -> Vec<TransactionCheckResult> {
         let age_results =
-            self.check_age(sanitized_txs.iter(), lock_results, max_age, error_counters);
+            self.check_age(sanitized_txs.clone(), lock_results, max_age, error_counters);
         self.check_status_cache(sanitized_txs, age_results, error_counters)
     }
 
@@ -4440,7 +4439,7 @@ impl Bank {
 
         let mut check_time = Measure::start("check_transactions");
         let check_results = self.check_transactions(
-            sanitized_txs,
+            sanitized_txs.iter(),
             batch.lock_results(),
             max_age,
             &mut error_counters,
@@ -7842,7 +7841,7 @@ impl Bank {
         };
 
         self.check_transactions(
-            transactions,
+            transactions.iter(),
             filter,
             (MAX_PROCESSING_AGE)
                 .saturating_sub(max_tx_fwd_delay)
