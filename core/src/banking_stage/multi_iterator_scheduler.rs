@@ -190,7 +190,7 @@ impl MultiIteratorScheduler {
     }
 
     fn schedule_forward(&mut self, _hold: bool) {
-        todo!()
+        error!("Forwarding not implemented yet");
     }
 
     fn receive_and_buffer_packets(&mut self) -> Result<(), SchedulerError> {
@@ -344,6 +344,7 @@ impl MultiIteratorScheduler {
             .0;
 
         // Update payload
+        payload.thread_indices.push(thread_id);
         payload
             .account_locks
             .add_sanitized_message_account_locks(transaction_packet.transaction.message());
