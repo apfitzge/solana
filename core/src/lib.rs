@@ -60,6 +60,7 @@ mod result;
 pub mod retransmit_stage;
 pub mod rewards_recorder_service;
 pub mod sample_performance_service;
+pub mod scheduler_stage;
 pub mod serve_repair;
 pub mod serve_repair_service;
 mod shred_fetch_stage;

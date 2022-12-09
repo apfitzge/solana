@@ -1,0 +1,167 @@
+//! Stage for central transaction scheduler(s).
+//!
+
+use {
+    crate::{
+        banking_stage::{
+            decision_maker::{BufferedPacketsDecision, DecisionMaker},
+            multi_iterator_scheduler::MultiIteratorScheduler,
+            thread_aware_account_locks::ThreadId,
+        },
+        immutable_deserialized_packet::ImmutableDeserializedPacket,
+        packet_deserializer::{BankingPacketReceiver, PacketDeserializer},
+    },
+    crossbeam_channel::{Receiver, Sender},
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_poh::poh_recorder::PohRecorder,
+    solana_runtime::{bank_forks::BankForks, root_bank_cache::RootBankCache},
+    solana_sdk::transaction::SanitizedTransaction,
+    std::{
+        sync::{Arc, RwLock},
+        thread::JoinHandle,
+    },
+};
+
+pub enum SchedulerOption {
+    /// Run scheduler's inside of banking stage threads.
+    ThreadLocalSchedulers,
+    /// Run central multi-iterator scheduler
+    MultiIteratorScheduler { num_executor_threads: usize },
+}
+
+/// Message: Scheduler -> Executor
+pub struct ScheduledTransactions {
+    pub thread_id: ThreadId,
+    pub decision: BufferedPacketsDecision,
+    pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
+    pub transactions: Vec<SanitizedTransaction>,
+}
+
+impl ScheduledTransactions {
+    pub fn with_capacity(
+        thread_id: ThreadId,
+        decision: BufferedPacketsDecision,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            thread_id,
+            decision,
+            packets: Vec::with_capacity(capacity),
+            transactions: Vec::with_capacity(capacity),
+        }
+    }
+}
+
+/// Message: Executor -> Scheduler
+#[derive(Default)]
+pub struct ProcessedTransactions {
+    pub thread_id: ThreadId,
+    pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
+    pub transactions: Vec<SanitizedTransaction>,
+    pub retryable: Vec<bool>,
+}
+
+pub type ScheduledTransactionsSender = Sender<ScheduledTransactions>;
+pub type ScheduledTransactionsReceiver = Receiver<ScheduledTransactions>;
+pub type ProcessedTransactionsSender = Sender<ProcessedTransactions>;
+pub type ProcessedTransactionsReceiver = Receiver<ProcessedTransactions>;
+
+pub struct SchedulerStage {
+    /// Optional scheduler thread handle
+    /// This is None if banking stage is running thread-local schedulers.
+    scheduler_thread_handle: Option<JoinHandle<()>>,
+}
+
+impl SchedulerStage {
+    pub fn new(
+        option: SchedulerOption,
+        packet_receiver: BankingPacketReceiver,
+        bank_forks: Arc<RwLock<BankForks>>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        cluster_info: &ClusterInfo,
+    ) -> (
+        Self,
+        Option<Vec<ScheduledTransactionsReceiver>>,
+        Option<ProcessedTransactionsSender>,
+    ) {
+        match option {
+            SchedulerOption::ThreadLocalSchedulers => (
+                Self {
+                    scheduler_thread_handle: None,
+                },
+                None,
+                None,
+            ),
+            SchedulerOption::MultiIteratorScheduler {
+                num_executor_threads,
+            } => {
+                let (transaction_senders, transaction_receivers) =
+                    Self::create_channel_pairs(num_executor_threads);
+                let (processed_transactions_sender, processed_transactions_receiver) =
+                    crossbeam_channel::unbounded();
+
+                (
+                    Self {
+                        scheduler_thread_handle: Some(Self::start_multi_iterator_scheduler_thread(
+                            num_executor_threads,
+                            packet_receiver,
+                            bank_forks,
+                            poh_recorder,
+                            cluster_info,
+                            transaction_senders,
+                            processed_transactions_receiver,
+                        )),
+                    },
+                    Some(transaction_receivers),
+                    Some(processed_transactions_sender),
+                )
+            }
+        }
+    }
+
+    pub fn join(self) -> std::thread::Result<()> {
+        if let Some(handle) = self.scheduler_thread_handle {
+            handle.join()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn start_multi_iterator_scheduler_thread(
+        num_executor_threads: usize,
+        packet_receiver: BankingPacketReceiver,
+        bank_forks: Arc<RwLock<BankForks>>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        cluster_info: &ClusterInfo,
+        transaction_senders: Vec<ScheduledTransactionsSender>,
+        processed_transactions_receiver: ProcessedTransactionsReceiver,
+    ) -> JoinHandle<()> {
+        let scheduler = MultiIteratorScheduler::new(
+            num_executor_threads,
+            DecisionMaker::new(cluster_info.my_contact_info().id, poh_recorder),
+            PacketDeserializer::new(packet_receiver),
+            RootBankCache::new(bank_forks),
+            transaction_senders,
+            processed_transactions_receiver,
+            700_000,
+        );
+
+        std::thread::Builder::new()
+            .name("solCMISched".to_owned())
+            .spawn(move || {
+                scheduler.run();
+            })
+            .unwrap()
+    }
+
+    fn create_channel_pairs<T>(num_executor_threads: usize) -> (Vec<Sender<T>>, Vec<Receiver<T>>) {
+        let mut transaction_senders = Vec::with_capacity(num_executor_threads);
+        let mut transaction_receivers = Vec::with_capacity(num_executor_threads);
+        for _ in 0..num_executor_threads {
+            let (transaction_sender, transaction_receiver) = crossbeam_channel::unbounded();
+            transaction_senders.push(transaction_sender);
+            transaction_receivers.push(transaction_receiver);
+        }
+        (transaction_senders, transaction_receivers)
+    }
+}

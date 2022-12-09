@@ -1,55 +1,19 @@
 use {
     super::{
         consume_executor::ConsumeExecutor, decision_maker::BufferedPacketsDecision,
-        forward_executor::ForwardExecutor, scheduler_error::SchedulerError,
-        thread_aware_account_locks::ThreadId, BankingStageStats, ForwardOption,
+        forward_executor::ForwardExecutor, scheduler_error::SchedulerError, BankingStageStats,
+        ForwardOption,
     },
     crate::{
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
         leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
+        scheduler_stage::{
+            ProcessedTransactions, ProcessedTransactionsSender, ScheduledTransactions,
+            ScheduledTransactionsReceiver,
+        },
     },
-    crossbeam_channel::{Receiver, Sender, TryRecvError},
+    crossbeam_channel::TryRecvError,
     solana_measure::{measure, measure_us},
-    solana_sdk::transaction::SanitizedTransaction,
-    std::sync::Arc,
 };
-
-/// Message: Scheduler -> Executor
-pub struct ScheduledTransactions {
-    pub thread_id: ThreadId,
-    pub decision: BufferedPacketsDecision,
-    pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
-    pub transactions: Vec<SanitizedTransaction>,
-}
-
-impl ScheduledTransactions {
-    pub fn with_capacity(
-        thread_id: ThreadId,
-        decision: BufferedPacketsDecision,
-        capacity: usize,
-    ) -> Self {
-        Self {
-            thread_id,
-            decision,
-            packets: Vec::with_capacity(capacity),
-            transactions: Vec::with_capacity(capacity),
-        }
-    }
-}
-
-/// Message: Executor -> Scheduler
-#[derive(Default)]
-pub struct ProcessedTransactions {
-    pub thread_id: ThreadId,
-    pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
-    pub transactions: Vec<SanitizedTransaction>,
-    pub retryable: Vec<bool>,
-}
-
-pub type ScheduledTransactionsSender = Sender<ScheduledTransactions>;
-pub type ScheduledTransactionsReceiver = Receiver<ScheduledTransactions>;
-pub type ProcessedTransactionsSender = Sender<ProcessedTransactions>;
-pub type ProcessedTransactionsReceiver = Receiver<ProcessedTransactions>;
 
 /// Handle interface for interacting with an external scheduler
 pub struct ExternalSchedulerHandle {

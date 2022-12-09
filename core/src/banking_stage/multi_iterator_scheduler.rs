@@ -4,10 +4,6 @@
 use {
     super::{
         decision_maker::{BufferedPacketsDecision, DecisionMaker},
-        external_scheduler::{
-            ProcessedTransactions, ProcessedTransactionsReceiver, ScheduledTransactions,
-            ScheduledTransactionsSender,
-        },
         scheduler_error::SchedulerError,
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet, MAX_THREADS},
     },
@@ -16,6 +12,10 @@ use {
         multi_iterator_scanner::{MultiIteratorScanner, ProcessingDecision},
         packet_deserializer::{PacketDeserializer, ReceivePacketResults},
         read_write_account_set::ReadWriteAccountSet,
+        scheduler_stage::{
+            ProcessedTransactions, ProcessedTransactionsReceiver, ScheduledTransactions,
+            ScheduledTransactionsSender,
+        },
     },
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
     itertools::Itertools,
