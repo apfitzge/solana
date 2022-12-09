@@ -9,7 +9,7 @@ use {
     },
 };
 
-pub const MAX_THREADS: usize = 8;
+pub const MAX_THREADS: u8 = 8;
 
 /// Identifier for a thread.
 pub type ThreadId = u8; // Only supports up to 8 threads currently.
@@ -26,25 +26,36 @@ pub struct ThreadSet {
 /// that already hold locks. This is useful for allowing queued
 /// transactions to be scheduled on a thread while the transaction is
 /// still executing on that thread.
-#[derive(Default)]
 pub struct ThreadAwareAccountLocks {
+    /// Number of threads.
+    num_threads: u8,
     /// Write locks - only one thread can hold a write lock at a time.
     /// Contains how many write locks are held by the thread.
     write_locks: HashMap<Pubkey, (ThreadId, u32)>,
     /// Read locks - multiple threads can hold a read lock at the same time.
     /// Contains thread-set for easily checking which threads are scheudled.
     /// Contains how many read locks are held by each thread.
-    read_locks: HashMap<Pubkey, (ThreadSet, [u32; MAX_THREADS])>,
+    read_locks: HashMap<Pubkey, (ThreadSet, [u32; MAX_THREADS as usize])>,
 }
 
 impl ThreadAwareAccountLocks {
+    /// Creates a new `ThreadAwareAccountLocks` with the given number of threads.
+    pub fn new(num_threads: u8) -> Self {
+        assert!(num_threads <= MAX_THREADS);
+        Self {
+            num_threads,
+            write_locks: HashMap::new(),
+            read_locks: HashMap::new(),
+        }
+    }
+
     /// Returns `ThreadSet` that the given accounts can be scheduled on.
     pub fn accounts_schedulable_threads<'a>(
         &self,
         write_account_locks: impl Iterator<Item = &'a Pubkey>,
         read_account_locks: impl Iterator<Item = &'a Pubkey>,
     ) -> ThreadSet {
-        let mut schedulable_threads = ThreadSet::any();
+        let mut schedulable_threads = ThreadSet::any(self.num_threads);
 
         // Get schedulable threads for write-locked accounts.
         write_account_locks.for_each(|pubkey| {
@@ -108,7 +119,7 @@ impl ThreadAwareAccountLocks {
                 .then_some(*read_thread_set)
                 .unwrap_or_else(ThreadSet::none)
         } else {
-            ThreadSet::any()
+            ThreadSet::any(self.num_threads)
         }
     }
 
@@ -117,7 +128,7 @@ impl ThreadAwareAccountLocks {
         self.write_locks
             .get(pubkey)
             .map(|(thread_id, _)| ThreadSet::only(*thread_id))
-            .unwrap_or_else(ThreadSet::any)
+            .unwrap_or_else(|| ThreadSet::any(self.num_threads))
     }
 
     /// Locks the given `pubkey` for writing by the given `thread_id`.
@@ -158,7 +169,7 @@ impl ThreadAwareAccountLocks {
                 read_lock_counts[thread_id as usize] += 1;
             }
             Entry::Vacant(entry) => {
-                let mut read_lock_counts = [0; MAX_THREADS];
+                let mut read_lock_counts = [0; MAX_THREADS as usize];
                 read_lock_counts[thread_id as usize] = 1;
                 entry.insert((ThreadSet::only(thread_id), read_lock_counts));
             }
@@ -190,8 +201,10 @@ impl ThreadSet {
     }
 
     #[inline(always)]
-    pub fn any() -> Self {
-        Self { set: u8::MAX }
+    pub fn any(num_threads: u8) -> Self {
+        Self {
+            set: (1 << num_threads) - 1,
+        }
     }
 
     #[inline(always)]
@@ -261,12 +274,12 @@ mod tests {
     fn test_transaction_schedulable_threads() {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::default();
+        let mut locks = ThreadAwareAccountLocks::new(MAX_THREADS);
 
         // No locks - all threads are schedulable
         assert_eq!(
             locks.accounts_schedulable_threads([&pk1, &pk2].into_iter(), std::iter::empty()),
-            ThreadSet::any()
+            ThreadSet::any(MAX_THREADS)
         );
 
         // Write lock on pk1 - only thread 0 is schedulable
@@ -296,7 +309,7 @@ mod tests {
     #[should_panic]
     fn test_thread_aware_account_locks_lock_mismatched_threads() {
         let pk = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::default();
+        let mut locks = ThreadAwareAccountLocks::new(MAX_THREADS);
 
         locks.lock_account_write(&pk, 0);
         locks.lock_account_write(&pk, 1);
@@ -306,7 +319,7 @@ mod tests {
     #[should_panic]
     fn test_thread_aware_account_locks_unlock_write_mismatched_threads() {
         let pk = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::default();
+        let mut locks = ThreadAwareAccountLocks::new(MAX_THREADS);
 
         locks.lock_account_write(&pk, 0);
         locks.unlock_account_write(&pk, 1);
@@ -316,7 +329,7 @@ mod tests {
     #[should_panic]
     fn test_thread_aware_account_locks_unlock_read_mismatched_threads() {
         let pk = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::default();
+        let mut locks = ThreadAwareAccountLocks::new(MAX_THREADS);
 
         locks.lock_account_read(&pk, 0);
         locks.unlock_account_read(&pk, 1);
@@ -325,11 +338,17 @@ mod tests {
     #[test]
     fn test_thread_aware_account_locks_write_locks() {
         let pk = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::default();
+        let mut locks = ThreadAwareAccountLocks::new(MAX_THREADS);
 
         // No locks - read and write lockable by any thread.
-        assert_eq!(locks.account_read_lockable_threads(&pk), ThreadSet::any());
-        assert_eq!(locks.account_write_lockable_threads(&pk), ThreadSet::any());
+        assert_eq!(
+            locks.account_read_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
+        assert_eq!(
+            locks.account_write_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
 
         // Write lock - read and write lockable by the thread that holds the lock.
         locks.lock_account_write(&pk, 4);
@@ -357,22 +376,37 @@ mod tests {
 
         // Unlock write lock - no locks remaining.
         locks.unlock_account_write(&pk, 4);
-        assert_eq!(locks.account_read_lockable_threads(&pk), ThreadSet::any());
-        assert_eq!(locks.account_write_lockable_threads(&pk), ThreadSet::any());
+        assert_eq!(
+            locks.account_read_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
+        assert_eq!(
+            locks.account_write_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
     }
 
     #[test]
     fn test_thread_aware_account_locks_read_locks() {
         let pk = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::default();
+        let mut locks = ThreadAwareAccountLocks::new(MAX_THREADS);
 
         // No locks - read and write lockable by any thread.
-        assert_eq!(locks.account_read_lockable_threads(&pk), ThreadSet::any());
-        assert_eq!(locks.account_write_lockable_threads(&pk), ThreadSet::any());
+        assert_eq!(
+            locks.account_read_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
+        assert_eq!(
+            locks.account_write_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
 
         // Write lock - read-lockable anywhere, write-lockable on the holding thread.
         locks.lock_account_read(&pk, 4);
-        assert_eq!(locks.account_read_lockable_threads(&pk), ThreadSet::any());
+        assert_eq!(
+            locks.account_read_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
         assert_eq!(
             locks.account_write_lockable_threads(&pk),
             ThreadSet::only(4)
@@ -380,7 +414,10 @@ mod tests {
 
         // Add additional read-lock on same thread.
         locks.lock_account_read(&pk, 4);
-        assert_eq!(locks.account_read_lockable_threads(&pk), ThreadSet::any());
+        assert_eq!(
+            locks.account_read_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
         assert_eq!(
             locks.account_write_lockable_threads(&pk),
             ThreadSet::only(4)
@@ -388,17 +425,26 @@ mod tests {
 
         // Add additional read-lock on different thread.
         locks.lock_account_read(&pk, 2);
-        assert_eq!(locks.account_read_lockable_threads(&pk), ThreadSet::any());
+        assert_eq!(
+            locks.account_read_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
         assert_eq!(locks.account_write_lockable_threads(&pk), ThreadSet::none());
 
         // Unlock read lock - still two locks remaining.
         locks.unlock_account_read(&pk, 4);
-        assert_eq!(locks.account_read_lockable_threads(&pk), ThreadSet::any());
+        assert_eq!(
+            locks.account_read_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
         assert_eq!(locks.account_write_lockable_threads(&pk), ThreadSet::none());
 
         // Unlock read lock - still one lock remaining.
         locks.unlock_account_read(&pk, 4);
-        assert_eq!(locks.account_read_lockable_threads(&pk), ThreadSet::any());
+        assert_eq!(
+            locks.account_read_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
         assert_eq!(
             locks.account_write_lockable_threads(&pk),
             ThreadSet::only(2)
@@ -406,8 +452,14 @@ mod tests {
 
         // Unlock read lock - no locks remaining.
         locks.unlock_account_read(&pk, 2);
-        assert_eq!(locks.account_read_lockable_threads(&pk), ThreadSet::any());
-        assert_eq!(locks.account_write_lockable_threads(&pk), ThreadSet::any());
+        assert_eq!(
+            locks.account_read_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
+        assert_eq!(
+            locks.account_write_lockable_threads(&pk),
+            ThreadSet::any(MAX_THREADS)
+        );
     }
 
     #[test]

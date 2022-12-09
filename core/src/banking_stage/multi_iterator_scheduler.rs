@@ -26,7 +26,7 @@ use {
     std::{sync::Arc, time::Duration},
 };
 
-const BATCH_SIZE: usize = 64;
+const BATCH_SIZE: u32 = 64;
 
 #[derive(Debug, PartialEq, Eq)]
 struct TransactionPacket {
@@ -83,7 +83,7 @@ impl MultiIteratorScheduler {
             packet_deserializer,
             root_bank_cache,
             transaction_senders,
-            account_locks: ThreadAwareAccountLocks::default(),
+            account_locks: ThreadAwareAccountLocks::new(num_threads as u8),
             processed_transaction_receiver,
         }
     }
@@ -116,12 +116,12 @@ impl MultiIteratorScheduler {
         // Create a multi-iterator scanner over the transactions
         let mut scanner = MultiIteratorScanner::new(
             &transaction_packets,
-            self.num_threads * BATCH_SIZE,
-            MultiIteratorSchedulerPayload::default(),
+            self.num_threads * BATCH_SIZE as usize,
+            MultiIteratorSchedulerPayload::new(self.num_threads as u8),
             #[inline(always)]
             |transaction_packet: &TransactionPacket,
              payload: &mut MultiIteratorSchedulerPayload| {
-                self.should_process(transaction_packet, payload)
+                Self::should_process(&mut self.account_locks, transaction_packet, payload)
             },
         );
 
@@ -137,7 +137,7 @@ impl MultiIteratorScheduler {
                     ScheduledTransactions::with_capacity(
                         idx as ThreadId,
                         decision.clone(),
-                        BATCH_SIZE,
+                        BATCH_SIZE as usize,
                     )
                 })
                 .collect_vec();
@@ -306,7 +306,7 @@ impl MultiIteratorScheduler {
     }
 
     fn should_process(
-        &self,
+        account_locks: &mut ThreadAwareAccountLocks,
         transaction_packet: &TransactionPacket,
         payload: &mut MultiIteratorSchedulerPayload,
     ) -> ProcessingDecision {
@@ -322,9 +322,9 @@ impl MultiIteratorScheduler {
         // Check if we can schedule to any thread.
         let transaction_account_locks =
             transaction_packet.transaction.get_account_locks_unchecked();
-        let schedulable_threads = self.account_locks.accounts_schedulable_threads(
-            transaction_account_locks.writable.into_iter(),
-            transaction_account_locks.readonly.into_iter(),
+        let schedulable_threads = account_locks.accounts_schedulable_threads(
+            transaction_account_locks.writable.iter().copied(),
+            transaction_account_locks.readonly.iter().copied(),
         );
 
         // Combine with non-full threads
@@ -343,6 +343,13 @@ impl MultiIteratorScheduler {
             .unwrap()
             .0;
 
+        // Take locks
+        account_locks.lock_accounts(
+            transaction_account_locks.writable.into_iter(),
+            transaction_account_locks.readonly.into_iter(),
+            thread_id,
+        );
+
         // Update payload
         payload.thread_indices.push(thread_id);
         payload
@@ -358,32 +365,33 @@ impl MultiIteratorScheduler {
 }
 
 struct MultiIteratorSchedulerPayload {
+    /// Number of threads
+    num_threads: u8,
     /// Read and write accounts that are used by the current batch of transactions.
     account_locks: ReadWriteAccountSet,
     /// Thread index for each transaction in the batch.
     thread_indices: Vec<ThreadId>,
     /// Batch counts
-    batch_counts: [usize; MAX_THREADS],
+    batch_counts: Vec<u32>,
     /// Schedulable threads (based on batch_counts)
     schedulable_threads: ThreadSet,
 }
 
 impl MultiIteratorSchedulerPayload {
+    fn new(num_threads: u8) -> Self {
+        Self {
+            num_threads,
+            account_locks: ReadWriteAccountSet::default(),
+            thread_indices: Vec::with_capacity(MAX_THREADS as usize * BATCH_SIZE as usize),
+            batch_counts: vec![0; num_threads as usize],
+            schedulable_threads: ThreadSet::any(num_threads),
+        }
+    }
+
     fn reset(&mut self) {
         self.account_locks.clear();
         self.thread_indices.clear();
         self.batch_counts.fill(0);
-        self.schedulable_threads = ThreadSet::any();
-    }
-}
-
-impl Default for MultiIteratorSchedulerPayload {
-    fn default() -> Self {
-        Self {
-            account_locks: ReadWriteAccountSet::default(),
-            thread_indices: Vec::with_capacity(MAX_THREADS * BATCH_SIZE),
-            batch_counts: [0; MAX_THREADS],
-            schedulable_threads: ThreadSet::any(),
-        }
+        self.schedulable_threads = ThreadSet::any(self.num_threads);
     }
 }
