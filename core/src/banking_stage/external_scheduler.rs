@@ -108,14 +108,14 @@ impl ExternalSchedulerHandle {
                     retryable,
                 }
             }
-            BufferedPacketsDecision::Forward | BufferedPacketsDecision::ForwardAndHold => {
+            BufferedPacketsDecision::Forward => {
                 let (_forward_result, sucessful_forwarded_packets_count, _leader_pubkey) =
                     forward_executor.forward_buffered_packets(
                         &ForwardOption::ForwardTransaction, // Only support transactions for now
                         scheduled_transactions
                             .packets
                             .iter()
-                            .map(|p| p.original_packet()),
+                            .map(|p| p.immutable_section().original_packet()),
                         &self.banking_stage_stats,
                     );
                 slot_metrics_tracker.increment_successful_forwarded_packets_count(
@@ -123,6 +123,41 @@ impl ExternalSchedulerHandle {
                 );
 
                 ProcessedTransactions::default() // No retryable packets
+            }
+
+            BufferedPacketsDecision::ForwardAndHold => {
+                let (_forward_result, sucessful_forwarded_packets_count, _leader_pubkey) =
+                    forward_executor.forward_buffered_packets(
+                        &ForwardOption::ForwardTransaction, // Only support transactions for now
+                        scheduled_transactions
+                            .packets
+                            .iter()
+                            .map(|p| p.immutable_section().original_packet()),
+                        &self.banking_stage_stats,
+                    );
+                slot_metrics_tracker.increment_successful_forwarded_packets_count(
+                    sucessful_forwarded_packets_count as u64,
+                );
+
+                let ScheduledTransactions {
+                    thread_id,
+                    mut packets,
+                    transactions,
+                    ..
+                } = scheduled_transactions;
+
+                // Mark all packets as forwarded
+                for packet in &mut packets {
+                    packet.forwarded = true;
+                }
+                let num_transactions = transactions.len();
+
+                ProcessedTransactions {
+                    thread_id,
+                    packets,
+                    transactions,
+                    retryable: vec![true; num_transactions],
+                }
             }
 
             _ => panic!("Unexpected decision"),

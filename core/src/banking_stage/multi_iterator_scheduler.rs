@@ -8,7 +8,6 @@ use {
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet, MAX_THREADS},
     },
     crate::{
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
         multi_iterator_scanner::{MultiIteratorScanner, ProcessingDecision},
         packet_deserializer::{PacketDeserializer, ReceivePacketResults},
         read_write_account_set::ReadWriteAccountSet,
@@ -16,6 +15,7 @@ use {
             ProcessedTransactions, ProcessedTransactionsReceiver, ScheduledTransactions,
             ScheduledTransactionsSender,
         },
+        unprocessed_packet_batches::DeserializedPacket,
     },
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
     itertools::Itertools,
@@ -23,14 +23,14 @@ use {
     solana_poh::poh_recorder::BankStart,
     solana_runtime::root_bank_cache::RootBankCache,
     solana_sdk::transaction::SanitizedTransaction,
-    std::{sync::Arc, time::Duration},
+    std::time::Duration,
 };
 
 const BATCH_SIZE: u32 = 64;
 
 #[derive(Debug, PartialEq, Eq)]
 struct TransactionPacket {
-    packet: Arc<ImmutableDeserializedPacket>,
+    packet: DeserializedPacket,
     transaction: SanitizedTransaction,
 }
 
@@ -290,7 +290,7 @@ impl MultiIteratorScheduler {
             })
         {
             let transaction_packet = TransactionPacket {
-                packet: Arc::new(packet),
+                packet: DeserializedPacket::from_immutable_section(packet),
                 transaction,
             };
             if self.priority_queue.capacity() == self.priority_queue.len() {

@@ -8,8 +8,8 @@ use {
             multi_iterator_scheduler::MultiIteratorScheduler,
             thread_aware_account_locks::ThreadId,
         },
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
         packet_deserializer::{BankingPacketReceiver, PacketDeserializer},
+        unprocessed_packet_batches::DeserializedPacket,
     },
     crossbeam_channel::{Receiver, Sender},
     solana_gossip::cluster_info::ClusterInfo,
@@ -33,7 +33,7 @@ pub enum SchedulerOption {
 pub struct ScheduledTransactions {
     pub thread_id: ThreadId,
     pub decision: BufferedPacketsDecision,
-    pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
+    pub packets: Vec<DeserializedPacket>,
     pub transactions: Vec<SanitizedTransaction>,
 }
 
@@ -56,7 +56,7 @@ impl ScheduledTransactions {
 #[derive(Default)]
 pub struct ProcessedTransactions {
     pub thread_id: ThreadId,
-    pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
+    pub packets: Vec<DeserializedPacket>,
     pub transactions: Vec<SanitizedTransaction>,
     pub retryable: Vec<bool>,
 }
