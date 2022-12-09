@@ -484,7 +484,7 @@ impl ConsumeExecutor {
             Self::prepare_filter_for_pending_transactions(transactions.len(), pending_indexes);
 
         let results = bank.check_transactions_with_forwarding_delay(
-            transactions,
+            transactions.iter(),
             &filter,
             FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET,
         );

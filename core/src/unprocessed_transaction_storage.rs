@@ -760,7 +760,7 @@ impl ThreadLocalUnprocessedPackets {
     ) -> Vec<usize> {
         let filter = vec![Ok(()); transactions.len()];
         let results = bank.check_transactions_with_forwarding_delay(
-            transactions,
+            transactions.iter(),
             &filter,
             FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET,
         );

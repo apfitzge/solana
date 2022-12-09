@@ -117,11 +117,11 @@ impl MultiIteratorScheduler {
         let mut scanner = MultiIteratorScanner::new(
             &transaction_packets,
             self.num_threads * BATCH_SIZE as usize,
-            MultiIteratorSchedulerPayload::new(self.num_threads as u8),
+            MultiIteratorSchedulerConsumePayload::new(self.num_threads as u8),
             #[inline(always)]
             |transaction_packet: &TransactionPacket,
-             payload: &mut MultiIteratorSchedulerPayload| {
-                Self::should_process(&mut self.account_locks, transaction_packet, payload)
+             payload: &mut MultiIteratorSchedulerConsumePayload| {
+                Self::should_consume(&mut self.account_locks, transaction_packet, payload)
             },
         );
 
@@ -189,8 +189,65 @@ impl MultiIteratorScheduler {
         }
     }
 
-    fn schedule_forward(&mut self, _hold: bool) {
-        error!("Forwarding not implemented yet");
+    fn schedule_forward(&mut self, hold: bool) {
+        let decision = if hold {
+            BufferedPacketsDecision::ForwardAndHold
+        } else {
+            BufferedPacketsDecision::Forward
+        };
+
+        // Drain priority queue into a vector of transactions
+        let transaction_packets = self.priority_queue.drain_desc().collect_vec();
+
+        // Create a multi-iterator scanner over the transactions
+        let mut scanner = MultiIteratorScanner::new(
+            &transaction_packets,
+            self.num_threads * BATCH_SIZE as usize,
+            MultiIteratorSchedulerForwardPayload::default(),
+            #[inline(always)]
+            |transaction_packet: &TransactionPacket,
+             payload: &mut MultiIteratorSchedulerForwardPayload| {
+                Self::should_forward(transaction_packet, payload)
+            },
+        );
+
+        // Loop over batches of transactions
+        while let Some((transactions, payload)) = scanner.iterate() {
+            // Create batches to fill with transactions
+            let mut batches = (0..self.num_threads)
+                .map(|idx| {
+                    ScheduledTransactions::with_capacity(
+                        idx as ThreadId,
+                        decision.clone(),
+                        BATCH_SIZE as usize,
+                    )
+                })
+                .collect_vec();
+
+            // Fill batches - striped access
+            for (index, transaction) in transactions.iter().copied().enumerate() {
+                let batch = &mut batches[index % self.num_threads];
+                batch.packets.push(transaction.packet.clone());
+                batch.transactions.push(transaction.transaction.clone());
+            }
+
+            // Send batches to the execution threads
+            for (thread_index, batch) in batches.into_iter().enumerate() {
+                if batch.packets.is_empty() {
+                    continue;
+                }
+
+                self.transaction_senders[thread_index]
+                    .send(batch)
+                    .expect("transaction sender should be connected")
+            }
+
+            // Reset the iterator payload for next iteration
+            payload.reset();
+        }
+
+        // Get the final payload from the scanner and whether or not each packet was handled
+        let (_payload, _already_handled) = scanner.finalize();
     }
 
     fn receive_and_buffer_packets(&mut self) -> Result<(), SchedulerError> {
@@ -305,10 +362,10 @@ impl MultiIteratorScheduler {
         self.priority_queue.capacity() - self.priority_queue.len()
     }
 
-    fn should_process(
+    fn should_consume(
         account_locks: &mut ThreadAwareAccountLocks,
         transaction_packet: &TransactionPacket,
-        payload: &mut MultiIteratorSchedulerPayload,
+        payload: &mut MultiIteratorSchedulerConsumePayload,
     ) -> ProcessingDecision {
         // If locks clash with the current batch of transactions, then we should process
         // the transaction later.
@@ -362,9 +419,26 @@ impl MultiIteratorScheduler {
 
         ProcessingDecision::Now
     }
+
+    // TODO: Filter out transactions that are too old.
+    fn should_forward(
+        transaction_packet: &TransactionPacket,
+        payload: &mut MultiIteratorSchedulerForwardPayload,
+    ) -> ProcessingDecision {
+        // If locks clash with the current batch of transactions, then we should forward
+        // the transaction later.
+        if payload
+            .account_locks
+            .try_locking(transaction_packet.transaction.message())
+        {
+            ProcessingDecision::Now
+        } else {
+            ProcessingDecision::Later
+        }
+    }
 }
 
-struct MultiIteratorSchedulerPayload {
+struct MultiIteratorSchedulerConsumePayload {
     /// Number of threads
     num_threads: u8,
     /// Read and write accounts that are used by the current batch of transactions.
@@ -377,7 +451,7 @@ struct MultiIteratorSchedulerPayload {
     schedulable_threads: ThreadSet,
 }
 
-impl MultiIteratorSchedulerPayload {
+impl MultiIteratorSchedulerConsumePayload {
     fn new(num_threads: u8) -> Self {
         Self {
             num_threads,
@@ -393,5 +467,17 @@ impl MultiIteratorSchedulerPayload {
         self.thread_indices.clear();
         self.batch_counts.fill(0);
         self.schedulable_threads = ThreadSet::any(self.num_threads);
+    }
+}
+
+#[derive(Default)]
+struct MultiIteratorSchedulerForwardPayload {
+    /// Account locks used to prevent us from spam forwarding hot accounts
+    account_locks: ReadWriteAccountSet,
+}
+
+impl MultiIteratorSchedulerForwardPayload {
+    fn reset(&mut self) {
+        self.account_locks.clear();
     }
 }

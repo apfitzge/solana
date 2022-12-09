@@ -7821,9 +7821,9 @@ impl Bank {
     }
 
     /// Checks a batch of sanitized transactions again bank for age and status
-    pub fn check_transactions_with_forwarding_delay(
+    pub fn check_transactions_with_forwarding_delay<'a>(
         &self,
-        transactions: &[SanitizedTransaction],
+        transactions: impl Iterator<Item = &'a SanitizedTransaction> + Clone,
         filter: &[transaction::Result<()>],
         forward_transactions_to_leader_at_slot_offset: u64,
     ) -> Vec<TransactionCheckResult> {
@@ -7841,7 +7841,7 @@ impl Bank {
         };
 
         self.check_transactions(
-            transactions.iter(),
+            transactions,
             filter,
             (MAX_PROCESSING_AGE)
                 .saturating_sub(max_tx_fwd_delay)
