@@ -225,21 +225,34 @@ impl Tpu {
         );
 
         let num_transaction_banking_threads = BankingStage::num_threads().saturating_sub(2);
-        let (scheduler_stage, _transaction_receivers, _processed_transactions_sender) =
+        let (scheduler_stage, transactions_receivers, processed_transactions_sender) =
             SchedulerStage::new(
                 SchedulerOption::MultiIteratorScheduler {
                     num_executor_threads: num_transaction_banking_threads as usize,
                 },
-                verified_receiver.clone(),
+                verified_receiver,
                 bank_forks.clone(),
                 poh_recorder.clone(),
                 cluster_info,
             );
 
-        let banking_stage = BankingStage::new(
+        // let banking_stage = BankingStage::new(
+        //     cluster_info,
+        //     poh_recorder,
+        //     verified_receiver,
+        //     verified_tpu_vote_packets_receiver,
+        //     verified_gossip_vote_packets_receiver,
+        //     transaction_status_sender,
+        //     replay_vote_sender,
+        //     log_messages_bytes_limit,
+        //     connection_cache.clone(),
+        //     bank_forks.clone(),
+        // );
+        let banking_stage = BankingStage::new_external_scheduler(
             cluster_info,
             poh_recorder,
-            verified_receiver,
+            transactions_receivers.unwrap(),
+            processed_transactions_sender.unwrap(),
             verified_tpu_vote_packets_receiver,
             verified_gossip_vote_packets_receiver,
             transaction_status_sender,

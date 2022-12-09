@@ -297,19 +297,18 @@ impl BankingStage {
         processed_transactions_sender: ProcessedTransactionsSender,
         tpu_verified_vote_receiver: BankingPacketReceiver,
         verified_vote_receiver: BankingPacketReceiver,
-        num_threads: u32,
         transaction_status_sender: Option<TransactionStatusSender>,
         gossip_vote_sender: ReplayVoteSender,
         log_messages_bytes_limit: Option<usize>,
         connection_cache: Arc<ConnectionCache>,
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
+        let num_threads = transactions_receivers.len();
         // Single thread to generate entries from many banks.
         // This thread talks to poh_service and broadcasts the entries once they have been recorded.
         // Once an entry has been recorded, its blockhash is registered with the bank.
         let data_budget = Arc::new(DataBudget::default());
-        let batch_limit =
-            TOTAL_BUFFERED_PACKETS / ((num_threads - NUM_VOTE_PROCESSING_THREADS) as usize);
+        let batch_limit = TOTAL_BUFFERED_PACKETS / num_threads;
         // Many banks that process transactions in parallel.
         let mut bank_thread_hdls = Self::spawn_voting_threads(
             cluster_info.clone(),
