@@ -174,6 +174,7 @@ pub struct ValidatorConfig {
     pub ledger_column_options: LedgerColumnOptions,
     pub runtime_config: RuntimeConfig,
     pub replay_slots_concurrently: bool,
+    pub use_central_scheduler: bool,
 }
 
 impl Default for ValidatorConfig {
@@ -236,6 +237,7 @@ impl Default for ValidatorConfig {
             ledger_column_options: LedgerColumnOptions::default(),
             runtime_config: RuntimeConfig::default(),
             replay_slots_concurrently: false,
+            use_central_scheduler: false,
         }
     }
 }
@@ -1017,6 +1019,7 @@ impl Validator {
             &staked_nodes,
             config.staked_nodes_overrides.clone(),
             tpu_enable_udp,
+            config.use_central_scheduler,
         );
 
         datapoint_info!(

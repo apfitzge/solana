@@ -1304,6 +1304,11 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                 .long("replay-slots-concurrently")
                 .help("Allow concurrent replay of slots on different forks")
         )
+        .arg(
+            Arg::with_name("use_central_scheduler")
+                .long("use-central-scheduler")
+                .help("Use centralized scheduler for non-vote banking threads")
+        )
         .args(&get_deprecated_arguments())
         .after_help("The default subcommand is run")
         .subcommand(

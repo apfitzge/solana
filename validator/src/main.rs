@@ -1424,6 +1424,8 @@ pub fn main() {
         }
     }
 
+    validator_config.use_central_scheduler = matches.is_present("use_central_scheduler");
+
     let mut ledger_lock = ledger_lockfile(&ledger_path);
     let _ledger_write_guard = lock_ledger(&ledger_path, &mut ledger_lock);
 

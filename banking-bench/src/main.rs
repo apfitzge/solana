@@ -9,7 +9,7 @@ use {
     solana_client::connection_cache::ConnectionCache,
     solana_core::{
         banking_stage::BankingStage,
-        scheduler_stage::{SchedulerOption, SchedulerStage},
+        scheduler_stage::{SchedulerKind, SchedulerStage},
     },
     solana_gossip::cluster_info::{ClusterInfo, Node},
     solana_ledger::{
@@ -427,10 +427,9 @@ fn main() {
         };
 
         let (scheduler_stage, transactions_receivers, processed_transactions_sender) =
-            SchedulerStage::new(
-                SchedulerOption::MultiIteratorScheduler {
-                    num_executor_threads: num_banking_threads as usize - 2,
-                },
+            SchedulerStage::new_num_threads(
+                SchedulerKind::MultiIteratorScheduler,
+                num_banking_threads as usize - 2,
                 verified_receiver,
                 bank_forks.clone(),
                 poh_recorder.clone(),

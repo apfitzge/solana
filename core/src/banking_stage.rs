@@ -652,6 +652,10 @@ impl BankingStage {
         )
     }
 
+    pub fn num_non_vote_threads() -> u32 {
+        Self::num_threads() - NUM_VOTE_PROCESSING_THREADS
+    }
+
     pub fn join(self) -> thread::Result<()> {
         for bank_thread_hdl in self.bank_thread_hdls {
             bank_thread_hdl.join()?;

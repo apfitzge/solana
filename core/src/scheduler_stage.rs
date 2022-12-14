@@ -7,6 +7,7 @@ use {
             decision_maker::{BufferedPacketsDecision, DecisionMaker},
             multi_iterator_scheduler::MultiIteratorScheduler,
             thread_aware_account_locks::ThreadId,
+            BankingStage,
         },
         packet_deserializer::{BankingPacketReceiver, PacketDeserializer},
         unprocessed_packet_batches::DeserializedPacket,
@@ -22,11 +23,11 @@ use {
     },
 };
 
-pub enum SchedulerOption {
+pub enum SchedulerKind {
     /// Run scheduler's inside of banking stage threads.
     ThreadLocalSchedulers,
     /// Run central multi-iterator scheduler
-    MultiIteratorScheduler { num_executor_threads: usize },
+    MultiIteratorScheduler,
 }
 
 /// Message: Scheduler -> Executor
@@ -66,6 +67,7 @@ pub type ScheduledTransactionsReceiver = Receiver<ScheduledTransactions>;
 pub type ProcessedTransactionsSender = Sender<ProcessedTransactions>;
 pub type ProcessedTransactionsReceiver = Receiver<ProcessedTransactions>;
 
+#[derive(Default)]
 pub struct SchedulerStage {
     /// Optional scheduler thread handle
     /// This is None if banking stage is running thread-local schedulers.
@@ -74,7 +76,29 @@ pub struct SchedulerStage {
 
 impl SchedulerStage {
     pub fn new(
-        option: SchedulerOption,
+        option: SchedulerKind,
+        packet_receiver: BankingPacketReceiver,
+        bank_forks: Arc<RwLock<BankForks>>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        cluster_info: &ClusterInfo,
+    ) -> (
+        Self,
+        Option<Vec<ScheduledTransactionsReceiver>>,
+        Option<ProcessedTransactionsSender>,
+    ) {
+        Self::new_num_threads(
+            option,
+            BankingStage::num_non_vote_threads() as usize,
+            packet_receiver,
+            bank_forks,
+            poh_recorder,
+            cluster_info,
+        )
+    }
+
+    pub fn new_num_threads(
+        option: SchedulerKind,
+        num_non_vote_threads: usize,
         packet_receiver: BankingPacketReceiver,
         bank_forks: Arc<RwLock<BankForks>>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -85,25 +109,23 @@ impl SchedulerStage {
         Option<ProcessedTransactionsSender>,
     ) {
         match option {
-            SchedulerOption::ThreadLocalSchedulers => (
+            SchedulerKind::ThreadLocalSchedulers => (
                 Self {
                     scheduler_thread_handle: None,
                 },
                 None,
                 None,
             ),
-            SchedulerOption::MultiIteratorScheduler {
-                num_executor_threads,
-            } => {
+            SchedulerKind::MultiIteratorScheduler => {
                 let (transaction_senders, transaction_receivers) =
-                    Self::create_channel_pairs(num_executor_threads);
+                    Self::create_channel_pairs(num_non_vote_threads);
                 let (processed_transactions_sender, processed_transactions_receiver) =
                     crossbeam_channel::unbounded();
 
                 (
                     Self {
                         scheduler_thread_handle: Some(Self::start_multi_iterator_scheduler_thread(
-                            num_executor_threads,
+                            num_non_vote_threads,
                             packet_receiver,
                             bank_forks,
                             poh_recorder,

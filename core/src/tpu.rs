@@ -11,7 +11,7 @@ use {
         },
         fetch_stage::FetchStage,
         find_packet_sender_stake_stage::FindPacketSenderStakeStage,
-        scheduler_stage::{SchedulerOption, SchedulerStage},
+        scheduler_stage::{SchedulerKind, SchedulerStage},
         sigverify::TransactionSigVerifier,
         sigverify_stage::SigVerifyStage,
         staked_nodes_updater_service::StakedNodesUpdaterService,
@@ -101,6 +101,7 @@ impl Tpu {
         staked_nodes: &Arc<RwLock<StakedNodes>>,
         shared_staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
         tpu_enable_udp: bool,
+        use_central_scheduler: bool,
     ) -> Self {
         let TpuSockets {
             transactions: transactions_sockets,
@@ -224,43 +225,45 @@ impl Tpu {
             cluster_confirmed_slot_sender,
         );
 
-        let num_transaction_banking_threads = BankingStage::num_threads().saturating_sub(2);
-        let (scheduler_stage, transactions_receivers, processed_transactions_sender) =
-            SchedulerStage::new(
-                SchedulerOption::MultiIteratorScheduler {
-                    num_executor_threads: num_transaction_banking_threads as usize,
-                },
-                verified_receiver,
-                bank_forks.clone(),
-                poh_recorder.clone(),
+        let (scheduler_stage, banking_stage) = if use_central_scheduler {
+            let (scheduler_stage, transactions_receivers, processed_transactions_sender) =
+                SchedulerStage::new(
+                    SchedulerKind::MultiIteratorScheduler,
+                    verified_receiver,
+                    bank_forks.clone(),
+                    poh_recorder.clone(),
+                    cluster_info,
+                );
+            let banking_stage = BankingStage::new_external_scheduler(
                 cluster_info,
+                poh_recorder,
+                transactions_receivers.unwrap(),
+                processed_transactions_sender.unwrap(),
+                verified_tpu_vote_packets_receiver,
+                verified_gossip_vote_packets_receiver,
+                transaction_status_sender,
+                replay_vote_sender,
+                log_messages_bytes_limit,
+                connection_cache.clone(),
+                bank_forks.clone(),
             );
 
-        // let banking_stage = BankingStage::new(
-        //     cluster_info,
-        //     poh_recorder,
-        //     verified_receiver,
-        //     verified_tpu_vote_packets_receiver,
-        //     verified_gossip_vote_packets_receiver,
-        //     transaction_status_sender,
-        //     replay_vote_sender,
-        //     log_messages_bytes_limit,
-        //     connection_cache.clone(),
-        //     bank_forks.clone(),
-        // );
-        let banking_stage = BankingStage::new_external_scheduler(
-            cluster_info,
-            poh_recorder,
-            transactions_receivers.unwrap(),
-            processed_transactions_sender.unwrap(),
-            verified_tpu_vote_packets_receiver,
-            verified_gossip_vote_packets_receiver,
-            transaction_status_sender,
-            replay_vote_sender,
-            log_messages_bytes_limit,
-            connection_cache.clone(),
-            bank_forks.clone(),
-        );
+            (scheduler_stage, banking_stage)
+        } else {
+            let banking_stage = BankingStage::new(
+                cluster_info,
+                poh_recorder,
+                verified_receiver,
+                verified_tpu_vote_packets_receiver,
+                verified_gossip_vote_packets_receiver,
+                transaction_status_sender,
+                replay_vote_sender,
+                log_messages_bytes_limit,
+                connection_cache.clone(),
+                bank_forks.clone(),
+            );
+            (SchedulerStage::default(), banking_stage)
+        };
 
         let broadcast_stage = broadcast_type.new_broadcast_stage(
             broadcast_sockets,
