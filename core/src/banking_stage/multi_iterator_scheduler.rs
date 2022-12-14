@@ -20,9 +20,22 @@ use {
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
     itertools::Itertools,
     min_max_heap::MinMaxHeap,
+    solana_perf::perf_libs,
     solana_poh::poh_recorder::BankStart,
-    solana_runtime::root_bank_cache::RootBankCache,
-    solana_sdk::transaction::SanitizedTransaction,
+    solana_runtime::{
+        bank::{Bank, BankStatusCache},
+        blockhash_queue::BlockhashQueue,
+        root_bank_cache::RootBankCache,
+        transaction_error_metrics::TransactionErrorMetrics,
+    },
+    solana_sdk::{
+        clock::{
+            FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE,
+            MAX_TRANSACTION_FORWARDING_DELAY, MAX_TRANSACTION_FORWARDING_DELAY_GPU,
+        },
+        nonce::state::DurableNonce,
+        transaction::SanitizedTransaction,
+    },
     std::time::Duration,
 };
 
@@ -199,6 +212,22 @@ impl MultiIteratorScheduler {
         // Drain priority queue into a vector of transactions
         let transaction_packets = self.priority_queue.drain_desc().collect_vec();
 
+        // Grab read locks for checking age and status cache
+        let root_bank = self.root_bank_cache.root_bank();
+        let blockhash_queue = root_bank.blockhash_queue.read().unwrap();
+        let status_cache = root_bank.status_cache.read().unwrap();
+        let next_durable_nonce = DurableNonce::from_blockhash(&blockhash_queue.last_hash());
+
+        // Calculate max forwarding age
+        let max_age = (MAX_PROCESSING_AGE)
+            .saturating_sub(if perf_libs::api().is_some() {
+                MAX_TRANSACTION_FORWARDING_DELAY
+            } else {
+                MAX_TRANSACTION_FORWARDING_DELAY_GPU
+            })
+            .saturating_sub(FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET as usize);
+        let mut error_counters = TransactionErrorMetrics::default();
+
         // Create a multi-iterator scanner over the transactions
         let mut scanner = MultiIteratorScanner::new(
             &transaction_packets,
@@ -207,7 +236,16 @@ impl MultiIteratorScheduler {
             #[inline(always)]
             |transaction_packet: &TransactionPacket,
              payload: &mut MultiIteratorSchedulerForwardPayload| {
-                Self::should_forward(transaction_packet, payload)
+                Self::should_forward(
+                    transaction_packet,
+                    &root_bank,
+                    &blockhash_queue,
+                    &status_cache,
+                    &next_durable_nonce,
+                    max_age,
+                    &mut error_counters,
+                    payload,
+                )
             },
         );
 
@@ -423,8 +461,35 @@ impl MultiIteratorScheduler {
     // TODO: Filter out transactions that are too old.
     fn should_forward(
         transaction_packet: &TransactionPacket,
+        bank: &Bank,
+        blockhash_queue: &BlockhashQueue,
+        status_cache: &BankStatusCache,
+        next_durable_nonce: &DurableNonce,
+        max_age: usize,
+        error_counters: &mut TransactionErrorMetrics,
         payload: &mut MultiIteratorSchedulerForwardPayload,
     ) -> ProcessingDecision {
+        // Throw out transactions that are too old.
+        if bank
+            .check_transaction_age(
+                &transaction_packet.transaction,
+                max_age,
+                next_durable_nonce,
+                blockhash_queue,
+                error_counters,
+            )
+            .0
+            .is_err()
+        {
+            return ProcessingDecision::Never;
+        }
+
+        // If the transaction is already in the bank, then we don't need to forward it.
+        if bank.is_transaction_already_processed(&transaction_packet.transaction, status_cache) {
+            error_counters.already_processed += 1;
+            return ProcessingDecision::Never;
+        }
+
         // If locks clash with the current batch of transactions, then we should forward
         // the transaction later.
         if payload

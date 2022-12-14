@@ -1,4 +1,5 @@
 #![allow(clippy::integer_arithmetic)]
+
 use {
     clap::{crate_description, crate_name, Arg, ArgEnum, Command},
     crossbeam_channel::{unbounded, Receiver},
@@ -6,7 +7,10 @@ use {
     rand::{thread_rng, Rng},
     rayon::prelude::*,
     solana_client::connection_cache::ConnectionCache,
-    solana_core::banking_stage::BankingStage,
+    solana_core::{
+        banking_stage::BankingStage,
+        scheduler_stage::{SchedulerOption, SchedulerStage},
+    },
     solana_gossip::cluster_info::{ClusterInfo, Node},
     solana_ledger::{
         blockstore::Blockstore,
@@ -421,19 +425,44 @@ fn main() {
             true => ConnectionCache::new(DEFAULT_TPU_CONNECTION_POOL_SIZE),
             false => ConnectionCache::with_udp(DEFAULT_TPU_CONNECTION_POOL_SIZE),
         };
-        let banking_stage = BankingStage::new_num_threads(
+
+        let (scheduler_stage, transactions_receivers, processed_transactions_sender) =
+            SchedulerStage::new(
+                SchedulerOption::MultiIteratorScheduler {
+                    num_executor_threads: num_banking_threads as usize - 2,
+                },
+                verified_receiver,
+                bank_forks.clone(),
+                poh_recorder.clone(),
+                &cluster_info,
+            );
+        let banking_stage = BankingStage::new_external_scheduler(
             &cluster_info,
             &poh_recorder,
-            verified_receiver,
+            transactions_receivers.unwrap(),
+            processed_transactions_sender.unwrap(),
             tpu_vote_receiver,
             vote_receiver,
-            num_banking_threads,
             None,
             replay_vote_sender,
             None,
             Arc::new(connection_cache),
             bank_forks.clone(),
         );
+
+        // let banking_stage = BankingStage::new_num_threads(
+        //     &cluster_info,
+        //     &poh_recorder,
+        //     verified_receiver,
+        //     tpu_vote_receiver,
+        //     vote_receiver,
+        //     num_banking_threads,
+        //     None,
+        //     replay_vote_sender,
+        //     None,
+        //     Arc::new(connection_cache),
+        //     bank_forks.clone(),
+        // );
         poh_recorder.write().unwrap().set_bank(&bank, false);
 
         // This is so that the signal_receiver does not go out of scope after the closure.
@@ -578,6 +607,7 @@ fn main() {
         drop(tpu_vote_sender);
         drop(vote_sender);
         exit.store(true, Ordering::Relaxed);
+        scheduler_stage.join().unwrap();
         banking_stage.join().unwrap();
         debug!("waited for banking_stage");
         poh_service.join().unwrap();

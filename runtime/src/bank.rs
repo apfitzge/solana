@@ -962,7 +962,7 @@ pub struct Bank {
     pub status_cache: Arc<RwLock<BankStatusCache>>,
 
     /// FIFO queue of `recent_blockhash` items
-    blockhash_queue: RwLock<BlockhashQueue>,
+    pub blockhash_queue: RwLock<BlockhashQueue>,
 
     /// The set of parents including this bank
     pub ancestors: Ancestors,
@@ -3947,25 +3947,40 @@ impl Bank {
 
         txs.zip(lock_results)
             .map(|(tx, lock_res)| match lock_res {
-                Ok(()) => {
-                    let recent_blockhash = tx.message().recent_blockhash();
-                    if hash_queue.is_hash_valid_for_age(recent_blockhash, max_age) {
-                        (Ok(()), None)
-                    } else if let Some((address, account)) =
-                        self.check_transaction_for_nonce(tx, &next_durable_nonce)
-                    {
-                        (Ok(()), Some(NoncePartial::new(address, account)))
-                    } else {
-                        error_counters.blockhash_not_found += 1;
-                        (Err(TransactionError::BlockhashNotFound), None)
-                    }
-                }
+                Ok(()) => self.check_transaction_age(
+                    tx,
+                    max_age,
+                    &next_durable_nonce,
+                    &hash_queue,
+                    error_counters,
+                ),
                 Err(e) => (Err(e.clone()), None),
             })
             .collect()
     }
 
-    fn is_transaction_already_processed(
+    pub fn check_transaction_age(
+        &self,
+        tx: &SanitizedTransaction,
+        max_age: usize,
+        next_durable_nonce: &DurableNonce,
+        hash_queue: &BlockhashQueue,
+        error_counters: &mut TransactionErrorMetrics,
+    ) -> TransactionCheckResult {
+        let recent_blockhash = tx.message().recent_blockhash();
+        if hash_queue.is_hash_valid_for_age(recent_blockhash, max_age) {
+            (Ok(()), None)
+        } else if let Some((address, account)) =
+            self.check_transaction_for_nonce(tx, next_durable_nonce)
+        {
+            (Ok(()), Some(NoncePartial::new(address, account)))
+        } else {
+            error_counters.blockhash_not_found += 1;
+            (Err(TransactionError::BlockhashNotFound), None)
+        }
+    }
+
+    pub fn is_transaction_already_processed(
         &self,
         sanitized_tx: &SanitizedTransaction,
         status_cache: &BankStatusCache,
