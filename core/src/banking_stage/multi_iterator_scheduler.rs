@@ -240,7 +240,7 @@ impl MultiIteratorScheduler {
             .zip(already_handled.into_iter())
         {
             if !handled {
-                self.priority_queue.push(transaction_packet);
+                self.push_priority_queue(transaction_packet);
             }
         }
     }
@@ -394,7 +394,7 @@ impl MultiIteratorScheduler {
             // Push retryable packets back into the buffer
             if retryable {
                 self.metrics.retryable_packet_count += 1;
-                self.priority_queue.push(TransactionPacket {
+                self.push_priority_queue(TransactionPacket {
                     packet,
                     transaction,
                 });
@@ -436,11 +436,8 @@ impl MultiIteratorScheduler {
                 packet: DeserializedPacket::from_immutable_section(packet),
                 transaction,
             };
-            if self.priority_queue.capacity() == self.priority_queue.len() {
-                self.priority_queue.push_pop_min(transaction_packet);
-            } else {
-                self.priority_queue.push(transaction_packet);
-            }
+
+            self.push_priority_queue(transaction_packet);
         }
     }
 
@@ -547,6 +544,14 @@ impl MultiIteratorScheduler {
             ProcessingDecision::Now
         } else {
             ProcessingDecision::Later
+        }
+    }
+
+    fn push_priority_queue(&mut self, transaction_packet: TransactionPacket) {
+        if self.priority_queue.len() == self.priority_queue.capacity() {
+            self.priority_queue.push_pop_min(transaction_packet);
+        } else {
+            self.priority_queue.push(transaction_packet);
         }
     }
 }
