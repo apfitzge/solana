@@ -137,6 +137,10 @@ impl MultiIteratorScheduler {
 
         // Drain priority queue into a vector of transactions
         let transaction_packets = self.priority_queue.drain_desc().collect_vec();
+        self.metrics.max_consumed_buffer_size = self
+            .metrics
+            .max_consumed_buffer_size
+            .max(transaction_packets.len());
 
         // Create a multi-iterator scanner over the transactions
         let mut scanner = MultiIteratorScanner::new(
@@ -588,6 +592,7 @@ struct MultiIteratorSchedulerMetrics {
     consumed_batch_count: usize,
     consumed_packet_count: usize,
     consumed_min_batch_size: usize,
+    max_consumed_buffer_size: usize,
     retryable_packet_count: usize,
 }
 
@@ -599,6 +604,7 @@ impl Default for MultiIteratorSchedulerMetrics {
             consumed_batch_count: 0,
             consumed_packet_count: 0,
             consumed_min_batch_size: usize::MAX,
+            max_consumed_buffer_size: 0,
             retryable_packet_count: 0,
         }
     }
@@ -613,6 +619,11 @@ impl MultiIteratorSchedulerMetrics {
                 ("consumed_batch_count", self.consumed_batch_count, i64),
                 ("consumed_packet_count", self.consumed_packet_count, i64),
                 ("consumed_min_batch_size", self.consumed_min_batch_size, i64),
+                (
+                    "max_consumed_buffer_size",
+                    self.max_consumed_buffer_size,
+                    i64
+                ),
                 ("retryable_packets", self.retryable_packet_count, i64),
             );
             self.reset();
@@ -624,6 +635,7 @@ impl MultiIteratorSchedulerMetrics {
         self.consumed_batch_count = 0;
         self.consumed_packet_count = 0;
         self.consumed_min_batch_size = usize::MAX;
+        self.max_consumed_buffer_size = 0;
         self.retryable_packet_count = 0;
     }
 }
