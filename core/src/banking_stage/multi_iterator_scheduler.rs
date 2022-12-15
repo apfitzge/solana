@@ -34,6 +34,7 @@ use {
             MAX_TRANSACTION_FORWARDING_DELAY, MAX_TRANSACTION_FORWARDING_DELAY_GPU,
         },
         nonce::state::DurableNonce,
+        timing::AtomicInterval,
         transaction::SanitizedTransaction,
     },
     std::time::Duration,
@@ -76,6 +77,8 @@ pub struct MultiIteratorScheduler {
     account_locks: ThreadAwareAccountLocks,
     /// Receives processed transactions from the execution threads
     processed_transaction_receiver: ProcessedTransactionsReceiver,
+    /// Scheduling metrics
+    metrics: MultiIteratorSchedulerMetrics,
 }
 
 impl MultiIteratorScheduler {
@@ -98,6 +101,7 @@ impl MultiIteratorScheduler {
             transaction_senders,
             account_locks: ThreadAwareAccountLocks::new(num_threads as u8),
             processed_transaction_receiver,
+            metrics: MultiIteratorSchedulerMetrics::default(),
         }
     }
 
@@ -117,6 +121,8 @@ impl MultiIteratorScheduler {
             if self.receive_processed_transactions().is_err() {
                 break;
             }
+
+            self.metrics.report(1000);
         }
     }
 
@@ -174,9 +180,15 @@ impl MultiIteratorScheduler {
                     continue;
                 }
 
+                let packet_count = batch.packets.len();
+                self.metrics.consumed_batch_count += 1;
+                self.metrics.consumed_packet_count += packet_count;
+                self.metrics.consumed_min_batch_size =
+                    self.metrics.consumed_min_batch_size.min(packet_count);
+
                 self.transaction_senders[thread_index]
                     .send(batch)
-                    .expect("transaction sender should be connected")
+                    .expect("transaction sender should be connected");
             }
 
             // Reset the iterator payload for next iteration
@@ -348,6 +360,7 @@ impl MultiIteratorScheduler {
 
             // Push retryable packets back into the buffer
             if retryable {
+                self.metrics.retryable_packet_count += 1;
                 self.priority_queue.push(TransactionPacket {
                     packet,
                     transaction,
@@ -363,6 +376,8 @@ impl MultiIteratorScheduler {
     fn insert_received_packets(&mut self, receive_packet_results: ReceivePacketResults) {
         let root_bank = self.root_bank_cache.root_bank();
         let tx_account_lock_limit = root_bank.get_transaction_account_lock_limit();
+
+        self.metrics.received_packet_count += receive_packet_results.deserialized_packets.len();
 
         for (packet, transaction) in receive_packet_results
             .deserialized_packets
@@ -544,5 +559,51 @@ struct MultiIteratorSchedulerForwardPayload {
 impl MultiIteratorSchedulerForwardPayload {
     fn reset(&mut self) {
         self.account_locks.clear();
+    }
+}
+
+struct MultiIteratorSchedulerMetrics {
+    last_reported: AtomicInterval,
+    received_packet_count: usize,
+    consumed_batch_count: usize,
+    consumed_packet_count: usize,
+    consumed_min_batch_size: usize,
+    retryable_packet_count: usize,
+}
+
+impl Default for MultiIteratorSchedulerMetrics {
+    fn default() -> Self {
+        Self {
+            last_reported: AtomicInterval::default(),
+            received_packet_count: 0,
+            consumed_batch_count: 0,
+            consumed_packet_count: 0,
+            consumed_min_batch_size: usize::MAX,
+            retryable_packet_count: 0,
+        }
+    }
+}
+
+impl MultiIteratorSchedulerMetrics {
+    fn report(&mut self, report_interval_ms: u64) {
+        if self.last_reported.should_update(report_interval_ms) {
+            datapoint_info!(
+                "multi_iterator_scheduler",
+                ("received_packet_count", self.received_packet_count, i64),
+                ("consumed_batch_count", self.consumed_batch_count, i64),
+                ("consumed_packet_count", self.consumed_packet_count, i64),
+                ("consumed_min_batch_size", self.consumed_min_batch_size, i64),
+                ("retryable_packets", self.retryable_packet_count, i64),
+            );
+            self.reset();
+        }
+    }
+
+    fn reset(&mut self) {
+        self.received_packet_count = 0;
+        self.consumed_batch_count = 0;
+        self.consumed_packet_count = 0;
+        self.consumed_min_batch_size = usize::MAX;
+        self.retryable_packet_count = 0;
     }
 }
