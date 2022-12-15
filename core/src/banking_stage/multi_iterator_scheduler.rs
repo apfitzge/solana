@@ -20,6 +20,7 @@ use {
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
     itertools::Itertools,
     min_max_heap::MinMaxHeap,
+    solana_measure::measure_us,
     solana_perf::perf_libs,
     solana_poh::poh_recorder::BankStart,
     solana_runtime::{
@@ -121,9 +122,12 @@ impl MultiIteratorScheduler {
                 BufferedPacketsDecision::Hold => {}
             }
 
-            if self.receive_and_buffer_packets().is_err() {
+            let (receive_result, receive_time_us) = measure_us!(self.receive_and_buffer_packets());
+            self.metrics.receive_packet_time_us += receive_time_us;
+            if receive_result.is_err() {
                 break;
             }
+
             if self.receive_processed_transactions().is_err() {
                 break;
             }
@@ -603,6 +607,7 @@ impl MultiIteratorSchedulerForwardPayload {
 struct MultiIteratorSchedulerMetrics {
     last_reported: AtomicInterval,
     received_packet_count: usize,
+    receive_packet_time_us: u64,
     consumed_batch_count: usize,
     consumed_packet_count: usize,
     consumed_min_batch_size: usize,
@@ -616,6 +621,7 @@ impl Default for MultiIteratorSchedulerMetrics {
         Self {
             last_reported: AtomicInterval::default(),
             received_packet_count: 0,
+            receive_packet_time_us: 0,
             consumed_batch_count: 0,
             consumed_packet_count: 0,
             consumed_min_batch_size: usize::MAX,
@@ -632,6 +638,7 @@ impl MultiIteratorSchedulerMetrics {
             datapoint_info!(
                 "multi_iterator_scheduler",
                 ("received_packet_count", self.received_packet_count, i64),
+                ("receive_packet_time_us", self.receive_packet_time_us, i64),
                 ("consumed_batch_count", self.consumed_batch_count, i64),
                 ("consumed_packet_count", self.consumed_packet_count, i64),
                 ("consumed_min_batch_size", self.consumed_min_batch_size, i64),
@@ -653,6 +660,7 @@ impl MultiIteratorSchedulerMetrics {
 
     fn reset(&mut self) {
         self.received_packet_count = 0;
+        self.receive_packet_time_us = 0;
         self.consumed_batch_count = 0;
         self.consumed_packet_count = 0;
         self.consumed_min_batch_size = usize::MAX;
