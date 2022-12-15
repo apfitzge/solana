@@ -73,6 +73,7 @@ impl ExternalSchedulerHandle {
         Ok(())
     }
 
+    // TODO: fix forwarding leader metrics
     fn process_scheduled_transactions(
         &self,
         scheduled_transactions: ScheduledTransactions,
@@ -82,6 +83,7 @@ impl ExternalSchedulerHandle {
     ) -> ProcessedTransactions {
         match scheduled_transactions.decision {
             BufferedPacketsDecision::Consume(bank_start) => {
+                slot_metrics_tracker.apply_working_bank(Some(&bank_start));
                 let (process_transactions_summary, process_packets_transactions_us) =
                     measure_us!(consume_executor.process_packets_transactions(
                         &bank_start,
@@ -109,6 +111,7 @@ impl ExternalSchedulerHandle {
                 }
             }
             BufferedPacketsDecision::Forward => {
+                slot_metrics_tracker.apply_working_bank(None);
                 let (_forward_result, sucessful_forwarded_packets_count, _leader_pubkey) =
                     forward_executor.forward_buffered_packets(
                         &ForwardOption::ForwardTransaction, // Only support transactions for now
@@ -126,6 +129,7 @@ impl ExternalSchedulerHandle {
             }
 
             BufferedPacketsDecision::ForwardAndHold => {
+                slot_metrics_tracker.apply_working_bank(None);
                 let (_forward_result, sucessful_forwarded_packets_count, _leader_pubkey) =
                     forward_executor.forward_buffered_packets(
                         &ForwardOption::ForwardTransaction, // Only support transactions for now
