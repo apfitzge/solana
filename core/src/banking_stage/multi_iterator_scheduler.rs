@@ -20,7 +20,7 @@ use {
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
     itertools::Itertools,
     min_max_heap::MinMaxHeap,
-    solana_measure::measure_us,
+    solana_measure::{measure, measure_us},
     solana_perf::perf_libs,
     solana_poh::poh_recorder::BankStart,
     solana_runtime::{
@@ -140,11 +140,13 @@ impl MultiIteratorScheduler {
         let decision = BufferedPacketsDecision::Consume(bank_start.clone());
 
         // Drain priority queue into a vector of transactions
-        let transaction_packets = self.priority_queue.drain_desc().collect_vec();
+        let (transaction_packets, queue_drain_time_us) =
+            measure_us!(self.priority_queue.drain_desc().collect_vec());
         self.metrics.max_consumed_buffer_size = self
             .metrics
             .max_consumed_buffer_size
             .max(transaction_packets.len());
+        self.metrics.consume_drain_queue_time_us += queue_drain_time_us;
 
         // Create a multi-iterator scanner over the transactions
         let mut scanner = MultiIteratorScanner::new(
@@ -239,14 +241,17 @@ impl MultiIteratorScheduler {
         let (_payload, already_handled) = scanner.finalize();
 
         // Push unprocessed packets back into the priority queue
-        for (transaction_packet, handled) in transaction_packets
-            .into_iter()
-            .zip(already_handled.into_iter())
-        {
-            if !handled {
-                self.push_priority_queue(transaction_packet);
+        let (_, push_queue_time_us) = measure_us!({
+            for (transaction_packet, handled) in transaction_packets
+                .into_iter()
+                .zip(already_handled.into_iter())
+            {
+                if !handled {
+                    self.push_priority_queue(transaction_packet);
+                }
             }
-        }
+        });
+        self.metrics.consume_push_queue_time_us += push_queue_time_us;
     }
 
     fn schedule_forward(&mut self, hold: bool) {
@@ -611,6 +616,8 @@ struct MultiIteratorSchedulerMetrics {
     consumed_batch_count: usize,
     consumed_packet_count: usize,
     consumed_min_batch_size: usize,
+    consume_drain_queue_time_us: u64,
+    consume_push_queue_time_us: u64,
     max_consumed_buffer_size: usize,
     max_consume_iterator_time_us: u64,
     retryable_packet_count: usize,
@@ -627,6 +634,8 @@ impl Default for MultiIteratorSchedulerMetrics {
             consumed_min_batch_size: usize::MAX,
             max_consumed_buffer_size: 0,
             max_consume_iterator_time_us: 0,
+            consume_drain_queue_time_us: 0,
+            consume_push_queue_time_us: 0,
             retryable_packet_count: 0,
         }
     }
@@ -652,6 +661,16 @@ impl MultiIteratorSchedulerMetrics {
                     self.max_consume_iterator_time_us,
                     i64
                 ),
+                (
+                    "consume_drain_queue_time_us",
+                    self.consume_drain_queue_time_us,
+                    i64
+                ),
+                (
+                    "consume_push_queue_time_us",
+                    self.consume_push_queue_time_us,
+                    i64
+                ),
                 ("retryable_packets", self.retryable_packet_count, i64),
             );
             self.reset();
@@ -666,6 +685,8 @@ impl MultiIteratorSchedulerMetrics {
         self.consumed_min_batch_size = usize::MAX;
         self.max_consumed_buffer_size = 0;
         self.max_consume_iterator_time_us = 0;
+        self.consume_drain_queue_time_us = 0;
+        self.consume_push_queue_time_us = 0;
         self.retryable_packet_count = 0;
     }
 }
