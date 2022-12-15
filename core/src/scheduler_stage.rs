@@ -180,7 +180,7 @@ impl SchedulerStage {
             RootBankCache::new(bank_forks),
             transaction_senders,
             processed_transactions_receiver,
-            700_000,
+            100_000,
         );
 
         std::thread::Builder::new()
