@@ -82,6 +82,10 @@ impl BankStart {
             self.working_bank.ns_per_slot,
         )
     }
+
+    pub fn reached_max_tick_height(&self) -> bool {
+        self.working_bank.tick_height() >= self.working_bank.max_tick_height()
+    }
 }
 
 // Sends the Result of the record operation, including the index in the slot of the first
