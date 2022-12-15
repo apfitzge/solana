@@ -42,7 +42,7 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc,
         },
-        time::Duration,
+        time::{Duration, Instant},
     },
 };
 
@@ -158,8 +158,14 @@ impl MultiIteratorScheduler {
         let validity_check = Arc::new(AtomicBool::new(true));
 
         // Loop over batches of transactions
+        let mut iterate_time = Instant::now();
         while let Some((transactions, payload)) = scanner.iterate() {
             assert_eq!(transactions.len(), payload.thread_indices.len()); // TOOD: Remove after testing
+
+            self.metrics.max_consume_iterator_time_us = self
+                .metrics
+                .max_consume_iterator_time_us
+                .max(iterate_time.elapsed().as_micros() as u64);
 
             // TODO: Consider receiving and unlocking processed transactions here
 
@@ -220,6 +226,9 @@ impl MultiIteratorScheduler {
             if !validity_check.load(Ordering::Relaxed) {
                 break;
             }
+
+            // Reset time for next iteration
+            iterate_time = Instant::now();
         }
 
         // Get the final payload from the scanner and whether or not each packet was handled
@@ -593,6 +602,7 @@ struct MultiIteratorSchedulerMetrics {
     consumed_packet_count: usize,
     consumed_min_batch_size: usize,
     max_consumed_buffer_size: usize,
+    max_consume_iterator_time_us: u64,
     retryable_packet_count: usize,
 }
 
@@ -605,6 +615,7 @@ impl Default for MultiIteratorSchedulerMetrics {
             consumed_packet_count: 0,
             consumed_min_batch_size: usize::MAX,
             max_consumed_buffer_size: 0,
+            max_consume_iterator_time_us: 0,
             retryable_packet_count: 0,
         }
     }
@@ -624,6 +635,11 @@ impl MultiIteratorSchedulerMetrics {
                     self.max_consumed_buffer_size,
                     i64
                 ),
+                (
+                    "max_consume_iterator_time_us",
+                    self.max_consume_iterator_time_us,
+                    i64
+                ),
                 ("retryable_packets", self.retryable_packet_count, i64),
             );
             self.reset();
@@ -636,6 +652,7 @@ impl MultiIteratorSchedulerMetrics {
         self.consumed_packet_count = 0;
         self.consumed_min_batch_size = usize::MAX;
         self.max_consumed_buffer_size = 0;
+        self.max_consume_iterator_time_us = 0;
         self.retryable_packet_count = 0;
     }
 }
