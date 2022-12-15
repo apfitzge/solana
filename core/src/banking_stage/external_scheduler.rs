@@ -81,16 +81,32 @@ impl ExternalSchedulerHandle {
         forward_executor: &ForwardExecutor,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> ProcessedTransactions {
+        // Check if the scheduled transactions are still valid
+        // TODO: metrics
+        if !scheduled_transactions.is_valid() {
+            let num_packets = scheduled_transactions.transactions.len();
+            return ProcessedTransactions {
+                thread_id: scheduled_transactions.thread_id,
+                packets: scheduled_transactions.packets,
+                transactions: scheduled_transactions.transactions,
+                retryable: vec![true; num_packets],
+            };
+        }
+
         match scheduled_transactions.decision {
-            BufferedPacketsDecision::Consume(bank_start) => {
-                slot_metrics_tracker.apply_working_bank(Some(&bank_start));
+            BufferedPacketsDecision::Consume(ref bank_start) => {
+                slot_metrics_tracker.apply_working_bank(Some(bank_start));
                 let (process_transactions_summary, process_packets_transactions_us) =
                     measure_us!(consume_executor.process_packets_transactions(
-                        &bank_start,
+                        bank_start,
                         &scheduled_transactions.transactions,
                         &self.banking_stage_stats,
                         slot_metrics_tracker,
                     ));
+                if process_transactions_summary.reached_max_poh_height {
+                    scheduled_transactions.mark_as_invalid();
+                }
+
                 slot_metrics_tracker
                     .increment_process_packets_transactions_us(process_packets_transactions_us);
 

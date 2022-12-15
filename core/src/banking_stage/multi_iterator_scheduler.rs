@@ -37,7 +37,13 @@ use {
         timing::AtomicInterval,
         transaction::SanitizedTransaction,
     },
-    std::time::Duration,
+    std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    },
 };
 
 const BATCH_SIZE: u32 = 64;
@@ -144,6 +150,9 @@ impl MultiIteratorScheduler {
             },
         );
 
+        // Validity check for sent transactions
+        let validity_check = Arc::new(AtomicBool::new(true));
+
         // Loop over batches of transactions
         while let Some((transactions, payload)) = scanner.iterate() {
             assert_eq!(transactions.len(), payload.thread_indices.len()); // TOOD: Remove after testing
@@ -157,6 +166,7 @@ impl MultiIteratorScheduler {
                         idx as ThreadId,
                         decision.clone(),
                         BATCH_SIZE as usize,
+                        validity_check.clone(),
                     )
                 })
                 .collect_vec();
@@ -195,7 +205,15 @@ impl MultiIteratorScheduler {
             payload.reset();
 
             // Check if we've reached the end of the slot
-            if !bank_start.should_working_bank_still_be_processing_txs() {
+            if bank_start.reached_max_tick_height()
+                || !bank_start.should_working_bank_still_be_processing_txs()
+            {
+                validity_check.store(false, Ordering::Relaxed);
+                break;
+            }
+
+            // Stop scheduling if a scheduled transaction batch was invalidated
+            if !validity_check.load(Ordering::Relaxed) {
                 break;
             }
         }
@@ -261,6 +279,7 @@ impl MultiIteratorScheduler {
             },
         );
 
+        let validity_check = Arc::new(AtomicBool::new(true));
         // Loop over batches of transactions
         while let Some((transactions, payload)) = scanner.iterate() {
             // Create batches to fill with transactions
@@ -270,6 +289,7 @@ impl MultiIteratorScheduler {
                         idx as ThreadId,
                         decision.clone(),
                         BATCH_SIZE as usize,
+                        validity_check.clone(),
                     )
                 })
                 .collect_vec();

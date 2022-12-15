@@ -18,7 +18,10 @@ use {
     solana_runtime::{bank_forks::BankForks, root_bank_cache::RootBankCache},
     solana_sdk::transaction::SanitizedTransaction,
     std::{
-        sync::{Arc, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
+        },
         thread::JoinHandle,
     },
 };
@@ -36,6 +39,8 @@ pub struct ScheduledTransactions {
     pub decision: BufferedPacketsDecision,
     pub packets: Vec<DeserializedPacket>,
     pub transactions: Vec<SanitizedTransaction>,
+    /// Alows scheduler to mark transactions as invalid after they've been sent to the executor
+    validity_check: Arc<AtomicBool>,
 }
 
 impl ScheduledTransactions {
@@ -43,13 +48,23 @@ impl ScheduledTransactions {
         thread_id: ThreadId,
         decision: BufferedPacketsDecision,
         capacity: usize,
+        validity_check: Arc<AtomicBool>,
     ) -> Self {
         Self {
             thread_id,
             decision,
             packets: Vec::with_capacity(capacity),
             transactions: Vec::with_capacity(capacity),
+            validity_check,
         }
+    }
+
+    pub fn mark_as_invalid(&self) {
+        self.validity_check.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.validity_check.load(Ordering::Relaxed)
     }
 }
 
