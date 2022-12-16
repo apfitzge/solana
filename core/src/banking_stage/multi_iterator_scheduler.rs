@@ -212,6 +212,8 @@ impl MultiIteratorScheduler {
                 self.metrics.consumed_packet_count += packet_count;
                 self.metrics.consumed_min_batch_size =
                     self.metrics.consumed_min_batch_size.min(packet_count);
+                self.metrics.consumed_max_batch_size =
+                    self.metrics.consumed_min_batch_size.max(packet_count);
 
                 self.transaction_senders[thread_index]
                     .send(batch)
@@ -616,6 +618,7 @@ struct MultiIteratorSchedulerMetrics {
     consumed_batch_count: usize,
     consumed_packet_count: usize,
     consumed_min_batch_size: usize,
+    consumed_max_batch_size: usize,
     consume_drain_queue_time_us: u64,
     consume_push_queue_time_us: u64,
     max_consumed_buffer_size: usize,
@@ -632,6 +635,7 @@ impl Default for MultiIteratorSchedulerMetrics {
             consumed_batch_count: 0,
             consumed_packet_count: 0,
             consumed_min_batch_size: usize::MAX,
+            consumed_max_batch_size: 0,
             max_consumed_buffer_size: 0,
             max_consume_iterator_time_us: 0,
             consume_drain_queue_time_us: 0,
@@ -651,6 +655,7 @@ impl MultiIteratorSchedulerMetrics {
                 ("consumed_batch_count", self.consumed_batch_count, i64),
                 ("consumed_packet_count", self.consumed_packet_count, i64),
                 ("consumed_min_batch_size", self.consumed_min_batch_size, i64),
+                ("consumed_max_batch_size", self.consumed_max_batch_size, i64),
                 (
                     "max_consumed_buffer_size",
                     self.max_consumed_buffer_size,
@@ -683,6 +688,7 @@ impl MultiIteratorSchedulerMetrics {
         self.consumed_batch_count = 0;
         self.consumed_packet_count = 0;
         self.consumed_min_batch_size = usize::MAX;
+        self.consumed_max_batch_size = 0;
         self.max_consumed_buffer_size = 0;
         self.max_consume_iterator_time_us = 0;
         self.consume_drain_queue_time_us = 0;
