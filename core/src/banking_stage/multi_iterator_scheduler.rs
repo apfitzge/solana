@@ -467,10 +467,12 @@ impl MultiIteratorScheduler {
     ) -> ProcessingDecision {
         // If locks clash with the current batch of transactions, then we should process
         // the transaction later.
-        if !payload
+        let (has_batch_conflict, conflict_batch_time_us) = measure_us!(!payload
             .batch_account_locks
-            .check_sanitized_message_account_locks(transaction_packet.transaction.message())
-        {
+            .check_sanitized_message_account_locks(transaction_packet.transaction.message()));
+        payload.scheduler.metrics.conflict_batch_time_us += conflict_batch_time_us;
+
+        if has_batch_conflict {
             payload.scheduler.metrics.conflict_batch_count += 1;
             return ProcessingDecision::Later;
         }
@@ -478,16 +480,18 @@ impl MultiIteratorScheduler {
         // Check if we can schedule to any thread.
         let transaction_account_locks =
             transaction_packet.transaction.get_account_locks_unchecked();
-        let schedulable_threads = payload
+
+        let (schedulable_threads, schedulable_threads_time_us) = measure_us!(payload
             .scheduler
             .account_locks
             .accounts_schedulable_threads(
                 transaction_account_locks.writable.iter().copied(),
                 transaction_account_locks.readonly.iter().copied(),
-            );
+            ));
 
         // Combine with non-full threads
         let schedulable_threads = schedulable_threads & payload.schedulable_threads;
+        payload.scheduler.metrics.conflict_locks_time_us += schedulable_threads_time_us;
 
         if schedulable_threads.is_empty() {
             payload.scheduler.metrics.conflict_locks_count += 1;
@@ -504,6 +508,9 @@ impl MultiIteratorScheduler {
             .0;
 
         // Take locks
+        payload
+            .batch_account_locks
+            .add_sanitized_message_account_locks(transaction_packet.transaction.message());
         payload.scheduler.account_locks.lock_accounts(
             transaction_account_locks.writable.into_iter(),
             transaction_account_locks.readonly.into_iter(),
@@ -512,9 +519,6 @@ impl MultiIteratorScheduler {
 
         // Update payload
         payload.thread_indices.push(thread_id);
-        payload
-            .batch_account_locks
-            .add_sanitized_message_account_locks(transaction_packet.transaction.message());
         payload.batch_counts[thread_id as usize] += 1;
         if payload.batch_counts[thread_id as usize] == BATCH_SIZE {
             payload.schedulable_threads.remove(thread_id);
@@ -523,7 +527,6 @@ impl MultiIteratorScheduler {
         ProcessingDecision::Now
     }
 
-    // TODO: Filter out transactions that are too old.
     fn should_forward(
         transaction_packet: &TransactionPacket,
         bank: &Bank,
@@ -627,6 +630,8 @@ struct MultiIteratorSchedulerMetrics {
     receive_packet_time_us: u64,
     conflict_batch_count: usize,
     conflict_locks_count: usize,
+    conflict_batch_time_us: u64,
+    conflict_locks_time_us: u64,
     consumed_batch_count: usize,
     consumed_packet_count: usize,
     consumed_min_batch_size: usize,
@@ -647,6 +652,8 @@ impl Default for MultiIteratorSchedulerMetrics {
             receive_packet_time_us: 0,
             conflict_batch_count: 0,
             conflict_locks_count: 0,
+            conflict_batch_time_us: 0,
+            conflict_locks_time_us: 0,
             consumed_batch_count: 0,
             consumed_packet_count: 0,
             consumed_min_batch_size: usize::MAX,
@@ -670,6 +677,8 @@ impl MultiIteratorSchedulerMetrics {
                 ("receive_packet_time_us", self.receive_packet_time_us, i64),
                 ("conflict_batch_count", self.conflict_batch_count, i64),
                 ("conflict_locks_count", self.conflict_locks_count, i64),
+                ("conflict_batch_time_us", self.conflict_batch_time_us, i64),
+                ("conflict_locks_time_us", self.conflict_locks_time_us, i64),
                 ("consumed_batch_count", self.consumed_batch_count, i64),
                 ("consumed_packet_count", self.consumed_packet_count, i64),
                 ("consumed_min_batch_size", self.consumed_min_batch_size, i64),
@@ -710,6 +719,8 @@ impl MultiIteratorSchedulerMetrics {
         self.receive_packet_time_us = 0;
         self.conflict_batch_count = 0;
         self.conflict_locks_count = 0;
+        self.conflict_batch_time_us = 0;
+        self.conflict_locks_time_us = 0;
         self.consumed_batch_count = 0;
         self.consumed_packet_count = 0;
         self.consumed_min_batch_size = usize::MAX;
