@@ -174,6 +174,7 @@ impl MultiIteratorScheduler {
                 .max(iterate_time.elapsed().as_micros() as u64);
 
             // TODO: Consider receiving and unlocking processed transactions here
+            // NOTE: If we do this, we need to update the priority queue extend below
 
             // Batches of transactions to send
             let mut batches = (0..self.num_threads)
@@ -242,14 +243,13 @@ impl MultiIteratorScheduler {
 
         // Push unprocessed packets back into the priority queue
         let (_, push_queue_time_us) = measure_us!({
-            for (transaction_packet, handled) in transaction_packets
-                .into_iter()
-                .zip(already_handled.into_iter())
-            {
-                if !handled {
-                    self.push_priority_queue(transaction_packet);
-                }
-            }
+            self.priority_queue.extend(
+                transaction_packets
+                    .into_iter()
+                    .zip(already_handled.into_iter())
+                    .filter(|(_, handled)| !handled)
+                    .map(|(transaction_packet, _)| transaction_packet),
+            )
         });
         self.metrics.consume_push_queue_time_us += push_queue_time_us;
     }
