@@ -171,10 +171,12 @@ impl MultiIteratorScheduler {
 
             assert_eq!(transactions.len(), payload.thread_indices.len()); // TOOD: Remove after testing
 
+            let iterate_time_us = iterate_time.elapsed().as_micros() as u64;
+            scheduler.metrics.total_consume_iterator_time_us += iterate_time_us;
             scheduler.metrics.max_consume_iterator_time_us = scheduler
                 .metrics
                 .max_consume_iterator_time_us
-                .max(iterate_time.elapsed().as_micros() as u64);
+                .max(iterate_time_us);
 
             // TODO: Consider receiving and unlocking processed transactions here
             // NOTE: If we do this, we need to update the priority queue extend below
@@ -629,10 +631,11 @@ struct MultiIteratorSchedulerMetrics {
     consumed_packet_count: usize,
     consumed_min_batch_size: usize,
     consumed_max_batch_size: usize,
-    consume_drain_queue_time_us: u64,
-    consume_push_queue_time_us: u64,
     max_consumed_buffer_size: usize,
     max_consume_iterator_time_us: u64,
+    total_consume_iterator_time_us: u64,
+    consume_drain_queue_time_us: u64,
+    consume_push_queue_time_us: u64,
     retryable_packet_count: usize,
 }
 
@@ -652,6 +655,7 @@ impl Default for MultiIteratorSchedulerMetrics {
             max_consume_iterator_time_us: 0,
             consume_drain_queue_time_us: 0,
             consume_push_queue_time_us: 0,
+            total_consume_iterator_time_us: 0,
             retryable_packet_count: 0,
         }
     }
@@ -673,6 +677,11 @@ impl MultiIteratorSchedulerMetrics {
                 (
                     "max_consumed_buffer_size",
                     self.max_consumed_buffer_size,
+                    i64
+                ),
+                (
+                    "total_consume_iterator_time_us",
+                    self.total_consume_iterator_time_us,
                     i64
                 ),
                 (
@@ -706,6 +715,7 @@ impl MultiIteratorSchedulerMetrics {
         self.consumed_min_batch_size = usize::MAX;
         self.consumed_max_batch_size = 0;
         self.max_consumed_buffer_size = 0;
+        self.total_consume_iterator_time_us = 0;
         self.max_consume_iterator_time_us = 0;
         self.consume_drain_queue_time_us = 0;
         self.consume_push_queue_time_us = 0;
