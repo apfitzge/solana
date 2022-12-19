@@ -84,9 +84,9 @@ pub type ProcessedTransactionsReceiver = Receiver<ProcessedTransactions>;
 
 #[derive(Default)]
 pub struct SchedulerStage {
-    /// Optional scheduler thread handle
-    /// This is None if banking stage is running thread-local schedulers.
-    scheduler_thread_handle: Option<JoinHandle<()>>,
+    /// Optional scheduler thread handles
+    /// Empty if scheduler is running in banking stage threads
+    scheduler_thread_handles: Vec<JoinHandle<()>>,
 }
 
 impl SchedulerStage {
@@ -126,7 +126,7 @@ impl SchedulerStage {
         match option {
             SchedulerKind::ThreadLocalSchedulers => (
                 Self {
-                    scheduler_thread_handle: None,
+                    scheduler_thread_handles: vec![],
                 },
                 None,
                 None,
@@ -139,7 +139,7 @@ impl SchedulerStage {
 
                 (
                     Self {
-                        scheduler_thread_handle: Some(Self::start_multi_iterator_scheduler_thread(
+                        scheduler_thread_handles: Self::start_multi_iterator_scheduler_thread(
                             num_non_vote_threads,
                             packet_receiver,
                             bank_forks,
@@ -147,7 +147,7 @@ impl SchedulerStage {
                             cluster_info,
                             transaction_senders,
                             processed_transactions_receiver,
-                        )),
+                        ),
                     },
                     Some(transaction_receivers),
                     Some(processed_transactions_sender),
@@ -157,11 +157,11 @@ impl SchedulerStage {
     }
 
     pub fn join(self) -> std::thread::Result<()> {
-        if let Some(handle) = self.scheduler_thread_handle {
-            handle.join()
-        } else {
-            Ok(())
+        for handle in self.scheduler_thread_handles {
+            handle.join()?;
         }
+
+        Ok(())
     }
 
     fn start_multi_iterator_scheduler_thread(
@@ -172,7 +172,7 @@ impl SchedulerStage {
         cluster_info: &ClusterInfo,
         transaction_senders: Vec<ScheduledTransactionsSender>,
         processed_transactions_receiver: ProcessedTransactionsReceiver,
-    ) -> JoinHandle<()> {
+    ) -> Vec<JoinHandle<()>> {
         let scheduler = MultiIteratorScheduler::new(
             num_executor_threads,
             DecisionMaker::new(cluster_info.my_contact_info().id, poh_recorder),
@@ -183,12 +183,12 @@ impl SchedulerStage {
             100_000,
         );
 
-        std::thread::Builder::new()
+        vec![std::thread::Builder::new()
             .name("solCMISched".to_owned())
             .spawn(move || {
                 scheduler.run();
             })
-            .unwrap()
+            .unwrap()]
     }
 
     fn create_channel_pairs<T>(num_executor_threads: usize) -> (Vec<Sender<T>>, Vec<Receiver<T>>) {
