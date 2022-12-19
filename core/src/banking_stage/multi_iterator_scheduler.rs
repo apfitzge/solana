@@ -450,7 +450,11 @@ impl MultiIteratorScheduler {
 
             // Push retryable packets back into the buffer
             let (_, buffer_time_us) = measure_us!(if retryable {
-                self.metrics.retryable_packet_count += 1;
+                if processed_transactions.invalidated {
+                    self.metrics.invalidated_packet_count += 1;
+                } else {
+                    self.metrics.retryable_packet_count += 1;
+                }
                 self.push_priority_queue(TransactionPacket {
                     packet,
                     transaction,
@@ -713,6 +717,7 @@ struct MultiIteratorSchedulerMetrics {
 
     // Misc metrics
     retryable_packet_count: usize,
+    invalidated_packet_count: usize,
     dropped_packet_count: usize,
 }
 
@@ -752,6 +757,7 @@ impl Default for MultiIteratorSchedulerMetrics {
             forward_max_batch_size: 0,
             schedule_forward_time_us: 0,
             retryable_packet_count: 0,
+            invalidated_packet_count: 0,
             dropped_packet_count: 0,
         }
     }
@@ -858,6 +864,11 @@ impl MultiIteratorSchedulerMetrics {
                     i64
                 ),
                 ("retryable_packet_count", self.retryable_packet_count, i64),
+                (
+                    "invalidated_packet_count",
+                    self.invalidated_packet_count,
+                    i64
+                ),
                 ("dropped_packet_count", self.dropped_packet_count, i64),
             );
             self.reset();
@@ -897,6 +908,7 @@ impl MultiIteratorSchedulerMetrics {
         self.forward_max_batch_size = 0;
         self.schedule_forward_time_us = 0;
         self.retryable_packet_count = 0;
+        self.invalidated_packet_count = 0;
         self.dropped_packet_count = 0;
     }
 }
