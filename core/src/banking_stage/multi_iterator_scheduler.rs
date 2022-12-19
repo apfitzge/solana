@@ -116,9 +116,19 @@ impl MultiIteratorScheduler {
         loop {
             let decision = self.decision_maker.make_consume_or_forward_decision();
             match decision {
-                BufferedPacketsDecision::Consume(bank_start) => self.schedule_consume(bank_start),
-                BufferedPacketsDecision::Forward => self.schedule_forward(false),
-                BufferedPacketsDecision::ForwardAndHold => self.schedule_forward(true),
+                BufferedPacketsDecision::Consume(bank_start) => {
+                    let (_, schedule_consume_time_us) =
+                        measure_us!(self.schedule_consume(bank_start));
+                    self.metrics.schedule_consume_time_us += schedule_consume_time_us;
+                }
+                BufferedPacketsDecision::Forward => {
+                    let (_, schedule_forward_time_us) = measure_us!(self.schedule_forward(false));
+                    self.metrics.schedule_forward_time_us += schedule_forward_time_us;
+                }
+                BufferedPacketsDecision::ForwardAndHold => {
+                    let (_, schedule_forward_time_us) = measure_us!(self.schedule_forward(true));
+                    self.metrics.schedule_forward_time_us += schedule_forward_time_us;
+                }
                 BufferedPacketsDecision::Hold => {}
             }
 
@@ -336,6 +346,14 @@ impl MultiIteratorScheduler {
                 if batch.packets.is_empty() {
                     continue;
                 }
+
+                let packet_count = batch.packets.len();
+                self.metrics.forward_batch_count += 1;
+                self.metrics.forward_packet_count += packet_count;
+                self.metrics.forward_min_batch_size =
+                    self.metrics.forward_min_batch_size.min(packet_count);
+                self.metrics.forward_max_batch_size =
+                    self.metrics.forward_max_batch_size.max(packet_count);
 
                 self.transaction_senders[thread_index]
                     .send(batch)
@@ -651,10 +669,18 @@ struct MultiIteratorSchedulerMetrics {
     consumed_min_batch_size: usize,
     consumed_max_batch_size: usize,
     max_consumed_buffer_size: usize,
+    schedule_consume_time_us: u64,
     max_consume_iterator_time_us: u64,
     total_consume_iterator_time_us: u64,
     consume_drain_queue_time_us: u64,
     consume_push_queue_time_us: u64,
+
+    // Forward metrics
+    forward_batch_count: usize,
+    forward_packet_count: usize,
+    forward_min_batch_size: usize,
+    forward_max_batch_size: usize,
+    schedule_forward_time_us: u64,
 
     // Misc metrics
     retryable_packet_count: usize,
@@ -678,10 +704,16 @@ impl Default for MultiIteratorSchedulerMetrics {
             consumed_min_batch_size: usize::MAX,
             consumed_max_batch_size: 0,
             max_consumed_buffer_size: 0,
+            schedule_consume_time_us: 0,
             max_consume_iterator_time_us: 0,
             consume_drain_queue_time_us: 0,
             consume_push_queue_time_us: 0,
             total_consume_iterator_time_us: 0,
+            forward_batch_count: 0,
+            forward_packet_count: 0,
+            forward_min_batch_size: usize::MAX,
+            forward_max_batch_size: 0,
+            schedule_forward_time_us: 0,
             retryable_packet_count: 0,
             dropped_packet_count: 0,
         }
@@ -719,6 +751,11 @@ impl MultiIteratorSchedulerMetrics {
                     i64
                 ),
                 (
+                    "schedule_consume_time_us",
+                    self.schedule_consume_time_us,
+                    i64
+                ),
+                (
                     "total_consume_iterator_time_us",
                     self.total_consume_iterator_time_us,
                     i64
@@ -736,6 +773,15 @@ impl MultiIteratorSchedulerMetrics {
                 (
                     "consume_push_queue_time_us",
                     self.consume_push_queue_time_us,
+                    i64
+                ),
+                ("forward_batch_count", self.forward_batch_count, i64),
+                ("forward_packet_count", self.forward_packet_count, i64),
+                ("forward_min_batch_size", self.forward_min_batch_size, i64),
+                ("forward_max_batch_size", self.forward_max_batch_size, i64),
+                (
+                    "schedule_forward_time_us",
+                    self.schedule_forward_time_us,
                     i64
                 ),
                 ("retryable_packet_count", self.retryable_packet_count, i64),
@@ -759,10 +805,15 @@ impl MultiIteratorSchedulerMetrics {
         self.consumed_min_batch_size = usize::MAX;
         self.consumed_max_batch_size = 0;
         self.max_consumed_buffer_size = 0;
+        self.schedule_consume_time_us = 0;
         self.total_consume_iterator_time_us = 0;
         self.max_consume_iterator_time_us = 0;
         self.consume_drain_queue_time_us = 0;
         self.consume_push_queue_time_us = 0;
+        self.forward_batch_count = 0;
+        self.forward_packet_count = 0;
+        self.forward_min_batch_size = usize::MAX;
+        self.forward_max_batch_size = 0;
         self.retryable_packet_count = 0;
         self.dropped_packet_count = 0;
     }
