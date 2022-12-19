@@ -81,12 +81,4 @@ impl SchedulerHandle {
             ),
         }
     }
-
-    /// Join the scheduler thread if it exists
-    pub fn join(self) -> Result<(), SchedulerError> {
-        match self {
-            Self::ThreadLocalScheduler(_) => Ok(()),
-            Self::ExternalScheduler(_) => Ok(()),
-        }
-    }
 }
