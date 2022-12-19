@@ -580,6 +580,7 @@ impl MultiIteratorScheduler {
     fn push_priority_queue(&mut self, transaction_packet: TransactionPacket) {
         if self.priority_queue.len() == self.priority_queue.capacity() {
             self.priority_queue.push_pop_min(transaction_packet);
+            self.metrics.dropped_packet_count += 1;
         } else {
             self.priority_queue.push(transaction_packet);
         }
@@ -655,8 +656,9 @@ struct MultiIteratorSchedulerMetrics {
     consume_drain_queue_time_us: u64,
     consume_push_queue_time_us: u64,
 
-    // Retryable packet metrics
+    // Misc metrics
     retryable_packet_count: usize,
+    dropped_packet_count: usize,
 }
 
 impl Default for MultiIteratorSchedulerMetrics {
@@ -681,6 +683,7 @@ impl Default for MultiIteratorSchedulerMetrics {
             consume_push_queue_time_us: 0,
             total_consume_iterator_time_us: 0,
             retryable_packet_count: 0,
+            dropped_packet_count: 0,
         }
     }
 }
@@ -736,6 +739,7 @@ impl MultiIteratorSchedulerMetrics {
                     i64
                 ),
                 ("retryable_packet_count", self.retryable_packet_count, i64),
+                ("dropped_packet_count", self.dropped_packet_count, i64),
             );
             self.reset();
         }
@@ -760,5 +764,6 @@ impl MultiIteratorSchedulerMetrics {
         self.consume_drain_queue_time_us = 0;
         self.consume_push_queue_time_us = 0;
         self.retryable_packet_count = 0;
+        self.dropped_packet_count = 0;
     }
 }
