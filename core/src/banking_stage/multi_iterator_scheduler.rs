@@ -122,8 +122,9 @@ impl MultiIteratorScheduler {
                 BufferedPacketsDecision::Hold => {}
             }
 
-            let (receive_result, receive_time_us) = measure_us!(self.receive_and_buffer_packets());
-            self.metrics.receive_packet_time_us += receive_time_us;
+            let (receive_result, receive_and_buffer_time_us) =
+                measure_us!(self.receive_and_buffer_packets());
+            self.metrics.receive_and_buffer_time_us += receive_and_buffer_time_us;
             if receive_result.is_err() {
                 break;
             }
@@ -359,11 +360,17 @@ impl MultiIteratorScheduler {
         };
         let remaining_capacity = self.remaining_capacity();
 
-        match self
+        let (receive_packet_results, receive_packets_time_us) = measure_us!(self
             .packet_deserializer
-            .handle_received_packets(timeout, remaining_capacity)
-        {
-            Ok(receive_packet_results) => self.insert_received_packets(receive_packet_results),
+            .handle_received_packets(timeout, remaining_capacity));
+        self.metrics.receive_packets_time_us += receive_packets_time_us;
+
+        match receive_packet_results {
+            Ok(receive_packet_results) => {
+                let (_, buffer_new_packets_time_us) =
+                    measure_us!(self.insert_received_packets(receive_packet_results));
+                self.metrics.buffer_new_packets_time_us += buffer_new_packets_time_us;
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(SchedulerError::PacketReceiverDisconnected)
             }
@@ -626,8 +633,14 @@ impl MultiIteratorSchedulerForwardPayload {
 
 struct MultiIteratorSchedulerMetrics {
     last_reported: AtomicInterval,
+
+    // Receive and buffer metrics
     received_packet_count: usize,
-    receive_packet_time_us: u64,
+    receive_and_buffer_time_us: u64,
+    receive_packets_time_us: u64,
+    buffer_new_packets_time_us: u64,
+
+    // Consume metrics
     conflict_batch_count: usize,
     conflict_locks_count: usize,
     conflict_batch_time_us: u64,
@@ -641,6 +654,8 @@ struct MultiIteratorSchedulerMetrics {
     total_consume_iterator_time_us: u64,
     consume_drain_queue_time_us: u64,
     consume_push_queue_time_us: u64,
+
+    // Retryable packet metrics
     retryable_packet_count: usize,
 }
 
@@ -649,7 +664,9 @@ impl Default for MultiIteratorSchedulerMetrics {
         Self {
             last_reported: AtomicInterval::default(),
             received_packet_count: 0,
-            receive_packet_time_us: 0,
+            receive_and_buffer_time_us: 0,
+            receive_packets_time_us: 0,
+            buffer_new_packets_time_us: 0,
             conflict_batch_count: 0,
             conflict_locks_count: 0,
             conflict_batch_time_us: 0,
@@ -674,7 +691,17 @@ impl MultiIteratorSchedulerMetrics {
             datapoint_info!(
                 "multi_iterator_scheduler",
                 ("received_packet_count", self.received_packet_count, i64),
-                ("receive_packet_time_us", self.receive_packet_time_us, i64),
+                (
+                    "receive_and_buffer_time_us",
+                    self.receive_and_buffer_time_us,
+                    i64
+                ),
+                ("receive_packets_time_us", self.receive_packets_time_us, i64),
+                (
+                    "buffer_new_packets_time_us",
+                    self.buffer_new_packets_time_us,
+                    i64
+                ),
                 ("conflict_batch_count", self.conflict_batch_count, i64),
                 ("conflict_locks_count", self.conflict_locks_count, i64),
                 ("conflict_batch_time_us", self.conflict_batch_time_us, i64),
@@ -716,7 +743,9 @@ impl MultiIteratorSchedulerMetrics {
 
     fn reset(&mut self) {
         self.received_packet_count = 0;
-        self.receive_packet_time_us = 0;
+        self.receive_and_buffer_time_us = 0;
+        self.receive_packets_time_us = 0;
+        self.buffer_new_packets_time_us = 0;
         self.conflict_batch_count = 0;
         self.conflict_locks_count = 0;
         self.conflict_batch_time_us = 0;
