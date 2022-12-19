@@ -75,6 +75,7 @@ pub struct ProcessedTransactions {
     pub packets: Vec<DeserializedPacket>,
     pub transactions: Vec<SanitizedTransaction>,
     pub retryable: Vec<bool>,
+    pub invalidated: bool,
 }
 
 pub type ScheduledTransactionsSender = Sender<ScheduledTransactions>;

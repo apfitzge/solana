@@ -90,6 +90,7 @@ impl ExternalSchedulerHandle {
                 packets: scheduled_transactions.packets,
                 transactions: scheduled_transactions.transactions,
                 retryable: vec![true; num_packets],
+                invalidated: true,
             };
         }
 
@@ -124,6 +125,7 @@ impl ExternalSchedulerHandle {
                     packets: scheduled_transactions.packets,
                     transactions: scheduled_transactions.transactions,
                     retryable,
+                    invalidated: false,
                 }
             }
             BufferedPacketsDecision::Forward => {
@@ -177,6 +179,7 @@ impl ExternalSchedulerHandle {
                     packets,
                     transactions,
                     retryable: vec![true; num_transactions],
+                    invalidated: false,
                 }
             }
 
