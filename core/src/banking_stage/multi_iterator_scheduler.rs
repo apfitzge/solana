@@ -114,22 +114,29 @@ impl MultiIteratorScheduler {
 
     pub fn run(mut self) {
         loop {
-            let decision = self.decision_maker.make_consume_or_forward_decision();
+            let (decision, make_decision_time_us) =
+                measure_us!(self.decision_maker.make_consume_or_forward_decision());
+            self.metrics.make_decision_time_us += make_decision_time_us;
             match decision {
                 BufferedPacketsDecision::Consume(bank_start) => {
+                    self.metrics.make_decision_consume_count += 1;
                     let (_, schedule_consume_time_us) =
                         measure_us!(self.schedule_consume(bank_start));
                     self.metrics.schedule_consume_time_us += schedule_consume_time_us;
                 }
                 BufferedPacketsDecision::Forward => {
+                    self.metrics.make_decision_forward_count += 1;
                     let (_, schedule_forward_time_us) = measure_us!(self.schedule_forward(false));
                     self.metrics.schedule_forward_time_us += schedule_forward_time_us;
                 }
                 BufferedPacketsDecision::ForwardAndHold => {
+                    self.metrics.make_decision_forward_count += 1;
                     let (_, schedule_forward_time_us) = measure_us!(self.schedule_forward(true));
                     self.metrics.schedule_forward_time_us += schedule_forward_time_us;
                 }
-                BufferedPacketsDecision::Hold => {}
+                BufferedPacketsDecision::Hold => {
+                    self.metrics.make_decision_hold_count += 1;
+                }
             }
 
             let (receive_result, receive_and_buffer_time_us) =
@@ -659,6 +666,12 @@ struct MultiIteratorSchedulerMetrics {
     receive_packets_time_us: u64,
     buffer_new_packets_time_us: u64,
 
+    // Decision making metrics
+    make_decision_consume_count: usize,
+    make_decision_forward_count: usize,
+    make_decision_hold_count: usize,
+    make_decision_time_us: u64,
+
     // Consume metrics
     conflict_batch_count: usize,
     conflict_locks_count: usize,
@@ -695,6 +708,10 @@ impl Default for MultiIteratorSchedulerMetrics {
             receive_and_buffer_time_us: 0,
             receive_packets_time_us: 0,
             buffer_new_packets_time_us: 0,
+            make_decision_consume_count: 0,
+            make_decision_forward_count: 0,
+            make_decision_hold_count: 0,
+            make_decision_time_us: 0,
             conflict_batch_count: 0,
             conflict_locks_count: 0,
             conflict_batch_time_us: 0,
@@ -737,6 +754,22 @@ impl MultiIteratorSchedulerMetrics {
                     self.buffer_new_packets_time_us,
                     i64
                 ),
+                (
+                    "make_decision_consume_count",
+                    self.make_decision_consume_count,
+                    i64
+                ),
+                (
+                    "make_decision_forward_count",
+                    self.make_decision_forward_count,
+                    i64
+                ),
+                (
+                    "make_decision_hold_count",
+                    self.make_decision_hold_count,
+                    i64
+                ),
+                ("make_decision_time_us", self.make_decision_time_us, i64),
                 ("conflict_batch_count", self.conflict_batch_count, i64),
                 ("conflict_locks_count", self.conflict_locks_count, i64),
                 ("conflict_batch_time_us", self.conflict_batch_time_us, i64),
@@ -796,6 +829,10 @@ impl MultiIteratorSchedulerMetrics {
         self.receive_and_buffer_time_us = 0;
         self.receive_packets_time_us = 0;
         self.buffer_new_packets_time_us = 0;
+        self.make_decision_consume_count = 0;
+        self.make_decision_forward_count = 0;
+        self.make_decision_hold_count = 0;
+        self.make_decision_time_us = 0;
         self.conflict_batch_count = 0;
         self.conflict_locks_count = 0;
         self.conflict_batch_time_us = 0;
