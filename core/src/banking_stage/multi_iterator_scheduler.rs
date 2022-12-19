@@ -411,7 +411,9 @@ impl MultiIteratorScheduler {
 
     fn receive_processed_transactions(&mut self) -> Result<(), SchedulerError> {
         loop {
-            let processed_transactions = self.processed_transaction_receiver.try_recv();
+            let (processed_transactions, receive_time_us) =
+                measure_us!(self.processed_transaction_receiver.try_recv());
+            self.metrics.processed_transactions_recv_time_us += receive_time_us;
             match processed_transactions {
                 Ok(processed_transactions) => {
                     self.handle_processed_transactions(processed_transactions)?;
@@ -436,21 +438,25 @@ impl MultiIteratorScheduler {
             .zip(processed_transactions.retryable.into_iter())
         {
             // Unlock accounts
-            let transaction_account_locks = transaction.get_account_locks_unchecked();
-            self.account_locks.unlock_accounts(
-                transaction_account_locks.writable.into_iter(),
-                transaction_account_locks.readonly.into_iter(),
-                processed_transactions.thread_id,
-            );
+            let (_, unlock_time_us) = measure_us!({
+                let transaction_account_locks = transaction.get_account_locks_unchecked();
+                self.account_locks.unlock_accounts(
+                    transaction_account_locks.writable.into_iter(),
+                    transaction_account_locks.readonly.into_iter(),
+                    processed_transactions.thread_id,
+                );
+            });
+            self.metrics.processed_transactions_unlock_time_us += unlock_time_us;
 
             // Push retryable packets back into the buffer
-            if retryable {
+            let (_, buffer_time_us) = measure_us!(if retryable {
                 self.metrics.retryable_packet_count += 1;
                 self.push_priority_queue(TransactionPacket {
                     packet,
                     transaction,
                 });
-            }
+            });
+            self.metrics.processed_transactions_buffer_time_us += buffer_time_us;
         }
 
         Ok(())
@@ -670,6 +676,12 @@ struct MultiIteratorSchedulerMetrics {
     receive_packets_time_us: u64,
     buffer_new_packets_time_us: u64,
 
+    // Receive processed transactions time
+    receive_processed_transactions_time_us: u64,
+    processed_transactions_recv_time_us: u64,
+    processed_transactions_unlock_time_us: u64,
+    processed_transactions_buffer_time_us: u64,
+
     // Decision making metrics
     make_decision_consume_count: usize,
     make_decision_forward_count: usize,
@@ -700,7 +712,6 @@ struct MultiIteratorSchedulerMetrics {
     schedule_forward_time_us: u64,
 
     // Misc metrics
-    receive_processed_transactions_time_us: u64,
     retryable_packet_count: usize,
     dropped_packet_count: usize,
 }
@@ -713,6 +724,10 @@ impl Default for MultiIteratorSchedulerMetrics {
             receive_and_buffer_time_us: 0,
             receive_packets_time_us: 0,
             buffer_new_packets_time_us: 0,
+            receive_processed_transactions_time_us: 0,
+            processed_transactions_recv_time_us: 0,
+            processed_transactions_unlock_time_us: 0,
+            processed_transactions_buffer_time_us: 0,
             make_decision_consume_count: 0,
             make_decision_forward_count: 0,
             make_decision_hold_count: 0,
@@ -736,7 +751,6 @@ impl Default for MultiIteratorSchedulerMetrics {
             forward_min_batch_size: usize::MAX,
             forward_max_batch_size: 0,
             schedule_forward_time_us: 0,
-            receive_processed_transactions_time_us: 0,
             retryable_packet_count: 0,
             dropped_packet_count: 0,
         }
@@ -758,6 +772,26 @@ impl MultiIteratorSchedulerMetrics {
                 (
                     "buffer_new_packets_time_us",
                     self.buffer_new_packets_time_us,
+                    i64
+                ),
+                (
+                    "receive_processed_transactions_time_us",
+                    self.receive_processed_transactions_time_us,
+                    i64
+                ),
+                (
+                    "processed_transactions_recv_time_us",
+                    self.processed_transactions_recv_time_us,
+                    i64
+                ),
+                (
+                    "processed_transactions_unlock_time_us",
+                    self.processed_transactions_unlock_time_us,
+                    i64
+                ),
+                (
+                    "processed_transactions_buffer_time_us",
+                    self.processed_transactions_buffer_time_us,
                     i64
                 ),
                 (
@@ -823,11 +857,6 @@ impl MultiIteratorSchedulerMetrics {
                     self.schedule_forward_time_us,
                     i64
                 ),
-                (
-                    "receive_processed_transactions_time_us",
-                    self.receive_processed_transactions_time_us,
-                    i64
-                ),
                 ("retryable_packet_count", self.retryable_packet_count, i64),
                 ("dropped_packet_count", self.dropped_packet_count, i64),
             );
@@ -840,6 +869,10 @@ impl MultiIteratorSchedulerMetrics {
         self.receive_and_buffer_time_us = 0;
         self.receive_packets_time_us = 0;
         self.buffer_new_packets_time_us = 0;
+        self.receive_processed_transactions_time_us = 0;
+        self.processed_transactions_recv_time_us = 0;
+        self.processed_transactions_unlock_time_us = 0;
+        self.processed_transactions_buffer_time_us = 0;
         self.make_decision_consume_count = 0;
         self.make_decision_forward_count = 0;
         self.make_decision_hold_count = 0;
@@ -863,7 +896,6 @@ impl MultiIteratorSchedulerMetrics {
         self.forward_min_batch_size = usize::MAX;
         self.forward_max_batch_size = 0;
         self.schedule_forward_time_us = 0;
-        self.receive_processed_transactions_time_us = 0;
         self.retryable_packet_count = 0;
         self.dropped_packet_count = 0;
     }
