@@ -146,7 +146,11 @@ impl MultiIteratorScheduler {
                 break;
             }
 
-            if self.receive_processed_transactions().is_err() {
+            let (receive_processed_transactions_result, receive_processed_transactions_time_us) =
+                measure_us!(self.receive_processed_transactions());
+            self.metrics.receive_processed_transactions_time_us +=
+                receive_processed_transactions_time_us;
+            if receive_processed_transactions_result.is_err() {
                 break;
             }
 
@@ -696,6 +700,7 @@ struct MultiIteratorSchedulerMetrics {
     schedule_forward_time_us: u64,
 
     // Misc metrics
+    receive_processed_transactions_time_us: u64,
     retryable_packet_count: usize,
     dropped_packet_count: usize,
 }
@@ -731,6 +736,7 @@ impl Default for MultiIteratorSchedulerMetrics {
             forward_min_batch_size: usize::MAX,
             forward_max_batch_size: 0,
             schedule_forward_time_us: 0,
+            receive_processed_transactions_time_us: 0,
             retryable_packet_count: 0,
             dropped_packet_count: 0,
         }
@@ -817,6 +823,11 @@ impl MultiIteratorSchedulerMetrics {
                     self.schedule_forward_time_us,
                     i64
                 ),
+                (
+                    "receive_processed_transactions_time_us",
+                    self.receive_processed_transactions_time_us,
+                    i64
+                ),
                 ("retryable_packet_count", self.retryable_packet_count, i64),
                 ("dropped_packet_count", self.dropped_packet_count, i64),
             );
@@ -843,14 +854,16 @@ impl MultiIteratorSchedulerMetrics {
         self.consumed_max_batch_size = 0;
         self.max_consumed_buffer_size = 0;
         self.schedule_consume_time_us = 0;
-        self.total_consume_iterator_time_us = 0;
         self.max_consume_iterator_time_us = 0;
         self.consume_drain_queue_time_us = 0;
         self.consume_push_queue_time_us = 0;
+        self.total_consume_iterator_time_us = 0;
         self.forward_batch_count = 0;
         self.forward_packet_count = 0;
         self.forward_min_batch_size = usize::MAX;
         self.forward_max_batch_size = 0;
+        self.schedule_forward_time_us = 0;
+        self.receive_processed_transactions_time_us = 0;
         self.retryable_packet_count = 0;
         self.dropped_packet_count = 0;
     }
