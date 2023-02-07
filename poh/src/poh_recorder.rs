@@ -13,7 +13,7 @@
 pub use solana_sdk::clock::Slot;
 use {
     crate::poh_service::PohService,
-    crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, SendError, Sender, TrySendError},
+    crossbeam_channel::{unbounded, Receiver, SendError, Sender, TrySendError},
     log::*,
     solana_entry::{entry::Entry, poh::Poh},
     solana_ledger::{
@@ -23,17 +23,14 @@ use {
     },
     solana_measure::measure,
     solana_metrics::poh_timing_point::{send_poh_timing_point, PohTimingSender, SlotPohTimingInfo},
-    solana_runtime::bank::Bank,
+    solana_runtime::{bank::Bank, bank_status::BankStatus},
     solana_sdk::{
         clock::NUM_CONSECUTIVE_LEADER_SLOTS, hash::Hash, poh_config::PohConfig, pubkey::Pubkey,
         transaction::VersionedTransaction,
     },
     std::{
         cmp,
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc, Mutex, RwLock,
-        },
+        sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
         time::{Duration, Instant},
     },
     thiserror::Error,
@@ -114,25 +111,27 @@ impl Record {
     }
 }
 
+#[derive(Clone)]
 pub struct TransactionRecorder {
     // shared by all users of PohRecorder
     pub record_sender: Sender<Record>,
     pub is_exited: Arc<AtomicBool>,
-}
-
-impl Clone for TransactionRecorder {
-    fn clone(&self) -> Self {
-        TransactionRecorder::new(self.record_sender.clone(), self.is_exited.clone())
-    }
+    pub bank_status: Arc<BankStatus>,
 }
 
 impl TransactionRecorder {
-    pub fn new(record_sender: Sender<Record>, is_exited: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        record_sender: Sender<Record>,
+        is_exited: Arc<AtomicBool>,
+        bank_status: Arc<BankStatus>,
+    ) -> Self {
         Self {
             // shared
             record_sender,
             // shared
             is_exited,
+            // shared
+            bank_status,
         }
     }
     // Returns the index of `transactions.first()` in the slot, if being tracked by WorkingBank
@@ -153,25 +152,17 @@ impl TransactionRecorder {
             return Err(PohRecorderError::MaxHeightReached);
         }
         // Besides validator exit, this timeout should primarily be seen to affect test execution environments where the various pieces can be shutdown abruptly
-        let mut is_exited = false;
-        loop {
-            let res = result_receiver.recv_timeout(Duration::from_millis(1000));
-            match res {
-                Err(RecvTimeoutError::Timeout) => {
-                    if is_exited {
-                        return Err(PohRecorderError::MaxHeightReached);
-                    } else {
-                        // A result may have come in between when we timed out checking this
-                        // bool, so check the channel again, even if is_exited == true
-                        is_exited = self.is_exited.load(Ordering::SeqCst);
-                    }
+        let res = result_receiver.recv_timeout(Duration::from_millis(1000));
+        match res {
+            Err(_) => {
+                self.bank_status.bank_reached_end_of_slot();
+                Err(PohRecorderError::MaxHeightReached)
+            }
+            Ok(result) => {
+                if result.is_err() {
+                    self.bank_status.bank_reached_end_of_slot();
                 }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(PohRecorderError::MaxHeightReached);
-                }
-                Ok(result) => {
-                    return result;
-                }
+                result
             }
         }
     }
@@ -243,6 +234,7 @@ pub struct PohRecorder {
     ticks_from_record: u64,
     last_metric: Instant,
     record_sender: Sender<Record>,
+    pub bank_status: Arc<BankStatus>,
     pub is_exited: Arc<AtomicBool>,
 }
 
@@ -357,7 +349,11 @@ impl PohRecorder {
     }
 
     pub fn recorder(&self) -> TransactionRecorder {
-        TransactionRecorder::new(self.record_sender.clone(), self.is_exited.clone())
+        TransactionRecorder::new(
+            self.record_sender.clone(),
+            self.is_exited.clone(),
+            self.bank_status.clone(),
+        )
     }
 
     fn is_same_fork_as_previous_leader(&self, slot: Slot) -> bool {
@@ -882,6 +878,7 @@ impl PohRecorder {
                 ticks_from_record: 0,
                 last_metric: Instant::now(),
                 record_sender,
+                bank_status: Arc::new(BankStatus::default()),
                 is_exited,
             },
             receiver,

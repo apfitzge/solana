@@ -477,6 +477,7 @@ impl ReplayStage {
                     let r_bank_forks = bank_forks.read().unwrap();
                     (r_bank_forks.working_bank(), r_bank_forks.get_vote_only_mode_signal())
                 };
+                let bank_status = poh_recorder.read().unwrap().bank_status.clone();
 
                 Self::reset_poh_recorder(
                     &my_pubkey,
@@ -891,6 +892,7 @@ impl ReplayStage {
                     if !tpu_has_bank {
                         Self::maybe_start_leader(
                             &my_pubkey,
+                            &bank_status,
                             &bank_forks,
                             &poh_recorder,
                             &leader_schedule_cache,
@@ -1592,6 +1594,7 @@ impl ReplayStage {
     #[allow(clippy::too_many_arguments)]
     fn maybe_start_leader(
         my_pubkey: &Pubkey,
+        bank_status: &Arc<solana_runtime::bank_status::BankStatus>,
         bank_forks: &Arc<RwLock<BankForks>>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         leader_schedule_cache: &Arc<LeaderScheduleCache>,
@@ -1725,6 +1728,9 @@ impl ReplayStage {
                 .write()
                 .unwrap()
                 .set_bank(&tpu_bank, track_transaction_indexes);
+
+            // Bank inserted into recorder. Mark the bank as ready for use
+            bank_status.bank_created();
         } else {
             error!("{} No next leader found", my_pubkey);
         }
