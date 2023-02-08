@@ -1724,13 +1724,12 @@ impl ReplayStage {
             );
 
             let tpu_bank = bank_forks.write().unwrap().insert(tpu_bank);
+            // Bank inserted into recorder. Mark the bank as ready for use
+            bank_status.bank_created(&tpu_bank);
             poh_recorder
                 .write()
                 .unwrap()
                 .set_bank(&tpu_bank, track_transaction_indexes);
-
-            // Bank inserted into recorder. Mark the bank as ready for use
-            bank_status.bank_created();
         } else {
             error!("{} No next leader found", my_pubkey);
         }

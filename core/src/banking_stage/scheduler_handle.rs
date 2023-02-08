@@ -11,7 +11,7 @@ use {
         tracer_packet_stats::TracerPacketStats,
         unprocessed_transaction_storage::UnprocessedTransactionStorage,
     },
-    solana_runtime::bank_forks::BankForks,
+    solana_runtime::{bank_forks::BankForks, bank_status::BankStatus},
     std::sync::{Arc, RwLock},
 };
 
@@ -61,6 +61,7 @@ impl SchedulerHandle {
     /// Do work that is scheduled
     pub fn do_scheduled_work(
         &mut self,
+        bank_status: &BankStatus,
         consume_executor: &ConsumeExecutor,
         forward_executor: &ForwardExecutor,
         tracer_packet_stats: &mut TracerPacketStats,
@@ -75,6 +76,7 @@ impl SchedulerHandle {
                     slot_metrics_tracker,
                 ),
             Self::ExternalScheduler(external_scheduler) => external_scheduler.do_scheduled_work(
+                bank_status,
                 consume_executor,
                 forward_executor,
                 slot_metrics_tracker,

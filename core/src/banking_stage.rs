@@ -28,8 +28,8 @@ use {
     solana_perf::{data_budget::DataBudget, packet::PacketBatch},
     solana_poh::poh_recorder::{PohRecorder, PohRecorderError},
     solana_runtime::{
-        self, bank_forks::BankForks, transaction_error_metrics::TransactionErrorMetrics,
-        vote_sender_types::ReplayVoteSender,
+        self, bank_forks::BankForks, bank_status::BankStatus,
+        transaction_error_metrics::TransactionErrorMetrics, vote_sender_types::ReplayVoteSender,
     },
     solana_sdk::{
         feature_set::allow_votes_to_directly_update_vote_state, pubkey::Pubkey,
@@ -540,6 +540,7 @@ impl BankingStage {
         transaction_status_sender: Option<TransactionStatusSender>,
         gossip_vote_sender: ReplayVoteSender,
     ) -> JoinHandle<()> {
+        let bank_status = poh_recorder.read().unwrap().bank_status.clone();
         let (forward_executor, consume_executor) = Self::build_executors(
             id,
             poh_recorder,
@@ -553,7 +554,13 @@ impl BankingStage {
         Builder::new()
             .name(format!("solBanknStgTx{:02}", id))
             .spawn(move || {
-                Self::process_loop(id, scheduler_handle, forward_executor, consume_executor);
+                Self::process_loop(
+                    id,
+                    scheduler_handle,
+                    bank_status,
+                    forward_executor,
+                    consume_executor,
+                );
             })
             .unwrap()
     }
@@ -610,6 +617,7 @@ impl BankingStage {
     fn process_loop(
         id: u32,
         mut scheduler_handle: SchedulerHandle,
+        bank_status: Arc<BankStatus>,
         forward_executor: ForwardExecutor,
         consume_executor: ConsumeExecutor,
     ) {
@@ -619,6 +627,7 @@ impl BankingStage {
         loop {
             // Do scheduled work (processing packets)
             if let Err(err) = scheduler_handle.do_scheduled_work(
+                &bank_status,
                 &consume_executor,
                 &forward_executor,
                 &mut tracer_packet_stats,

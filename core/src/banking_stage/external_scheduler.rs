@@ -13,6 +13,9 @@ use {
     },
     crossbeam_channel::TryRecvError,
     solana_measure::{measure, measure_us},
+    solana_poh::poh_recorder::BankStart,
+    solana_runtime::bank_status::BankStatus,
+    std::{sync::Arc, time::Instant},
 };
 
 /// Handle interface for interacting with an external scheduler
@@ -41,6 +44,7 @@ impl ExternalSchedulerHandle {
 
     pub fn do_scheduled_work(
         &mut self,
+        bank_status: &BankStatus,
         consume_executor: &ConsumeExecutor,
         forward_executor: &ForwardExecutor,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
@@ -50,6 +54,7 @@ impl ExternalSchedulerHandle {
                 Ok(scheduled_transactions) => {
                     let procssed_transactions = self.process_scheduled_transactions(
                         scheduled_transactions,
+                        bank_status,
                         consume_executor,
                         forward_executor,
                         slot_metrics_tracker,
@@ -77,6 +82,7 @@ impl ExternalSchedulerHandle {
     fn process_scheduled_transactions(
         &self,
         scheduled_transactions: ScheduledTransactions,
+        bank_status: &BankStatus,
         consume_executor: &ConsumeExecutor,
         forward_executor: &ForwardExecutor,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
@@ -96,6 +102,39 @@ impl ExternalSchedulerHandle {
 
         match scheduled_transactions.decision {
             BufferedPacketsDecision::Consume(ref bank_start) => {
+                let backup_bank_start;
+                let bank_start = if bank_start.reached_max_tick_height() {
+                    if let Some(bank) = bank_status.wait_for_bank() {
+                        if let Some(bank) = bank.upgrade() {
+                            backup_bank_start = BankStart {
+                                working_bank: bank,
+                                bank_creation_time: Arc::new(Instant::now()),
+                            };
+                            &backup_bank_start
+                        } else {
+                            let num_packets = scheduled_transactions.transactions.len();
+                            return ProcessedTransactions {
+                                thread_id: scheduled_transactions.thread_id,
+                                packets: scheduled_transactions.packets,
+                                transactions: scheduled_transactions.transactions,
+                                retryable: vec![true; num_packets],
+                                invalidated: true,
+                            };
+                        }
+                    } else {
+                        let num_packets = scheduled_transactions.transactions.len();
+                        return ProcessedTransactions {
+                            thread_id: scheduled_transactions.thread_id,
+                            packets: scheduled_transactions.packets,
+                            transactions: scheduled_transactions.transactions,
+                            retryable: vec![true; num_packets],
+                            invalidated: true,
+                        };
+                    }
+                } else {
+                    bank_start
+                };
+
                 slot_metrics_tracker.apply_working_bank(Some(bank_start));
                 let (process_transactions_summary, process_packets_transactions_us) =
                     measure_us!(consume_executor.process_packets_transactions(
@@ -104,9 +143,9 @@ impl ExternalSchedulerHandle {
                         &self.banking_stage_stats,
                         slot_metrics_tracker,
                     ));
-                if process_transactions_summary.reached_max_poh_height {
-                    scheduled_transactions.mark_as_invalid();
-                }
+                // if process_transactions_summary.reached_max_poh_height {
+                //     scheduled_transactions.mark_as_invalid();
+                // }
 
                 slot_metrics_tracker
                     .increment_process_packets_transactions_us(process_packets_transactions_us);
