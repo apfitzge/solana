@@ -26,6 +26,7 @@ pub struct ThreadSet {
 /// that already hold locks. This is useful for allowing queued
 /// transactions to be scheduled on a thread while the transaction is
 /// still executing on that thread.
+#[derive(Debug)]
 pub struct ThreadAwareAccountLocks {
     /// Number of threads.
     num_threads: u8,
@@ -181,6 +182,7 @@ impl ThreadAwareAccountLocks {
         match self.read_locks.entry(*pubkey) {
             Entry::Occupied(mut entry) => {
                 let (read_thread_set, read_lock_counts) = entry.get_mut();
+                assert!(read_lock_counts[thread_id as usize] > 0);
                 read_lock_counts[thread_id as usize] -= 1;
                 if read_lock_counts[thread_id as usize] == 0 {
                     read_thread_set.remove(thread_id);

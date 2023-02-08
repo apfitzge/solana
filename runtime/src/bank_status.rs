@@ -39,26 +39,3 @@ impl BankStatus {
         self.bank.read().unwrap().clone()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use {super::*, std::sync::Arc};
-
-    // #[test]
-    // fn test_bank_status() {
-    //     let bank_status = Arc::new(BankStatus::default());
-
-    //     let waiter = std::thread::spawn({
-    //         let bank_status = bank_status.clone();
-    //         move || {
-    //             bank_status.wait_for_bank();
-    //         }
-    //     });
-
-    //     bank_status.bank_reached_end_of_slot(); // no affect
-    //     assert!(!waiter.is_finished());
-
-    //     bank_status.bank_created();
-    //     waiter.join().unwrap();
-    // }
-}
