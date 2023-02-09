@@ -54,7 +54,7 @@ pub(crate) struct ProcessTransactionsSummary {
 // Metrics describing packets ingested/processed in various parts of BankingStage during this
 // validator's leader slot
 #[derive(Debug, Default)]
-struct LeaderSlotPacketCountMetrics {
+pub struct LeaderSlotPacketCountMetrics {
     // total number of transactions in the buffer that were filtered out due to things like age and
     // duplicate signature checks
     retryable_packets_filtered_count: u64,
@@ -66,7 +66,7 @@ struct LeaderSlotPacketCountMetrics {
 
     // total number of transactions that were executed and committed into the block
     // on this thread
-    committed_transactions_count: u64,
+    pub committed_transactions_count: u64,
 
     // total number of transactions that were executed, got a successful execution output/no error,
     // and were then committed into the block
@@ -234,7 +234,7 @@ pub(crate) struct LeaderSlotMetrics {
     // aggregate metrics per slot
     slot: Slot,
 
-    packet_count_metrics: LeaderSlotPacketCountMetrics,
+    pub packet_count_metrics: LeaderSlotPacketCountMetrics,
 
     transaction_error_metrics: TransactionErrorMetrics,
 
@@ -291,6 +291,14 @@ impl LeaderSlotMetricsTracker {
         Self {
             leader_slot_metrics: None,
             id,
+        }
+    }
+
+    pub(crate) fn increment_comitted_transactions_count(&mut self, count: u64) {
+        if let Some(leader_slot_metrics) = self.leader_slot_metrics.as_mut() {
+            leader_slot_metrics
+                .packet_count_metrics
+                .committed_transactions_count += count;
         }
     }
 

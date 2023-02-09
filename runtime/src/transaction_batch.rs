@@ -6,10 +6,10 @@ use {
 
 // Represents the results of trying to lock a set of accounts
 pub struct TransactionBatch<'a, 'b> {
-    lock_results: Vec<Result<()>>,
-    bank: &'a Bank,
-    sanitized_txs: Cow<'b, [SanitizedTransaction]>,
-    needs_unlock: bool,
+    pub lock_results: Vec<Result<()>>,
+    pub bank: &'a Bank,
+    pub sanitized_txs: Cow<'b, [SanitizedTransaction]>,
+    pub needs_unlock: bool,
 }
 
 impl<'a, 'b> TransactionBatch<'a, 'b> {

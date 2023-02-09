@@ -20,6 +20,7 @@ use {
     solana_program_runtime::timings::ExecuteTimings,
     solana_runtime::{
         bank::{Bank, LoadAndExecuteTransactionsOutput, TransactionCheckResult},
+        bank_status::BankStatus,
         transaction_batch::TransactionBatch,
         transaction_error_metrics::TransactionErrorMetrics,
     },
@@ -302,6 +303,98 @@ impl ConsumeExecutor {
             cost_model_throttled_transactions_count,
             cost_model_us,
             execute_and_commit_transactions_output,
+        }
+    }
+
+    /// Execute, record, and commit transactions in batch to bank. Returns vector of whether txs are retryable.
+    pub fn simplified_execution_chain(
+        &self,
+        bank_status: &BankStatus,
+        batch: &TransactionBatch,
+        slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
+    ) -> Vec<bool> {
+        let mut retryable = vec![false; batch.sanitized_transactions().len()];
+
+        loop {
+            let Some(bank) = bank_status.wait_for_bank() else { continue; };
+            let Some(bank) = bank.upgrade() else { continue; };
+
+            let mut pre_balance_info = PreBalanceInfo::default();
+            let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+
+            let LoadAndExecuteTransactionsOutput {
+                mut loaded_transactions,
+                execution_results,
+                mut retryable_transaction_indexes,
+                executed_transactions_count,
+                executed_with_successful_result_count,
+                signature_count,
+                error_counters,
+                ..
+            } = bank.load_and_execute_transactions(
+                batch,
+                MAX_PROCESSING_AGE,
+                false,
+                false,
+                false,
+                &mut execute_and_commit_timings.execute_timings,
+                None, // account_overrides
+                None,
+            );
+
+            let executed_transactions = execution_results
+                .iter()
+                .zip(batch.sanitized_transactions())
+                .filter_map(|(execution_result, tx)| {
+                    if execution_result.was_executed() {
+                        Some(tx.to_versioned_transaction())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if !executed_transactions.is_empty() {
+                let freeze_lock = bank.freeze_lock();
+
+                let RecordTransactionsSummary {
+                    result: record_transactions_result,
+                    record_transactions_timings,
+                    starting_transaction_index,
+                } = self
+                    .record_executor
+                    .record_transactions(bank.slot(), executed_transactions);
+
+                if record_transactions_result.is_ok() {
+                    self.commit_executor.commit_transactions(
+                        batch,
+                        &mut loaded_transactions,
+                        execution_results,
+                        batch.sanitized_transactions(),
+                        starting_transaction_index,
+                        &bank,
+                        &mut pre_balance_info,
+                        &mut execute_and_commit_timings,
+                        signature_count,
+                        executed_transactions_count,
+                        executed_with_successful_result_count,
+                    );
+                    slot_metrics_tracker
+                        .increment_comitted_transactions_count(executed_transactions_count as u64);
+                } else {
+                    continue; // try to execute and record these transactions again on the next bank.
+                }
+
+                drop(freeze_lock);
+            } else {
+                return retryable; // None were executable - don't retry any
+            }
+
+            for retryable_transaction_index in retryable_transaction_indexes {
+                retryable[retryable_transaction_index] = true;
+            }
+
+            return retryable;
         }
     }
 

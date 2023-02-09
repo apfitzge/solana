@@ -14,8 +14,8 @@ use {
     crossbeam_channel::TryRecvError,
     solana_measure::{measure, measure_us},
     solana_poh::poh_recorder::BankStart,
-    solana_runtime::bank_status::BankStatus,
-    std::{sync::Arc, time::Instant},
+    solana_runtime::{bank_status::BankStatus, transaction_batch::TransactionBatch},
+    std::{borrow::Cow, sync::Arc, time::Instant},
 };
 
 /// Handle interface for interacting with an external scheduler
@@ -102,63 +102,75 @@ impl ExternalSchedulerHandle {
 
         match scheduled_transactions.decision {
             BufferedPacketsDecision::Consume(ref bank_start) => {
-                let backup_bank_start;
-                let bank_start = if bank_start.reached_max_tick_height() {
-                    if let Some(bank) = bank_status.wait_for_bank() {
-                        if let Some(bank) = bank.upgrade() {
-                            backup_bank_start = BankStart {
-                                working_bank: bank,
-                                bank_creation_time: Arc::new(Instant::now()),
-                            };
-                            &backup_bank_start
-                        } else {
-                            let num_packets = scheduled_transactions.transactions.len();
-                            return ProcessedTransactions {
-                                thread_id: scheduled_transactions.thread_id,
-                                packets: scheduled_transactions.packets,
-                                transactions: scheduled_transactions.transactions,
-                                retryable: vec![true; num_packets],
-                                invalidated: true,
-                            };
-                        }
-                    } else {
-                        let num_packets = scheduled_transactions.transactions.len();
-                        return ProcessedTransactions {
-                            thread_id: scheduled_transactions.thread_id,
-                            packets: scheduled_transactions.packets,
-                            transactions: scheduled_transactions.transactions,
-                            retryable: vec![true; num_packets],
-                            invalidated: true,
-                        };
-                    }
-                } else {
-                    bank_start
-                };
+                // let backup_bank_start;
+                // let bank_start = if bank_start.reached_max_tick_height() {
+                //     if let Some(bank) = bank_status.wait_for_bank() {
+                //         if let Some(bank) = bank.upgrade() {
+                //             backup_bank_start = BankStart {
+                //                 working_bank: bank,
+                //                 bank_creation_time: Arc::new(Instant::now()),
+                //             };
+                //             &backup_bank_start
+                //         } else {
+                //             let num_packets = scheduled_transactions.transactions.len();
+                //             return ProcessedTransactions {
+                //                 thread_id: scheduled_transactions.thread_id,
+                //                 packets: scheduled_transactions.packets,
+                //                 transactions: scheduled_transactions.transactions,
+                //                 retryable: vec![true; num_packets],
+                //                 invalidated: true,
+                //             };
+                //         }
+                //     } else {
+                //         let num_packets = scheduled_transactions.transactions.len();
+                //         return ProcessedTransactions {
+                //             thread_id: scheduled_transactions.thread_id,
+                //             packets: scheduled_transactions.packets,
+                //             transactions: scheduled_transactions.transactions,
+                //             retryable: vec![true; num_packets],
+                //             invalidated: true,
+                //         };
+                //     }
+                // } else {
+                //     bank_start
+                // };
 
-                slot_metrics_tracker.apply_working_bank(Some(bank_start));
-                let (process_transactions_summary, process_packets_transactions_us) =
-                    measure_us!(consume_executor.process_packets_transactions(
-                        bank_start,
-                        &scheduled_transactions.transactions,
-                        &self.banking_stage_stats,
-                        slot_metrics_tracker,
-                    ));
+                // slot_metrics_tracker.apply_working_bank(Some(bank_start));
+                // let (process_transactions_summary, process_packets_transactions_us) =
+                //     measure_us!(consume_executor.process_packets_transactions(
+                //         bank_start,
+                //         &scheduled_transactions.transactions,
+                //         &self.banking_stage_stats,
+                //         slot_metrics_tracker,
+                //     ));
+                let batch = TransactionBatch {
+                    lock_results: vec![Ok(()); scheduled_transactions.transactions.len()],
+                    needs_unlock: false, // no locking
+                    bank: &bank_start.working_bank,
+                    sanitized_txs: Cow::Borrowed(&scheduled_transactions.transactions),
+                };
+                let retryable = consume_executor.simplified_execution_chain(
+                    bank_status,
+                    &batch,
+                    slot_metrics_tracker,
+                );
+                drop(batch);
                 // if process_transactions_summary.reached_max_poh_height {
                 //     scheduled_transactions.mark_as_invalid();
                 // }
 
-                slot_metrics_tracker
-                    .increment_process_packets_transactions_us(process_packets_transactions_us);
+                // slot_metrics_tracker
+                //     .increment_process_packets_transactions_us(process_packets_transactions_us);
 
-                let retryable_transaction_indexes =
-                    process_transactions_summary.retryable_transaction_indexes;
-                slot_metrics_tracker
-                    .increment_retryable_packets_count(retryable_transaction_indexes.len() as u64);
+                // let retryable_transaction_indexes =
+                //     process_transactions_summary.retryable_transaction_indexes;
+                // slot_metrics_tracker
+                //     .increment_retryable_packets_count(retryable_transaction_indexes.len() as u64);
 
-                let mut retryable = vec![false; scheduled_transactions.transactions.len()];
-                for retryable_transaction_index in retryable_transaction_indexes {
-                    retryable[retryable_transaction_index] = true;
-                }
+                // let mut retryable = vec![false; scheduled_transactions.transactions.len()];
+                // for retryable_transaction_index in retryable_transaction_indexes {
+                //     retryable[retryable_transaction_index] = true;
+                // }
                 ProcessedTransactions {
                     thread_id: scheduled_transactions.thread_id,
                     packets: scheduled_transactions.packets,
