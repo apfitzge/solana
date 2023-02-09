@@ -35,12 +35,10 @@ use {
             MAX_TRANSACTION_FORWARDING_DELAY, MAX_TRANSACTION_FORWARDING_DELAY_GPU,
         },
         nonce::state::DurableNonce,
-        pubkey::Pubkey,
         timing::AtomicInterval,
         transaction::SanitizedTransaction,
     },
     std::{
-        collections::HashMap,
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -100,8 +98,8 @@ pub struct MultiIteratorScheduler {
     metrics: MultiIteratorSchedulerMetrics,
     /// Indexer
     indexer: u64,
-    /// mappy
-    mappy: [HashMap<Pubkey, u64>; 4],
+    /// Outstanding transaction count per-thread
+    outstanding_transaction_counts: [u64; 8],
 }
 
 impl MultiIteratorScheduler {
@@ -126,17 +124,11 @@ impl MultiIteratorScheduler {
             processed_transaction_receiver,
             metrics: MultiIteratorSchedulerMetrics::default(),
             indexer: u64::MAX,
-            mappy: [
-                HashMap::with_capacity(200_000),
-                HashMap::with_capacity(200_000),
-                HashMap::with_capacity(200_000),
-                HashMap::with_capacity(200_000),
-            ],
+            outstanding_transaction_counts: [0; 8],
         }
     }
 
     pub fn run(mut self) {
-        let mut last_time = Instant::now();
         loop {
             let (decision, make_decision_time_us) =
                 measure_us!(self.decision_maker.make_consume_or_forward_decision());
@@ -179,17 +171,6 @@ impl MultiIteratorScheduler {
             }
 
             self.metrics.report(1000);
-
-            if last_time.elapsed().as_millis() > 1000 {
-                // Report top-10 accounts per thread w/ counts
-                for thread_index in 0..4 {
-                    let mut sorted_keys = self.mappy[thread_index].drain().collect::<Vec<_>>();
-                    sorted_keys.sort_by(|a, b| b.1.cmp(&a.1));
-                    sorted_keys.truncate(10);
-                    info!("thread_index: {}, top-10: {:?}", thread_index, sorted_keys);
-                }
-                last_time = Instant::now();
-            }
         }
     }
 
@@ -267,14 +248,6 @@ impl MultiIteratorScheduler {
             for (thread_index, batch) in batches.into_iter().enumerate() {
                 if batch.packets.is_empty() {
                     continue;
-                }
-
-                // Add transaction accounts the list so we can track which accounts are most frequent per-thread.
-                for transaction in batch.transactions.iter() {
-                    let account_locks = transaction.get_account_locks_unchecked();
-                    for account in account_locks.writable.into_iter() {
-                        *scheduler.mappy[thread_index].entry(*account).or_default() += 1;
-                    }
                 }
 
                 let packet_count = batch.packets.len();
@@ -474,6 +447,9 @@ impl MultiIteratorScheduler {
         &mut self,
         processed_transactions: ProcessedTransactions,
     ) -> Result<(), SchedulerError> {
+        self.outstanding_transaction_counts[processed_transactions.thread_id as usize] -=
+            processed_transactions.packets.len() as u64;
+
         for ((packet, transaction), retryable) in processed_transactions
             .packets
             .into_iter()
@@ -594,14 +570,12 @@ impl MultiIteratorScheduler {
         }
 
         // Iterate over schedulable threads and find the thread with the least number of transactions in current batch.
-        // TODO: Might want to also consider the number of transactions in the queue.
         let thread_id = schedulable_threads
             .threads_iter()
-            // .map(|thread_id| (thread_id, payload.batch_counts[thread_id as usize]))
             .map(|thread_id| {
                 (
                     thread_id,
-                    payload.scheduler.transaction_senders[thread_id as usize].len(),
+                    payload.scheduler.outstanding_transaction_counts[thread_id as usize],
                 )
             })
             .min_by_key(|(_, count)| *count)
@@ -621,6 +595,7 @@ impl MultiIteratorScheduler {
         // Update payload
         payload.thread_indices.push(thread_id);
         payload.batch_counts[thread_id as usize] += 1;
+        payload.scheduler.outstanding_transaction_counts[thread_id as usize] += 1;
         if payload.batch_counts[thread_id as usize] == BATCH_SIZE {
             payload.schedulable_threads.remove(thread_id);
         }
