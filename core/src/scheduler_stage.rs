@@ -40,7 +40,7 @@ pub struct ScheduledTransactions {
     pub packets: Vec<DeserializedPacket>,
     pub transactions: Vec<SanitizedTransaction>,
     /// Alows scheduler to mark transactions as invalid after they've been sent to the executor
-    validity_check: Arc<AtomicBool>,
+    pub(crate) validity_check: Arc<AtomicBool>,
 }
 
 impl ScheduledTransactions {

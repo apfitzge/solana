@@ -1525,9 +1525,7 @@ mod tests {
         },
         std::{
             borrow::Cow,
-            cell::RefCell,
             convert::TryFrom,
-            rc::Rc,
             sync::atomic::{AtomicBool, AtomicU64, Ordering},
             thread, time,
         },
@@ -1559,7 +1557,7 @@ mod tests {
                 executed_units: 0,
                 accounts_data_len_delta: 0,
             },
-            tx_executor_cache: Rc::new(RefCell::new(TransactionExecutorCache::default())),
+            tx_executor_cache: Arc::new(Mutex::new(TransactionExecutorCache::default())),
         }
     }
 

@@ -5,9 +5,9 @@
 use {
     self::{
         commit_executor::CommitExecutor, consume_executor::ConsumeExecutor,
-        decision_maker::DecisionMaker, forward_executor::ForwardExecutor,
-        packet_receiver::PacketReceiver, record_executor::RecordExecutor,
-        scheduler_handle::SchedulerHandle,
+        decision_maker::DecisionMaker, execution_pipeline::ExecutionPipeline,
+        forward_executor::ForwardExecutor, packet_receiver::PacketReceiver,
+        record_executor::RecordExecutor, scheduler_handle::SchedulerHandle,
     },
     crate::{
         latest_unprocessed_votes::{LatestUnprocessedVotes, VoteSource},
@@ -53,6 +53,7 @@ use {
 pub mod commit_executor;
 pub mod consume_executor;
 pub mod decision_maker;
+pub mod execution_pipeline;
 pub mod external_scheduler;
 pub mod forward_executor;
 pub mod multi_iterator_scheduler;
@@ -328,22 +329,33 @@ impl BankingStage {
         let index_to_id_offset = bank_thread_hdls.len() as u32;
         for (index, transactions_receiver) in transactions_receivers.into_iter().enumerate() {
             let id = index as u32 + index_to_id_offset;
-            let scheduler_handle = SchedulerHandle::new_external_scheduler(
+
+            let pipe = ExecutionPipeline::run(
                 id,
                 transactions_receiver,
                 processed_transactions_sender.clone(),
-            );
-            bank_thread_hdls.push(Self::spawn_banking_thread_with_scheduler(
-                id,
-                scheduler_handle,
-                poh_recorder.clone(),
-                cluster_info.clone(),
-                connection_cache.clone(),
-                data_budget.clone(),
-                log_messages_bytes_limit,
-                transaction_status_sender.clone(),
+                poh_recorder.read().unwrap().bank_status.clone(),
+                RecordExecutor::new(poh_recorder.read().unwrap().recorder()),
                 gossip_vote_sender.clone(),
-            ));
+            );
+            bank_thread_hdls.extend(pipe.take().into_iter());
+
+            // let scheduler_handle = SchedulerHandle::new_external_scheduler(
+            //     id,
+            //     transactions_receiver,
+            //     processed_transactions_sender.clone(),
+            // );
+            // bank_thread_hdls.push(Self::spawn_banking_thread_with_scheduler(
+            //     id,
+            //     scheduler_handle,
+            //     poh_recorder.clone(),
+            //     cluster_info.clone(),
+            //     connection_cache.clone(),
+            //     data_budget.clone(),
+            //     log_messages_bytes_limit,
+            //     transaction_status_sender.clone(),
+            //     gossip_vote_sender.clone(),
+            // ));
         }
 
         Self { bank_thread_hdls }

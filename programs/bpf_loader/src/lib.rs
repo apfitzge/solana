@@ -61,12 +61,7 @@ use {
             BorrowedAccount, IndexOfAccount, InstructionContext, TransactionContext,
         },
     },
-    std::{
-        cell::{RefCell, RefMut},
-        fmt::Debug,
-        rc::Rc,
-        sync::Arc,
-    },
+    std::{cell::RefCell, fmt::Debug, rc::Rc, sync::Arc},
     thiserror::Error,
 };
 
@@ -203,7 +198,7 @@ pub fn create_executor_from_account(
     feature_set: &FeatureSet,
     compute_budget: &ComputeBudget,
     log_collector: Option<Rc<RefCell<LogCollector>>>,
-    tx_executor_cache: Option<RefMut<TransactionExecutorCache>>,
+    tx_executor_cache: Option<&mut TransactionExecutorCache>,
     program: &BorrowedAccount,
     programdata: &BorrowedAccount,
     use_jit: bool,
@@ -269,7 +264,7 @@ pub fn create_executor_from_account(
         use_jit,
         false, /* reject_deployment_of_broken_elfs */
     )?;
-    if let Some(mut tx_executor_cache) = tx_executor_cache {
+    if let Some(tx_executor_cache) = tx_executor_cache {
         tx_executor_cache.set(*program.get_key(), executor.clone(), false);
     }
     Ok((executor, Some(create_executor_metrics)))
@@ -439,7 +434,7 @@ fn process_instruction_common(
             &invoke_context.feature_set,
             invoke_context.get_compute_budget(),
             log_collector,
-            Some(invoke_context.tx_executor_cache.borrow_mut()),
+            Some(&mut invoke_context.tx_executor_cache.lock().unwrap()),
             &program,
             programdata.as_ref().unwrap_or(&program),
             use_jit,
@@ -686,7 +681,8 @@ fn process_loader_upgradeable_instruction(
             create_executor_metrics.submit_datapoint(&mut invoke_context.timings);
             invoke_context
                 .tx_executor_cache
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .set(new_program_id, executor, true);
 
             let transaction_context = &invoke_context.transaction_context;
@@ -865,7 +861,8 @@ fn process_loader_upgradeable_instruction(
             create_executor_metrics.submit_datapoint(&mut invoke_context.timings);
             invoke_context
                 .tx_executor_cache
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .set(new_program_id, executor, true);
 
             let transaction_context = &invoke_context.transaction_context;
@@ -1356,10 +1353,11 @@ fn process_loader_instruction(
             )?;
             create_executor_metrics.program_id = program.get_key().to_string();
             create_executor_metrics.submit_datapoint(&mut invoke_context.timings);
-            invoke_context
-                .tx_executor_cache
-                .borrow_mut()
-                .set(*program.get_key(), executor, true);
+            invoke_context.tx_executor_cache.lock().unwrap().set(
+                *program.get_key(),
+                executor,
+                true,
+            );
             program.set_executable(true)?;
             ic_msg!(invoke_context, "Finalized account {:?}", program.get_key());
         }

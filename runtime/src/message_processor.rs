@@ -21,7 +21,12 @@ use {
         transaction::TransactionError,
         transaction_context::{IndexOfAccount, InstructionAccount, TransactionContext},
     },
-    std::{borrow::Cow, cell::RefCell, rc::Rc, sync::Arc},
+    std::{
+        borrow::Cow,
+        cell::RefCell,
+        rc::Rc,
+        sync::{Arc, Mutex},
+    },
 };
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -57,7 +62,7 @@ impl MessageProcessor {
         transaction_context: &mut TransactionContext,
         rent: Rent,
         log_collector: Option<Rc<RefCell<LogCollector>>>,
-        tx_executor_cache: Rc<RefCell<TransactionExecutorCache>>,
+        tx_executor_cache: Arc<Mutex<TransactionExecutorCache>>,
         feature_set: Arc<FeatureSet>,
         compute_budget: ComputeBudget,
         timings: &mut ExecuteTimings,
@@ -275,7 +280,7 @@ mod tests {
         let mut transaction_context =
             TransactionContext::new(accounts, Some(Rent::default()), 1, 3);
         let program_indices = vec![vec![2]];
-        let tx_executor_cache = Rc::new(RefCell::new(TransactionExecutorCache::default()));
+        let tx_executor_cache = Arc::new(Mutex::new(TransactionExecutorCache::default()));
         let account_keys = (0..transaction_context.get_number_of_accounts())
             .map(|index| {
                 *transaction_context
@@ -505,7 +510,7 @@ mod tests {
         let mut transaction_context =
             TransactionContext::new(accounts, Some(Rent::default()), 1, 3);
         let program_indices = vec![vec![2]];
-        let tx_executor_cache = Rc::new(RefCell::new(TransactionExecutorCache::default()));
+        let tx_executor_cache = Arc::new(Mutex::new(TransactionExecutorCache::default()));
         let account_metas = vec![
             AccountMeta::new(
                 *transaction_context.get_key_of_account_at_index(0).unwrap(),
@@ -683,7 +688,7 @@ mod tests {
             &mut transaction_context,
             RentCollector::default().rent,
             None,
-            Rc::new(RefCell::new(TransactionExecutorCache::default())),
+            Arc::new(Mutex::new(TransactionExecutorCache::default())),
             Arc::new(FeatureSet::all_enabled()),
             ComputeBudget::default(),
             &mut ExecuteTimings::default(),
