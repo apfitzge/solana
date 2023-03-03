@@ -43,7 +43,7 @@ pub struct ProcessTransactionBatchOutput {
     cost_model_throttled_transactions_count: usize,
     // Amount of time spent running the cost model
     cost_model_us: u64,
-    execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput,
+    pub(crate) execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput,
 }
 
 pub struct ExecuteAndCommitTransactionsOutput {
@@ -57,7 +57,7 @@ pub struct ExecuteAndCommitTransactionsOutput {
     executed_with_successful_result_count: usize,
     // Transactions that either were not executed, or were executed and failed to be committed due
     // to the block ending.
-    retryable_transaction_indexes: Vec<usize>,
+    pub(crate) retryable_transaction_indexes: Vec<usize>,
     // A result that indicates whether transactions were successfully
     // committed into the Poh stream.
     commit_transactions_result: Result<Vec<CommitTransactionDetails>, PohRecorderError>,

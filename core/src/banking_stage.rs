@@ -40,6 +40,7 @@ use {
     },
 };
 
+mod banking_worker;
 pub mod committer;
 pub mod consumer;
 mod decision_maker;
