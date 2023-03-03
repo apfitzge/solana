@@ -40,12 +40,13 @@ use {
     },
 };
 
-mod banking_worker;
 pub mod committer;
+mod consume_banking_worker;
 pub mod consumer;
 mod decision_maker;
 mod forwarder;
 mod packet_receiver;
+mod test_scheduler;
 
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;
