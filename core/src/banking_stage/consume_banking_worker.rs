@@ -1,5 +1,5 @@
 use {
-    super::{consumer::Consumer, decision_maker::BufferedPacketsDecision, forwarder::Forwarder},
+    super::{consumer::Consumer, decision_maker::BufferedPacketsDecision},
     crossbeam_channel::{Receiver, Sender},
     solana_poh::poh_recorder::BankStart,
     solana_sdk::transaction::SanitizedTransaction,
@@ -19,11 +19,21 @@ pub struct FinishedWork {
 pub struct ConsumeBankingWorker {
     receiver: Receiver<ScheduledWork>,
     sender: Sender<FinishedWork>,
-    forwarder: Forwarder,
     consumer: Consumer,
 }
 
 impl ConsumeBankingWorker {
+    pub fn new(
+        receiver: Receiver<ScheduledWork>,
+        sender: Sender<FinishedWork>,
+        consumer: Consumer,
+    ) -> Self {
+        Self {
+            receiver,
+            sender,
+            consumer,
+        }
+    }
     pub fn run(self) {
         while let Ok(scheduled_work) = self.receiver.recv() {
             let ScheduledWork {

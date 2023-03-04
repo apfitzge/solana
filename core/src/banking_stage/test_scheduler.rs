@@ -16,17 +16,17 @@ use {
     solana_sdk::transaction::SanitizedTransaction,
 };
 
-pub type TransactionGenerator = Box<dyn FnMut(&Bank) -> Vec<SanitizedTransaction>>;
+pub type TransactionGenerator = Box<dyn Send + FnMut(&Bank) -> Vec<SanitizedTransaction>>;
 
 pub struct TestScheduler {
     /// Decision maker - only generate when leader
     decision_maker: DecisionMaker,
     /// From SigVerify - ignored
-    dummy_receiver: BankingPacketReceiver,
+    _dummy_receiver: BankingPacketReceiver,
     /// To BankingStageWorker
     sender: Sender<ScheduledWork>,
     /// From BankingStageWorker
-    receiver: Receiver<FinishedWork>,
+    _receiver: Receiver<FinishedWork>,
     /// Transaction batch generator
     transaction_generator: TransactionGenerator,
 }
@@ -41,9 +41,9 @@ impl TestScheduler {
     ) -> Self {
         Self {
             decision_maker,
-            dummy_receiver,
+            _dummy_receiver: dummy_receiver,
             sender,
-            receiver,
+            _receiver: receiver,
             transaction_generator,
         }
     }
