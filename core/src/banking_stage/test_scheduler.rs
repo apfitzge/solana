@@ -6,17 +6,14 @@ use {
     super::{
         consume_banking_worker::{FinishedWork, ScheduledWork},
         decision_maker::{BufferedPacketsDecision, DecisionMaker},
+        TransactionGenerator,
     },
     crate::{
         banking_trace::BankingPacketReceiver,
         leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
     },
     crossbeam_channel::{Receiver, Sender},
-    solana_runtime::bank::Bank,
-    solana_sdk::transaction::SanitizedTransaction,
 };
-
-pub type TransactionGenerator = Box<dyn Send + FnMut(&Bank) -> Vec<SanitizedTransaction>>;
 
 pub struct TestScheduler {
     /// Decision maker - only generate when leader

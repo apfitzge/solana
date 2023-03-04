@@ -8,7 +8,6 @@ use {
         decision_maker::{BufferedPacketsDecision, DecisionMaker},
         forwarder::Forwarder,
         packet_receiver::PacketReceiver,
-        test_scheduler::TransactionGenerator,
     },
     crate::{
         banking_stage::{
@@ -50,7 +49,10 @@ pub mod consumer;
 mod decision_maker;
 mod forwarder;
 mod packet_receiver;
+mod test_generators;
 mod test_scheduler;
+
+pub use test_generators::*;
 
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;

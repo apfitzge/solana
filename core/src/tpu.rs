@@ -233,17 +233,31 @@ impl Tpu {
             cluster_confirmed_slot_sender,
         );
 
-        let banking_stage = BankingStage::new(
+        // let banking_stage = BankingStage::new(
+        //     cluster_info,
+        //     poh_recorder,
+        //     non_vote_receiver,
+        //     tpu_vote_receiver,
+        //     gossip_vote_receiver,
+        //     transaction_status_sender,
+        //     replay_vote_sender,
+        //     log_messages_bytes_limit,
+        //     connection_cache.clone(),
+        //     bank_forks.clone(),
+        // );
+        let banking_stage = BankingStage::new_test_generating_scheduler(
             cluster_info,
             poh_recorder,
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
+            BankingStage::num_threads(),
             transaction_status_sender,
             replay_vote_sender,
             log_messages_bytes_limit,
             connection_cache.clone(),
             bank_forks.clone(),
+            crate::banking_stage::random_transfer_generator(100),
         );
 
         let broadcast_stage = broadcast_type.new_broadcast_stage(
