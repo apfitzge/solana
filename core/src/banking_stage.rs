@@ -35,7 +35,7 @@ use {
     std::{
         cmp, env,
         sync::{
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
         },
         thread::{self, Builder, JoinHandle},
@@ -418,6 +418,7 @@ impl BankingStage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_test_generating_scheduler(
+        exit: Arc<AtomicBool>,
         cluster_info: &Arc<ClusterInfo>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         non_vote_receiver: BankingPacketReceiver,
@@ -529,7 +530,7 @@ impl BankingStage {
         bank_thread_hdls.push(
             Builder::new()
                 .name("solBanknSched".to_string())
-                .spawn(move || scheduler.run())
+                .spawn(move || scheduler.run(&exit))
                 .unwrap(),
         );
         (0..num_threads.saturating_sub(2)).for_each(|id| {

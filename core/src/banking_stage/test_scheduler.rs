@@ -13,6 +13,7 @@ use {
         leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
     },
     crossbeam_channel::{Receiver, Sender},
+    std::sync::{atomic::AtomicBool, Arc},
 };
 
 pub struct TestScheduler {
@@ -45,10 +46,14 @@ impl TestScheduler {
         }
     }
 
-    pub fn run(mut self) {
+    pub fn run(mut self, exit: &Arc<AtomicBool>) {
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::new(0);
         let mut rng = rand::thread_rng();
         loop {
+            if exit.load(std::sync::atomic::Ordering::Relaxed) {
+                debug!("TestScheduler exiting");
+                break;
+            }
             let (_action, decision) = self
                 .decision_maker
                 .make_consume_or_forward_decision(&mut slot_metrics_tracker);

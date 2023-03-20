@@ -57,7 +57,13 @@ impl ConsumeBankingWorker {
                 transactions,
                 retryable_indexes,
             };
-            self.sender.send(finished_work).unwrap();
+            match self.sender.send(finished_work) {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Error sending finished work: {:?}", e);
+                    break;
+                }
+            }
         }
     }
 

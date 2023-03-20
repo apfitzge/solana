@@ -4761,6 +4761,7 @@ impl Bank {
                 *err_count,
                 *err_count + executed_with_successful_result_count
             );
+            debug!("{error_counters:?}");
         }
         LoadAndExecuteTransactionsOutput {
             loaded_transactions,

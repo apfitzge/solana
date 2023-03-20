@@ -13,7 +13,10 @@ use {
         system_monitor_service::SystemMonitorService,
         tower_storage,
         tpu::DEFAULT_TPU_COALESCE_MS,
-        validator::{is_snapshot_config_valid, Validator, ValidatorConfig, ValidatorStartProgress},
+        validator::{
+            is_snapshot_config_valid, TestGenerator, Validator, ValidatorConfig,
+            ValidatorStartProgress,
+        },
     },
     solana_gossip::{cluster_info::Node, legacy_contact_info::LegacyContactInfo as ContactInfo},
     solana_ledger::blockstore_options::{
@@ -1452,9 +1455,12 @@ pub fn main() {
     }
 
     configure_banking_trace_dir_byte_limit(&mut validator_config, &matches);
-    validator_config.test_generating_scheduler_accounts_path = matches
+    validator_config.test_generating_info = matches
         .value_of("test_generating_scheduler_accounts_path")
-        .map(|path| path.to_string());
+        .map(|path| TestGenerator {
+            test_generating_scheduler_accounts_path: path.to_string(),
+            starting_keypairs: Arc::new(vec![]),
+        });
 
     validator_config.ledger_column_options = LedgerColumnOptions {
         compression_type: match matches.value_of("rocksdb_ledger_compression") {

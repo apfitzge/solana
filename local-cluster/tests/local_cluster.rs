@@ -13,7 +13,7 @@ use {
         optimistic_confirmation_verifier::OptimisticConfirmationVerifier,
         replay_stage::DUPLICATE_THRESHOLD,
         tower_storage::FileTowerStorage,
-        validator::ValidatorConfig,
+        validator::{TestGenerator, ValidatorConfig},
     },
     solana_download_utils::download_snapshot_archive,
     solana_gossip::{contact_info::LegacyContactInfo, gossip_service::discover_cluster},
@@ -471,6 +471,56 @@ fn test_mainnet_beta_cluster_type() {
             (program_id, None)
         );
     }
+}
+
+#[test]
+#[serial]
+fn test_mainnet_beta_cluster_type_generator() {
+    solana_logger::setup_with_default(RUST_LOG_FILTER);
+
+    let num_nodes = 2;
+
+    let num_starting_accounts = 128 * 100;
+    let starting_keypairs: Arc<Vec<Keypair>> = Arc::new(
+        iter::repeat_with(Keypair::new)
+            .take(num_starting_accounts)
+            .collect(),
+    );
+    let starting_accounts: Vec<(Pubkey, AccountSharedData)> = starting_keypairs
+        .iter()
+        .map(|k| {
+            (
+                k.pubkey(),
+                AccountSharedData::new(1_000_000, 0, &system_program::id()),
+            )
+        })
+        .collect();
+
+    let mut validator_config = ValidatorConfig::default_for_test();
+    validator_config.test_generating_info = Some(TestGenerator {
+        test_generating_scheduler_accounts_path: "path".to_owned(),
+        starting_keypairs,
+    });
+
+    let mut config = ClusterConfig {
+        cluster_type: ClusterType::MainnetBeta,
+        node_stakes: vec![DEFAULT_NODE_STAKE; num_nodes],
+        cluster_lamports: DEFAULT_CLUSTER_LAMPORTS,
+        validator_configs: make_identical_validator_configs(&validator_config, num_nodes),
+        additional_accounts: starting_accounts,
+        ..ClusterConfig::default()
+    };
+    let cluster = LocalCluster::new(&mut config, SocketAddrSpace::Unspecified);
+    let cluster_nodes = discover_cluster(
+        &cluster.entry_point_info.gossip().unwrap(),
+        num_nodes,
+        SocketAddrSpace::Unspecified,
+    )
+    .unwrap();
+
+    assert_eq!(cluster_nodes.len(), num_nodes);
+
+    std::thread::sleep(Duration::from_secs(30));
 }
 
 #[test]

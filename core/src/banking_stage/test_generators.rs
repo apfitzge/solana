@@ -12,7 +12,7 @@ use {
         signer::Signer,
         transaction::{SanitizedTransaction, SanitizedVersionedTransaction, VersionedTransaction},
     },
-    std::path::Path,
+    std::{path::Path, sync::Arc},
 };
 
 pub type TransactionGenerator =
@@ -60,27 +60,82 @@ impl From<KeypairRaw> for Keypair {
     }
 }
 
-/// Generates transfers between a set of accounts.
-pub fn random_transfer_generator(accounts_path: impl AsRef<Path>) -> TransactionGenerator {
-    let accounts_file_string = std::fs::read_to_string(accounts_path).unwrap();
-    let accounts: AccountsFile = serde_json::from_str::<AccountsFileRaw>(&accounts_file_string)
-        .unwrap()
-        .into();
+fn get_accounts(
+    accounts_path: impl AsRef<Path>,
+    starting_keypairs: Arc<Vec<Keypair>>,
+) -> Vec<Keypair> {
+    debug!(
+        "Saving accounts for {} starting keypairs",
+        starting_keypairs.len()
+    );
+    if !starting_keypairs.is_empty() {
+        starting_keypairs
+            .iter()
+            .map(|keypair| Keypair::from_base58_string(&keypair.to_base58_string()))
+            .collect()
+    } else {
+        let accounts_file_string = std::fs::read_to_string(accounts_path).unwrap();
+        let accounts: AccountsFile = serde_json::from_str::<AccountsFileRaw>(&accounts_file_string)
+            .unwrap()
+            .into();
+        accounts.payers
+    }
+}
 
+/// Generates transfers between a set of accounts.
+pub fn random_transfer_generator(
+    accounts_path: impl AsRef<Path>,
+    starting_keypairs: Arc<Vec<Keypair>>,
+) -> TransactionGenerator {
+    let accounts = get_accounts(accounts_path, starting_keypairs);
     let mut blockhash_buffer = BlockhashCircleBuffer::default();
     Box::new(move |rng: &mut ThreadRng, bank: &Bank| {
         const BATCH_SIZE: usize = 64;
-
         let mut transactions = vec![];
         blockhash_buffer.check_and_push(bank.last_blockhash());
 
-        let mut accounts = accounts.payers.choose_multiple(rng, 2 * BATCH_SIZE);
+        let mut accounts = accounts.choose_multiple(rng, BATCH_SIZE * 2);
         for _ in 0..BATCH_SIZE {
             let transaction = solana_sdk::system_transaction::transfer(
                 accounts.next().unwrap(),
                 &accounts.next().unwrap().pubkey(),
                 1,
                 *blockhash_buffer.buffer.choose(rng).unwrap(),
+            );
+
+            let message_hash = transaction.message().hash();
+            let versioned_tx: VersionedTransaction = transaction.into();
+            let sanitized_versioned_tx: SanitizedVersionedTransaction =
+                versioned_tx.try_into().unwrap();
+            let sanitized_tx =
+                SanitizedTransaction::try_new(sanitized_versioned_tx, message_hash, false, bank)
+                    .unwrap();
+            transactions.push(sanitized_tx);
+        }
+        transactions
+    })
+}
+
+/// Allocates random large accounts.
+pub fn random_allocate_generator(
+    accounts_path: impl AsRef<Path>,
+    starting_keypairs: Arc<Vec<Keypair>>,
+) -> TransactionGenerator {
+    let accounts = get_accounts(accounts_path, starting_keypairs);
+    let mut blockhash_buffer = BlockhashCircleBuffer::default();
+    Box::new(move |rng: &mut ThreadRng, bank: &Bank| {
+        const BATCH_SIZE: usize = 64;
+        const ACCOUNT_SIZE: u64 = 100 * 1024;
+        let mut transactions = vec![];
+        blockhash_buffer.check_and_push(bank.last_blockhash());
+
+        let mut accounts = accounts.choose_multiple(rng, BATCH_SIZE * 2);
+        for _ in 0..BATCH_SIZE {
+            let transaction = solana_sdk::system_transaction::allocate(
+                accounts.next().unwrap(),
+                &Keypair::new(),
+                *blockhash_buffer.buffer.choose(rng).unwrap(),
+                ACCOUNT_SIZE,
             );
 
             let message_hash = transaction.message().hash();

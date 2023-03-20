@@ -2536,6 +2536,7 @@ impl ReplayStage {
         replay_result_vec: &[ReplaySlotFromBlockstore],
         prioritization_fee_cache: &PrioritizationFeeCache,
         purge_repair_slot_counter: &mut PurgeRepairSlotCounter,
+        my_pubkey: &Pubkey,
     ) -> bool {
         // TODO: See if processing of blockstore replay results and bank completion can be made thread safe.
         let mut did_complete_bank = false;
@@ -2676,6 +2677,15 @@ impl ReplayStage {
                 }
                 bank_complete_time.stop();
 
+                if bank.collector_id() != my_pubkey {
+                    debug!("{my_pubkey:?} replay stats slot: {} with total transactions {}, shreds {}, time {}",
+                        bank.slot(),
+                        r_replay_progress.num_txs,
+                        r_replay_progress.num_shreds,
+                        r_replay_stats.replay_elapsed,
+                    );
+                }
+
                 r_replay_stats.report_stats(
                     bank.slot(),
                     r_replay_progress.num_txs,
@@ -2797,6 +2807,7 @@ impl ReplayStage {
                 &replay_result_vec,
                 prioritization_fee_cache,
                 purge_repair_slot_counter,
+                my_pubkey,
             )
         } else {
             false

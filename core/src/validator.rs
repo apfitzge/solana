@@ -178,7 +178,13 @@ pub struct ValidatorConfig {
     pub runtime_config: RuntimeConfig,
     pub replay_slots_concurrently: bool,
     pub banking_trace_dir_byte_limit: banking_trace::DirByteLimit,
-    pub test_generating_scheduler_accounts_path: Option<String>,
+    pub test_generating_info: Option<TestGenerator>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TestGenerator {
+    pub test_generating_scheduler_accounts_path: String,
+    pub starting_keypairs: Arc<Vec<Keypair>>,
 }
 
 impl Default for ValidatorConfig {
@@ -242,7 +248,7 @@ impl Default for ValidatorConfig {
             runtime_config: RuntimeConfig::default(),
             replay_slots_concurrently: false,
             banking_trace_dir_byte_limit: 0,
-            test_generating_scheduler_accounts_path: None,
+            test_generating_info: None,
         }
     }
 }
@@ -1070,7 +1076,7 @@ impl Validator {
             banking_tracer,
             tracer_thread,
             tpu_enable_udp,
-            config.test_generating_scheduler_accounts_path.clone(),
+            config.test_generating_info.clone(),
         );
 
         datapoint_info!(
