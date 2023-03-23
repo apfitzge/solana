@@ -41,7 +41,7 @@ impl DecisionMaker {
         }
     }
 
-    pub(crate) fn make_consume_or_forward_decision(&self) -> BufferedPacketsDecision {
+    pub fn make_consume_or_forward_decision(&self) -> BufferedPacketsDecision {
         let (leader_at_slot_offset, bank_start, would_be_leader, would_be_leader_shortly) = {
             let poh = self.poh_recorder.read().unwrap();
             let bank_start = poh

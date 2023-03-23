@@ -42,7 +42,7 @@ use {
 
 pub mod committer;
 pub mod consumer;
-mod decision_maker;
+pub mod decision_maker;
 mod forwarder;
 mod packet_receiver;
 
