@@ -11,7 +11,7 @@ use {
         qos_service::QosService,
         unprocessed_transaction_storage::{ConsumeScannerPayload, UnprocessedTransactionStorage},
     },
-    itertools::Itertools,
+    itertools::{izip, Itertools},
     solana_ledger::token_balances::collect_token_balances,
     solana_measure::{measure::Measure, measure_us},
     solana_poh::poh_recorder::{
@@ -25,10 +25,10 @@ use {
         transaction_error_metrics::TransactionErrorMetrics,
     },
     solana_sdk::{
-        clock::{FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
+        clock::{Slot, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
         saturating_add_assign,
         timing::timestamp,
-        transaction::{self, SanitizedTransaction, TransactionError},
+        transaction::{self, AddressLoader, SanitizedTransaction, TransactionError},
     },
     std::{
         sync::{atomic::Ordering, Arc},
@@ -43,7 +43,7 @@ pub struct ProcessTransactionBatchOutput {
     cost_model_throttled_transactions_count: usize,
     // Amount of time spent running the cost model
     cost_model_us: u64,
-    execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput,
+    pub(crate) execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput,
 }
 
 pub struct ExecuteAndCommitTransactionsOutput {
@@ -57,7 +57,7 @@ pub struct ExecuteAndCommitTransactionsOutput {
     executed_with_successful_result_count: usize,
     // Transactions that either were not executed, or were executed and failed to be committed due
     // to the block ending.
-    retryable_transaction_indexes: Vec<usize>,
+    pub(crate) retryable_transaction_indexes: Vec<usize>,
     // A result that indicates whether transactions were successfully
     // committed into the Poh stream.
     commit_transactions_result: Result<Vec<CommitTransactionDetails>, PohRecorderError>,
@@ -458,6 +458,80 @@ impl Consumer {
         }
     }
 
+    pub fn process_and_record_aged_transactions(
+        &self,
+        bank: &Arc<Bank>,
+        txs: &[SanitizedTransaction],
+        max_slot_ages: &[Slot],
+    ) -> ProcessTransactionBatchOutput {
+        let (
+            (transaction_costs, transactions_qos_results, cost_model_throttled_transactions_count),
+            cost_model_us,
+        ) = measure_us!(self
+            .qos_service
+            .select_and_accumulate_transaction_costs(bank, txs));
+
+        // Check ages against slot of the bank.
+        // Check that look-up tables have not been closed.
+        // TODO: This should really be done before QoS - but requires refactor of QoS
+        let batch_results = izip!(txs, max_slot_ages, &transactions_qos_results)
+            .map(|(tx, max_slot_age, qos_result)| match qos_result {
+                Ok(_) => {
+                    if *max_slot_age < bank.slot() {
+                        Err(TransactionError::BlockhashNotFound)
+                    } else {
+                        // TODO: Need to check that look-up tables have not been closed
+                        //       Probably a better way to do this.
+                        bank.load_addresses(tx.message().message_address_table_lookups())?;
+                        Ok(())
+                    }
+                }
+                _ => qos_result.clone(),
+            })
+            .collect_vec();
+
+        // Only lock accounts for those transactions are selected for the block;
+        // Once accounts are locked, other threads cannot encode transactions that will modify the
+        // same account state
+        let batch = bank.prepare_sanitized_batch_with_results(txs, batch_results.iter());
+
+        // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
+        // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
+        // and WouldExceedMaxAccountDataCostLimit
+        let execute_and_commit_transactions_output =
+            self.execute_and_commit_transactions_locked(bank, &batch);
+
+        // Once the accounts are new transactions can enter the pipeline to process them
+        drop(batch);
+
+        let ExecuteAndCommitTransactionsOutput {
+            ref execute_and_commit_timings,
+            ref commit_transactions_result,
+            ..
+        } = execute_and_commit_transactions_output;
+
+        QosService::update_or_remove_transaction_costs(
+            transaction_costs.iter(),
+            transactions_qos_results.iter(),
+            commit_transactions_result.as_ref().ok(),
+            bank,
+        );
+
+        let (cu, us) =
+            Self::accumulate_execute_units_and_time(&execute_and_commit_timings.execute_timings);
+        self.qos_service.accumulate_actual_execute_cu(cu);
+        self.qos_service.accumulate_actual_execute_time(us);
+
+        // reports qos service stats for this batch
+        self.qos_service.report_metrics(bank.slot());
+
+        ProcessTransactionBatchOutput {
+            cost_model_throttled_transactions_count,
+            cost_model_us,
+            execute_and_commit_transactions_output,
+        }
+    }
+
     fn execute_and_commit_transactions_locked(
         &self,
         bank: &Arc<Bank>,
@@ -677,7 +751,9 @@ mod tests {
     use {
         super::*,
         crate::{
-            banking_stage::tests::{create_slow_genesis_config, simulate_poh},
+            banking_stage::tests::{
+                create_slow_genesis_config, sanitize_transactions, simulate_poh,
+            },
             unprocessed_packet_batches::{self, UnprocessedPacketBatches},
             unprocessed_transaction_storage::ThreadType,
         },
@@ -717,12 +793,6 @@ mod tests {
             thread::JoinHandle,
         },
     };
-
-    fn sanitize_transactions(txs: Vec<Transaction>) -> Vec<SanitizedTransaction> {
-        txs.into_iter()
-            .map(SanitizedTransaction::from_transaction_for_tests)
-            .collect()
-    }
 
     fn execute_transactions_with_dummy_poh_service(
         bank: Arc<Bank>,
