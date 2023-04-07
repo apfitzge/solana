@@ -43,7 +43,7 @@ pub struct ProcessTransactionBatchOutput {
     cost_model_throttled_transactions_count: usize,
     // Amount of time spent running the cost model
     cost_model_us: u64,
-    execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput,
+    pub(crate) execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput,
 }
 
 pub struct ExecuteAndCommitTransactionsOutput {
@@ -57,7 +57,7 @@ pub struct ExecuteAndCommitTransactionsOutput {
     executed_with_successful_result_count: usize,
     // Transactions that either were not executed, or were executed and failed to be committed due
     // to the block ending.
-    retryable_transaction_indexes: Vec<usize>,
+    pub(crate) retryable_transaction_indexes: Vec<usize>,
     // A result that indicates whether transactions were successfully
     // committed into the Poh stream.
     commit_transactions_result: Result<Vec<CommitTransactionDetails>, PohRecorderError>,
@@ -677,7 +677,9 @@ mod tests {
     use {
         super::*,
         crate::{
-            banking_stage::tests::{create_slow_genesis_config, simulate_poh},
+            banking_stage::tests::{
+                create_slow_genesis_config, sanitize_transactions, simulate_poh,
+            },
             unprocessed_packet_batches::{self, UnprocessedPacketBatches},
             unprocessed_transaction_storage::ThreadType,
         },
@@ -717,12 +719,6 @@ mod tests {
             thread::JoinHandle,
         },
     };
-
-    fn sanitize_transactions(txs: Vec<Transaction>) -> Vec<SanitizedTransaction> {
-        txs.into_iter()
-            .map(SanitizedTransaction::from_transaction_for_tests)
-            .collect()
-    }
 
     fn execute_transactions_with_dummy_poh_service(
         bank: Arc<Bank>,
