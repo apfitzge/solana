@@ -11,7 +11,9 @@ use {
     },
     crate::{
         banking_stage::{
-            committer::Committer, multi_iterator_scheduler::MultiIteratorScheduler, worker::Worker,
+            committer::Committer,
+            transaction_scheduler::multi_iterator_scheduler::MultiIteratorScheduler,
+            worker::Worker,
         },
         banking_trace::BankingPacketReceiver,
         latest_unprocessed_votes::{LatestUnprocessedVotes, VoteSource},
@@ -33,7 +35,7 @@ use {
     solana_poh::poh_recorder::PohRecorder,
     solana_runtime::{
         bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
-        root_bank_cache::RootBankCache, vote_sender_types::ReplayVoteSender,
+        vote_sender_types::ReplayVoteSender,
     },
     solana_sdk::{feature_set::allow_votes_to_directly_update_vote_state, timing::AtomicInterval},
     std::{
@@ -54,8 +56,6 @@ mod forwarder;
 mod packet_receiver;
 mod scheduler_messages;
 mod transaction_scheduler;
-
-#[allow(dead_code)]
 mod worker;
 
 // Fixed thread size seems to be fastest on GCP setup
@@ -562,7 +562,7 @@ impl BankingStage {
             let scheduler = MultiIteratorScheduler::new(
                 num_workers as usize,
                 DecisionMaker::new(cluster_info.id(), poh_recorder.clone()),
-                RootBankCache::new(bank_forks.clone()),
+                bank_forks.clone(),
                 consume_work_senders,
                 finished_consume_work_receiver,
                 forward_work_sender,
