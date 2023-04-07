@@ -18,6 +18,7 @@ use {
         tracer_packet_stats::TracerPacketStats,
         unprocessed_packet_batches::*,
         unprocessed_transaction_storage::{ThreadType, UnprocessedTransactionStorage},
+        validator::BlockProductionMethod,
     },
     crossbeam_channel::RecvTimeoutError,
     histogram::Histogram,
@@ -294,6 +295,7 @@ impl BankingStage {
     /// Create the stage using `bank`. Exit when `verified_receiver` is dropped.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        block_production_method: BlockProductionMethod,
         cluster_info: &Arc<ClusterInfo>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         non_vote_receiver: BankingPacketReceiver,
@@ -307,6 +309,7 @@ impl BankingStage {
         prioritization_fee_cache: &Arc<PrioritizationFeeCache>,
     ) -> Self {
         Self::new_num_threads(
+            block_production_method,
             cluster_info,
             poh_recorder,
             non_vote_receiver,
@@ -324,6 +327,7 @@ impl BankingStage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_num_threads(
+        block_production_method: BlockProductionMethod,
         cluster_info: &Arc<ClusterInfo>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         non_vote_receiver: BankingPacketReceiver,
@@ -338,6 +342,10 @@ impl BankingStage {
         prioritization_fee_cache: &Arc<PrioritizationFeeCache>,
     ) -> Self {
         assert!(num_threads >= MIN_TOTAL_THREADS);
+        assert!(matches!(
+            block_production_method,
+            BlockProductionMethod::ThreadLocalMultiIterator
+        ));
         // Single thread to generate entries from many banks.
         // This thread talks to poh_service and broadcasts the entries once they have been recorded.
         // Once an entry has been recorded, its blockhash is registered with the bank.
@@ -655,6 +663,7 @@ mod tests {
             let (replay_vote_sender, _replay_vote_receiver) = unbounded();
 
             let banking_stage = BankingStage::new(
+                BlockProductionMethod::ThreadLocalMultiIterator,
                 &cluster_info,
                 &poh_recorder,
                 non_vote_receiver,
@@ -711,6 +720,7 @@ mod tests {
             let (replay_vote_sender, _replay_vote_receiver) = unbounded();
 
             let banking_stage = BankingStage::new(
+                BlockProductionMethod::ThreadLocalMultiIterator,
                 &cluster_info,
                 &poh_recorder,
                 non_vote_receiver,
@@ -792,6 +802,7 @@ mod tests {
             let (replay_vote_sender, _replay_vote_receiver) = unbounded();
 
             let banking_stage = BankingStage::new(
+                BlockProductionMethod::ThreadLocalMultiIterator,
                 &cluster_info,
                 &poh_recorder,
                 non_vote_receiver,
@@ -953,6 +964,7 @@ mod tests {
                 let (_, cluster_info) = new_test_cluster_info(/*keypair:*/ None);
                 let cluster_info = Arc::new(cluster_info);
                 let _banking_stage = BankingStage::new_num_threads(
+                    BlockProductionMethod::ThreadLocalMultiIterator,
                     &cluster_info,
                     &poh_recorder,
                     non_vote_receiver,
@@ -1148,6 +1160,7 @@ mod tests {
             let (replay_vote_sender, _replay_vote_receiver) = unbounded();
 
             let banking_stage = BankingStage::new(
+                BlockProductionMethod::ThreadLocalMultiIterator,
                 &cluster_info,
                 &poh_recorder,
                 non_vote_receiver,
