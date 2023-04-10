@@ -20,11 +20,21 @@ pub struct Stats {
 }
 
 #[derive(Default)]
-pub struct SchedulerSlotStats {}
+pub struct SchedulerSlotStats {
+    pub num_consume_scheduled: AtomicU64,
+}
 
 impl SchedulerSlotStats {
     fn report(&self, slot: u64) {
-        datapoint_info!("banking_stage-scheduler_slot_stats", ("slot", slot, i64));
+        datapoint_info!(
+            "banking_stage-scheduler_slot_stats",
+            ("slot", slot, i64),
+            (
+                "num_consume_scheduled",
+                self.num_consume_scheduled.swap(0, Ordering::Relaxed),
+                i64
+            )
+        );
     }
 }
 
@@ -60,11 +70,20 @@ impl WorkerSlotStats {
 }
 
 #[derive(Default)]
-pub struct SchedulerTimeStats {}
+pub struct SchedulerTimeStats {
+    pub num_packets_received: AtomicU64,
+}
 
 impl SchedulerTimeStats {
     fn report(&self) {
-        // datapoint_info!("banking_stage-scheduler_time_stats");
+        datapoint_info!(
+            "banking_stage-scheduler_time_stats",
+            (
+                "num_packets_received",
+                self.num_packets_received.swap(0, Ordering::Relaxed),
+                i64
+            )
+        );
     }
 }
 
