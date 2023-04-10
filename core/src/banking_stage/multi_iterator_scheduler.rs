@@ -19,6 +19,7 @@ use {
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError},
     itertools::{izip, Itertools},
     min_max_heap::MinMaxHeap,
+    solana_measure::measure_us,
     solana_perf::perf_libs,
     solana_runtime::{
         bank::{Bank, BankStatusCache},
@@ -322,7 +323,11 @@ impl MultiIteratorScheduler {
                 let decision = self.decision_maker.make_consume_or_forward_decision();
                 match decision {
                     BufferedPacketsDecision::Consume(bank_start) => {
-                        self.schedule_consume(bank_start.working_bank.slot())?
+                        let (_, schedule_consume_time_us) =
+                            measure_us!(self.schedule_consume(bank_start.working_bank.slot())?);
+                        self.time_stats
+                            .schedule_consume_time_us
+                            .fetch_add(schedule_consume_time_us, Ordering::Relaxed);
                     }
                     BufferedPacketsDecision::Forward => self.schedule_forward(false)?,
                     BufferedPacketsDecision::ForwardAndHold => self.schedule_forward(true)?,
@@ -956,8 +961,8 @@ mod tests {
 
         consume_work_receivers: Vec<Receiver<ConsumeWork>>,
         finished_consume_work_sender: Sender<FinishedConsumeWork>,
-        _forward_work_receiver: Receiver<ForwardWork>,
-        _finished_forward_work_sender: Sender<FinishedForwardWork>,
+        forward_work_receiver: Receiver<ForwardWork>,
+        finished_forward_work_sender: Sender<FinishedForwardWork>,
     }
 
     fn create_test_frame(num_threads: usize) -> (TestFrame, MultiIteratorScheduler) {
@@ -1002,8 +1007,8 @@ mod tests {
             banking_packet_sender,
             consume_work_receivers,
             finished_consume_work_sender,
-            _forward_work_receiver: forward_work_receiver,
-            _finished_forward_work_sender: finished_forward_work_sender,
+            forward_work_receiver,
+            finished_forward_work_sender,
         };
         let multi_iterator_scheduler = MultiIteratorScheduler::new(
             num_threads,
