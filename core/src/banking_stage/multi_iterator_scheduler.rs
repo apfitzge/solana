@@ -6,7 +6,7 @@ use {
             ConsumeWork, FinishedConsumeWork, FinishedForwardWork, ForwardWork, TransactionBatchId,
             TransactionId,
         },
-        stats_reporter::Stats,
+        stats_reporter::{SchedulerSlotStats, SchedulerTimeStats},
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
     },
     crate::{
@@ -36,7 +36,7 @@ use {
     },
     std::{
         collections::{hash_map::Entry, HashMap},
-        sync::RwLockReadGuard,
+        sync::{Arc, RwLockReadGuard},
         time::Duration,
     },
     thiserror::Error,
@@ -275,11 +275,13 @@ pub struct MultiIteratorScheduler {
     transaction_id_generator: TransactionIdGenerator,
     /// Generator for batch ids
     batch_id_generator: BatchIdGenerator,
-    /// Stats for scheduler
-    _stats: Stats,
+
+    slot_stats: Arc<SchedulerSlotStats>,
+    time_stats: Arc<SchedulerTimeStats>,
 }
 
 impl MultiIteratorScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         num_threads: usize,
         decision_maker: DecisionMaker,
@@ -289,7 +291,8 @@ impl MultiIteratorScheduler {
         forward_work_sender: Sender<ForwardWork>,
         finished_forward_work_receiver: Receiver<FinishedForwardWork>,
         packet_deserializer: PacketDeserializer,
-        stats: Stats,
+        slot_stats: Arc<SchedulerSlotStats>,
+        time_stats: Arc<SchedulerTimeStats>,
     ) -> Self {
         Self {
             num_threads,
@@ -306,7 +309,8 @@ impl MultiIteratorScheduler {
             packet_deserializer,
             transaction_id_generator: TransactionIdGenerator::default(),
             batch_id_generator: BatchIdGenerator::default(),
-            _stats: stats,
+            slot_stats,
+            time_stats,
         }
     }
 
@@ -998,7 +1002,8 @@ mod tests {
             forward_work_sender,
             finished_forward_work_receiver,
             packet_deserializer,
-            Stats::default(),
+            Arc::default(),
+            Arc::default(),
         );
 
         (test_frame, multi_iterator_scheduler)

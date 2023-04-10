@@ -10,17 +10,13 @@ use {
     },
 };
 
-#[derive(Clone, Default)]
-pub struct Stats {
-    pub slot_stats: Arc<SlotStats>,
-    pub time_stats: Arc<TimeStats>,
-}
-
 #[derive(Default)]
+pub struct Stats {
+    pub scheduler_slot_stats: Arc<SchedulerSlotStats>,
+    pub worker_slot_stats: Arc<WorkerSlotStats>,
 
-pub struct SlotStats {
-    pub scheduler_stats: SchedulerSlotStats,
-    pub worker_stats: WorkerSlotStats,
+    pub scheduler_time_stats: Arc<SchedulerTimeStats>,
+    pub worker_time_stats: Arc<WorkerTimeStats>,
 }
 
 #[derive(Default)]
@@ -64,12 +60,6 @@ impl WorkerSlotStats {
 }
 
 #[derive(Default)]
-pub struct TimeStats {
-    pub scheduler_stats: SchedulerTimeStats,
-    pub worker_stats: WorkerTimeStats,
-}
-
-#[derive(Default)]
 pub struct SchedulerTimeStats {}
 
 impl SchedulerTimeStats {
@@ -107,9 +97,24 @@ impl StatsReporter {
         leader_bank_notifier: Arc<LeaderBankNotifier>,
     ) -> (Self, Stats) {
         let stats = Stats::default();
-        let slot_thread_hdl =
-            Self::start_slot_thread(stats.slot_stats.clone(), exit.clone(), leader_bank_notifier);
-        let time_thread_hdl = Self::start_time_thread(stats.time_stats.clone(), exit);
+        let Stats {
+            scheduler_slot_stats,
+            worker_slot_stats,
+            scheduler_time_stats,
+            worker_time_stats,
+        } = &stats;
+
+        let slot_thread_hdl = Self::start_slot_thread(
+            scheduler_slot_stats.clone(),
+            worker_slot_stats.clone(),
+            exit.clone(),
+            leader_bank_notifier,
+        );
+        let time_thread_hdl = Self::start_time_thread(
+            scheduler_time_stats.clone(),
+            worker_time_stats.clone(),
+            exit,
+        );
         (
             Self {
                 slot_thread_hdl,
@@ -120,7 +125,8 @@ impl StatsReporter {
     }
 
     fn start_slot_thread(
-        stats: Arc<SlotStats>,
+        scheduler_stats: Arc<SchedulerSlotStats>,
+        worker_stats: Arc<WorkerSlotStats>,
         exit: Arc<AtomicBool>,
         leader_bank_notifier: Arc<LeaderBankNotifier>,
     ) -> JoinHandle<()> {
@@ -131,22 +137,26 @@ impl StatsReporter {
                     if let Some(slot) =
                         leader_bank_notifier.wait_for_completed(Duration::from_millis(500))
                     {
-                        stats.scheduler_stats.report(slot);
-                        stats.worker_stats.report(slot);
+                        scheduler_stats.report(slot);
+                        worker_stats.report(slot);
                     }
                 }
             })
             .unwrap()
     }
 
-    fn start_time_thread(stats: Arc<TimeStats>, exit: Arc<AtomicBool>) -> JoinHandle<()> {
+    fn start_time_thread(
+        scheduler_stats: Arc<SchedulerTimeStats>,
+        worker_stats: Arc<WorkerTimeStats>,
+        exit: Arc<AtomicBool>,
+    ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("solBanknTimeSts".to_string())
             .spawn(move || {
                 while !exit.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    stats.scheduler_stats.report();
-                    stats.worker_stats.report();
+                    scheduler_stats.report();
+                    worker_stats.report();
                 }
             })
             .unwrap()
