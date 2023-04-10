@@ -39,7 +39,7 @@ use {
     std::{
         cmp, env,
         sync::{
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
         },
         thread::{self, Builder, JoinHandle},
@@ -54,6 +54,7 @@ mod forwarder;
 mod multi_iterator_scheduler;
 mod packet_receiver;
 mod scheduler_messages;
+mod stats_reporter;
 mod thread_aware_account_locks;
 mod worker;
 
@@ -565,6 +566,14 @@ impl BankingStage {
         let (forward_work_sender, forward_work_receiver) = unbounded();
         let (finished_forward_work_sender, finished_forward_work_receiver) = unbounded();
 
+        let exit = Arc::new(AtomicBool::new(false));
+        let (stats_reporter_hdl, stats) = stats_reporter::StatsReporter::new(
+            exit,
+            poh_recorder.read().unwrap().new_leader_bank_notifier(),
+        );
+        bank_thread_hdls.push(stats_reporter_hdl.slot_thread_hdl);
+        bank_thread_hdls.push(stats_reporter_hdl.time_thread_hdl);
+
         bank_thread_hdls.push({
             let scheduler = MultiIteratorScheduler::new(
                 num_workers as usize,
@@ -575,6 +584,7 @@ impl BankingStage {
                 forward_work_sender,
                 finished_forward_work_receiver,
                 PacketDeserializer::new(non_vote_receiver),
+                stats.clone(),
             );
 
             Builder::new()
@@ -618,6 +628,7 @@ impl BankingStage {
                 forwarder,
                 finished_forward_work_sender.clone(),
                 poh_recorder.read().unwrap().new_leader_bank_notifier(),
+                stats.clone(),
             );
 
             bank_thread_hdls.push(

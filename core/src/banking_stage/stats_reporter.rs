@@ -66,12 +66,15 @@ impl WorkerTimeStats {
 }
 
 pub struct StatsReporter {
-    slot_thread_hdl: JoinHandle<()>,
-    time_thread_hdl: JoinHandle<()>,
+    pub slot_thread_hdl: JoinHandle<()>,
+    pub time_thread_hdl: JoinHandle<()>,
 }
 
 impl StatsReporter {
-    pub fn new(exit: Arc<AtomicBool>, leader_bank_notifier: LeaderBankNotifier) -> (Self, Stats) {
+    pub fn new(
+        exit: Arc<AtomicBool>,
+        leader_bank_notifier: Arc<LeaderBankNotifier>,
+    ) -> (Self, Stats) {
         let stats = Stats::default();
         let slot_thread_hdl =
             Self::start_slot_thread(stats.slot_stats.clone(), exit.clone(), leader_bank_notifier);
@@ -85,15 +88,10 @@ impl StatsReporter {
         )
     }
 
-    pub fn join(self) -> std::thread::Result<()> {
-        self.slot_thread_hdl.join()?;
-        self.time_thread_hdl.join()
-    }
-
     fn start_slot_thread(
         stats: Arc<SlotStats>,
         exit: Arc<AtomicBool>,
-        leader_bank_notifier: LeaderBankNotifier,
+        leader_bank_notifier: Arc<LeaderBankNotifier>,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("solBanknSlotSts".to_string())

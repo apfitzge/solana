@@ -6,6 +6,7 @@ use {
             ConsumeWork, FinishedConsumeWork, FinishedForwardWork, ForwardWork, TransactionBatchId,
             TransactionId,
         },
+        stats_reporter::Stats,
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
     },
     crate::{
@@ -274,6 +275,8 @@ pub struct MultiIteratorScheduler {
     transaction_id_generator: TransactionIdGenerator,
     /// Generator for batch ids
     batch_id_generator: BatchIdGenerator,
+    /// Stats for scheduler
+    _stats: Stats,
 }
 
 impl MultiIteratorScheduler {
@@ -286,6 +289,7 @@ impl MultiIteratorScheduler {
         forward_work_sender: Sender<ForwardWork>,
         finished_forward_work_receiver: Receiver<FinishedForwardWork>,
         packet_deserializer: PacketDeserializer,
+        stats: Stats,
     ) -> Self {
         Self {
             num_threads,
@@ -302,6 +306,7 @@ impl MultiIteratorScheduler {
             packet_deserializer,
             transaction_id_generator: TransactionIdGenerator::default(),
             batch_id_generator: BatchIdGenerator::default(),
+            _stats: stats,
         }
     }
 
@@ -993,6 +998,7 @@ mod tests {
             forward_work_sender,
             finished_forward_work_receiver,
             packet_deserializer,
+            Stats::default(),
         );
 
         (test_frame, multi_iterator_scheduler)
