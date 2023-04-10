@@ -7,9 +7,13 @@ use {
         ForwardOption,
     },
     crossbeam_channel::{select, Receiver, RecvError, SendError, Sender},
+    solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_runtime::bank::Bank,
-    std::{sync::Arc, time::Duration},
+    std::{
+        sync::{atomic::Ordering, Arc},
+        time::Duration,
+    },
     thiserror::Error,
 };
 
@@ -52,7 +56,7 @@ pub(crate) struct Worker {
     forwarded_sender: Sender<FinishedForwardWork>,
 
     leader_bank_notifier: Arc<LeaderBankNotifier>,
-    _stats: Stats,
+    stats: Stats,
 }
 
 impl Worker {
@@ -76,7 +80,7 @@ impl Worker {
             forwarder,
             forwarded_sender,
             leader_bank_notifier,
-            _stats: stats,
+            stats,
         }
     }
 
@@ -100,7 +104,14 @@ impl Worker {
 
         for work in std::iter::once(consume_work).chain(self.consume_receiver.try_iter()) {
             if bank.is_complete() {
-                if let Some(new_bank) = self.get_consume_bank() {
+                let (maybe_new_bank, wait_for_bank_time_us) = measure_us!(self.get_consume_bank());
+                self.stats
+                    .time_stats
+                    .worker_stats
+                    .wait_for_bank_time_us
+                    .fetch_add(wait_for_bank_time_us, Ordering::Relaxed);
+
+                if let Some(new_bank) = maybe_new_bank {
                     bank = new_bank;
                 } else {
                     return self.retry_drain(work);
@@ -117,12 +128,41 @@ impl Worker {
         let summary =
             self.consumer
                 .process_and_record_transactions(bank, &consume_work.transactions, 0);
+
+        self.stats
+            .slot_stats
+            .worker_stats
+            .num_transactions
+            .fetch_add(consume_work.transactions.len() as u64, Ordering::Relaxed);
+        self.stats
+            .slot_stats
+            .worker_stats
+            .num_executed_transactions
+            .fetch_add(
+                summary
+                    .execute_and_commit_transactions_output
+                    .executed_transactions_count as u64,
+                Ordering::Relaxed,
+            );
+        self.stats
+            .slot_stats
+            .worker_stats
+            .num_retryable_transactions
+            .fetch_add(
+                summary
+                    .execute_and_commit_transactions_output
+                    .retryable_transaction_indexes
+                    .len() as u64,
+                Ordering::Relaxed,
+            );
+
         self.consumed_sender.send(FinishedConsumeWork {
             work: consume_work,
             retryable_indexes: summary
                 .execute_and_commit_transactions_output
                 .retryable_transaction_indexes,
         })?;
+
         Ok(())
     }
 

@@ -2,7 +2,7 @@ use {
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc,
         },
         thread::JoinHandle,
@@ -33,11 +33,33 @@ impl SchedulerSlotStats {
 }
 
 #[derive(Default)]
-pub struct WorkerSlotStats {}
+pub struct WorkerSlotStats {
+    pub num_transactions: AtomicU64,
+    pub num_executed_transactions: AtomicU64,
+    pub num_retryable_transactions: AtomicU64,
+}
 
 impl WorkerSlotStats {
     fn report(&self, slot: u64) {
-        datapoint_info!("banking_stage-worker_slot_stats", ("slot", slot, i64));
+        datapoint_info!(
+            "banking_stage-worker_slot_stats",
+            ("slot", slot, i64),
+            (
+                "num_transactions",
+                self.num_transactions.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_executed_transactions",
+                self.num_executed_transactions.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_retryable_transactions",
+                self.num_retryable_transactions.swap(0, Ordering::Relaxed),
+                i64
+            ),
+        );
     }
 }
 
@@ -52,16 +74,25 @@ pub struct SchedulerTimeStats {}
 
 impl SchedulerTimeStats {
     fn report(&self) {
-        datapoint_info!("banking_stage-scheduler_time_stats");
+        // datapoint_info!("banking_stage-scheduler_time_stats");
     }
 }
 
 #[derive(Default)]
-pub struct WorkerTimeStats {}
+pub struct WorkerTimeStats {
+    pub wait_for_bank_time_us: AtomicU64,
+}
 
 impl WorkerTimeStats {
     fn report(&self) {
-        datapoint_info!("banking_stage-worker_time_stats");
+        datapoint_info!(
+            "banking_stage-worker_time_stats",
+            (
+                "wait_for_bank_time_us",
+                self.wait_for_bank_time_us.swap(0, Ordering::Relaxed),
+                i64
+            )
+        );
     }
 }
 
