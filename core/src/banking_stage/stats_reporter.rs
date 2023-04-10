@@ -96,7 +96,7 @@ impl StatsReporter {
         std::thread::Builder::new()
             .name("solBanknSlotSts".to_string())
             .spawn(move || {
-                while exit.load(Ordering::Relaxed) {
+                while !exit.load(Ordering::Relaxed) {
                     if let Some(slot) =
                         leader_bank_notifier.wait_for_completed(Duration::from_millis(500))
                     {
@@ -112,7 +112,7 @@ impl StatsReporter {
         std::thread::Builder::new()
             .name("solBanknTimeSts".to_string())
             .spawn(move || {
-                while exit.load(Ordering::Relaxed) {
+                while !exit.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     stats.scheduler_stats.report();
                     stats.worker_stats.report();
