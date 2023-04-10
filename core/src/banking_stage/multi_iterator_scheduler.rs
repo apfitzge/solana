@@ -19,6 +19,7 @@ use {
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError},
     itertools::Itertools,
     min_max_heap::MinMaxHeap,
+    solana_measure::measure_us,
     solana_perf::perf_libs,
     solana_runtime::{
         bank::{Bank, BankStatusCache},
@@ -267,7 +268,12 @@ impl MultiIteratorScheduler {
             if !self.container.priority_queue.is_empty() {
                 let decision = self.decision_maker.make_consume_or_forward_decision();
                 match decision {
-                    BufferedPacketsDecision::Consume(_) => self.schedule_consume()?,
+                    BufferedPacketsDecision::Consume(_) => {
+                        let (_, schedule_consume_time_us) = measure_us!(self.schedule_consume()?);
+                        self.time_stats
+                            .schedule_consume_time_us
+                            .fetch_add(schedule_consume_time_us, Ordering::Relaxed);
+                    }
                     BufferedPacketsDecision::Forward => self.schedule_forward(false)?,
                     BufferedPacketsDecision::ForwardAndHold => self.schedule_forward(true)?,
                     BufferedPacketsDecision::Hold => {}

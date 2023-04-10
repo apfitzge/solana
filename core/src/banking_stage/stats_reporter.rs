@@ -72,6 +72,7 @@ impl WorkerSlotStats {
 #[derive(Default)]
 pub struct SchedulerTimeStats {
     pub num_packets_received: AtomicU64,
+    pub schedule_consume_time_us: AtomicU64,
 }
 
 impl SchedulerTimeStats {
@@ -81,6 +82,11 @@ impl SchedulerTimeStats {
             (
                 "num_packets_received",
                 self.num_packets_received.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "schedule_consume_time_us",
+                self.schedule_consume_time_us.swap(0, Ordering::Relaxed),
                 i64
             )
         );
