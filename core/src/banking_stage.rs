@@ -51,18 +51,19 @@ pub mod committer;
 pub mod consumer;
 mod decision_maker;
 mod forwarder;
+mod multi_iterator_scheduler;
 mod packet_receiver;
+mod scheduler_messages;
+mod thread_aware_account_locks;
+mod worker;
 
 #[allow(dead_code)]
 mod multi_iterator_scheduler;
 
 #[allow(dead_code)]
-mod scheduler_messages;
-
-#[allow(dead_code)]
 mod thread_aware_account_locks;
 #[allow(dead_code)]
-mod worker;
+mod stats_reporter;
 
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;
