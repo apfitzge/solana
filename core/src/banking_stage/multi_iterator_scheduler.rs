@@ -36,7 +36,7 @@ use {
     },
     std::{
         collections::{hash_map::Entry, HashMap},
-        sync::{Arc, RwLockReadGuard},
+        sync::{atomic::Ordering, Arc, RwLockReadGuard},
         time::Duration,
     },
     thiserror::Error,
@@ -393,6 +393,12 @@ impl MultiIteratorScheduler {
                     transaction_batch.len(),
                     thread_id,
                 );
+
+                scheduler
+                    .slot_stats
+                    .num_consume_scheduled
+                    .fetch_add(transaction_batch.len() as u64, Ordering::Relaxed);
+
                 scheduler.consume_work_senders[thread_id]
                     .send(ConsumeWork {
                         batch_id,
@@ -509,7 +515,13 @@ impl MultiIteratorScheduler {
             .receive_packets(timeout, remaining_capacity);
 
         match receive_packet_results {
-            Ok(receive_packet_results) => self.sanitize_and_buffer(receive_packet_results),
+            Ok(receive_packet_results) => {
+                self.time_stats.num_packets_received.fetch_add(
+                    receive_packet_results.deserialized_packets.len() as u64,
+                    Ordering::Relaxed,
+                );
+                self.sanitize_and_buffer(receive_packet_results)
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(SchedulerError::DisconnectedReceiveChannel(
                     "packet deserializer",
