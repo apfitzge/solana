@@ -3,6 +3,7 @@ use {
         consumer::Consumer,
         forwarder::Forwarder,
         scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedForwardWork, ForwardWork},
+        stats_reporter::Stats,
         ForwardOption,
     },
     crossbeam_channel::{select, Receiver, RecvError, SendError, Sender},
@@ -51,6 +52,7 @@ pub(crate) struct Worker {
     forwarded_sender: Sender<FinishedForwardWork>,
 
     leader_bank_notifier: Arc<LeaderBankNotifier>,
+    _stats: Stats,
 }
 
 impl Worker {
@@ -63,6 +65,7 @@ impl Worker {
         forwarder: Forwarder,
         forwarded_sender: Sender<FinishedForwardWork>,
         leader_bank_notifier: Arc<LeaderBankNotifier>,
+        stats: Stats,
     ) -> Self {
         Self {
             consume_receiver,
@@ -73,6 +76,7 @@ impl Worker {
             forwarder,
             forwarded_sender,
             leader_bank_notifier,
+            _stats: stats,
         }
     }
 
@@ -292,6 +296,7 @@ mod tests {
             forwarder,
             forwarded_sender,
             poh_recorder.read().unwrap().new_leader_bank_notifier(),
+            Stats::default(),
         );
 
         (
