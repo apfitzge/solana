@@ -936,16 +936,16 @@ mod tests {
     // such that our tests can be more easily set up and run.
     struct TestFrame {
         bank: Arc<Bank>,
-        ledger_path: TempDir,
-        entry_receiver: Receiver<WorkingBankEntry>,
-        record_receiver: Receiver<Record>,
+        _ledger_path: TempDir,
+        _entry_receiver: Receiver<WorkingBankEntry>,
+        _record_receiver: Receiver<Record>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         banking_packet_sender: Sender<Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>>,
 
         consume_work_receivers: Vec<Receiver<ConsumeWork>>,
         finished_consume_work_sender: Sender<FinishedConsumeWork>,
-        forward_work_receiver: Receiver<ForwardWork>,
-        finished_forward_work_sender: Sender<FinishedForwardWork>,
+        _forward_work_receiver: Receiver<ForwardWork>,
+        _finished_forward_work_sender: Sender<FinishedForwardWork>,
     }
 
     fn create_test_frame(num_threads: usize) -> (TestFrame, MultiIteratorScheduler) {
@@ -983,15 +983,15 @@ mod tests {
 
         let test_frame = TestFrame {
             bank,
-            ledger_path,
-            entry_receiver,
-            record_receiver,
+            _ledger_path: ledger_path,
+            _entry_receiver: entry_receiver,
+            _record_receiver: record_receiver,
             poh_recorder,
             banking_packet_sender,
             consume_work_receivers,
             finished_consume_work_sender,
-            forward_work_receiver,
-            finished_forward_work_sender,
+            _forward_work_receiver: forward_work_receiver,
+            _finished_forward_work_sender: finished_forward_work_sender,
         };
         let multi_iterator_scheduler = MultiIteratorScheduler::new(
             num_threads,
