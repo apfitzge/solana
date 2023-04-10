@@ -9,7 +9,7 @@ use {
     crossbeam_channel::{select, Receiver, RecvError, SendError, Sender},
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
-    solana_runtime::bank::Bank,
+    solana_runtime::{bank::Bank, transaction_error_metrics::TransactionErrorMetrics},
     std::{
         sync::{atomic::Ordering, Arc},
         time::Duration,
@@ -107,6 +107,7 @@ impl Worker {
             return self.retry_drain(consume_work);
         };
 
+        let mut error_counters = TransactionErrorMetrics::default();
         for work in std::iter::once(consume_work).chain(self.consume_receiver.try_iter()) {
             if bank.is_complete() {
                 let (maybe_new_bank, wait_for_bank_time_us) = measure_us!(self.get_consume_bank());
@@ -117,20 +118,35 @@ impl Worker {
                 if let Some(new_bank) = maybe_new_bank {
                     bank = new_bank;
                 } else {
-                    return self.retry_drain(work);
+                    self.retry_drain(work)?;
+                    break;
                 }
             }
-            self.consume(&bank, work)?;
+            self.consume(&bank, work, &mut error_counters)?;
+        }
+
+        if error_counters.total > 0 {
+            self.slot_stats.accumulate_error_counts(error_counters);
         }
 
         Ok(())
     }
 
     /// Consume a single batch.
-    fn consume(&self, bank: &Arc<Bank>, consume_work: ConsumeWork) -> Result<(), WorkerError> {
+    fn consume(
+        &self,
+        bank: &Arc<Bank>,
+        consume_work: ConsumeWork,
+        error_counters: &mut TransactionErrorMetrics,
+    ) -> Result<(), WorkerError> {
         let summary =
             self.consumer
                 .process_and_record_transactions(bank, &consume_work.transactions, 0);
+        error_counters.accumulate(
+            &summary
+                .execute_and_commit_transactions_output
+                .error_counters,
+        );
 
         self.slot_stats
             .num_transactions
@@ -141,6 +157,7 @@ impl Worker {
                 .executed_transactions_count,
             Ordering::Relaxed,
         );
+
         self.slot_stats.num_retryable_transactions.fetch_add(
             summary
                 .execute_and_commit_transactions_output

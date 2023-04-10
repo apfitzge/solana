@@ -600,7 +600,7 @@ impl BankingStage {
         });
 
         for (index, consume_work_receiver) in consume_work_receivers.into_iter().enumerate() {
-            let id = index + NUM_VOTE_PROCESSING_THREADS as usize;
+            let id: u32 = index as u32 + NUM_VOTE_PROCESSING_THREADS;
 
             let forwarder = Forwarder::new(
                 poh_recorder.clone(),
@@ -617,7 +617,7 @@ impl BankingStage {
             let consumer = Consumer::new(
                 committer,
                 poh_recorder.read().unwrap().new_recorder(),
-                QosService::new(id as u32),
+                QosService::new(id),
                 log_messages_bytes_limit,
             );
 
