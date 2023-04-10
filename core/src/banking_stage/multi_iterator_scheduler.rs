@@ -76,14 +76,17 @@ struct TransactionPacketContainer {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
     id_to_transaction_ttl: HashMap<TransactionId, SanitizedTransactionTTL>,
     id_to_packet: HashMap<TransactionId, DeserializedPacket>,
+
+    time_stats: Arc<SchedulerTimeStats>,
 }
 
 impl TransactionPacketContainer {
-    fn with_capacity(capacity: usize) -> Self {
+    fn with_capacity(capacity: usize, time_stats: Arc<SchedulerTimeStats>) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),
             id_to_transaction_ttl: HashMap::with_capacity(capacity),
             id_to_packet: HashMap::with_capacity(capacity),
+            time_stats,
         }
     }
 
@@ -107,6 +110,10 @@ impl TransactionPacketContainer {
     /// Returns true if the id was successfully pushed into the priority queue
     fn push_priority_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
         if self.priority_queue.len() == self.priority_queue.capacity() {
+            self.time_stats
+                .num_packets_dropped
+                .fetch_add(1, Ordering::Relaxed);
+
             let popped_id = self.priority_queue.push_pop_min(priority_id);
             if popped_id == priority_id {
                 return false;
@@ -300,7 +307,7 @@ impl MultiIteratorScheduler {
             thread_in_flight_limit: 6400, // ~100 batches
             decision_maker,
             account_locks: ThreadAwareAccountLocks::new(num_threads),
-            container: TransactionPacketContainer::with_capacity(700_000),
+            container: TransactionPacketContainer::with_capacity(700_000, time_stats.clone()),
             in_flight_tracker: InFlightTracker::new(num_threads),
             root_bank_cache,
             consume_work_senders,
@@ -402,7 +409,7 @@ impl MultiIteratorScheduler {
                 scheduler
                     .slot_stats
                     .num_consume_scheduled
-                    .fetch_add(transaction_batch.len() as u64, Ordering::Relaxed);
+                    .fetch_add(transaction_batch.len(), Ordering::Relaxed);
 
                 scheduler.consume_work_senders[thread_id]
                     .send(ConsumeWork {
@@ -522,7 +529,7 @@ impl MultiIteratorScheduler {
         match receive_packet_results {
             Ok(receive_packet_results) => {
                 self.time_stats.num_packets_received.fetch_add(
-                    receive_packet_results.deserialized_packets.len() as u64,
+                    receive_packet_results.deserialized_packets.len(),
                     Ordering::Relaxed,
                 );
                 self.sanitize_and_buffer(receive_packet_results)

@@ -2,7 +2,7 @@ use {
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     std::{
         sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc,
         },
         thread::JoinHandle,
@@ -21,7 +21,7 @@ pub struct Stats {
 
 #[derive(Default)]
 pub struct SchedulerSlotStats {
-    pub num_consume_scheduled: AtomicU64,
+    pub num_consume_scheduled: AtomicUsize,
 }
 
 impl SchedulerSlotStats {
@@ -40,9 +40,9 @@ impl SchedulerSlotStats {
 
 #[derive(Default)]
 pub struct WorkerSlotStats {
-    pub num_transactions: AtomicU64,
-    pub num_executed_transactions: AtomicU64,
-    pub num_retryable_transactions: AtomicU64,
+    pub num_transactions: AtomicUsize,
+    pub num_executed_transactions: AtomicUsize,
+    pub num_retryable_transactions: AtomicUsize,
 }
 
 impl WorkerSlotStats {
@@ -71,7 +71,8 @@ impl WorkerSlotStats {
 
 #[derive(Default)]
 pub struct SchedulerTimeStats {
-    pub num_packets_received: AtomicU64,
+    pub num_packets_received: AtomicUsize,
+    pub num_packets_dropped: AtomicUsize,
     pub schedule_consume_time_us: AtomicU64,
 }
 
@@ -82,6 +83,11 @@ impl SchedulerTimeStats {
             (
                 "num_packets_received",
                 self.num_packets_received.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_packets_dropped",
+                self.num_packets_dropped.swap(0, Ordering::Relaxed),
                 i64
             ),
             (

@@ -134,18 +134,18 @@ impl Worker {
 
         self.slot_stats
             .num_transactions
-            .fetch_add(consume_work.transactions.len() as u64, Ordering::Relaxed);
+            .fetch_add(consume_work.transactions.len(), Ordering::Relaxed);
         self.slot_stats.num_executed_transactions.fetch_add(
             summary
                 .execute_and_commit_transactions_output
-                .executed_transactions_count as u64,
+                .executed_transactions_count,
             Ordering::Relaxed,
         );
         self.slot_stats.num_retryable_transactions.fetch_add(
             summary
                 .execute_and_commit_transactions_output
                 .retryable_transaction_indexes
-                .len() as u64,
+                .len(),
             Ordering::Relaxed,
         );
 
@@ -176,7 +176,15 @@ impl Worker {
 
     /// Send transactions back to scheduler as retryable.
     fn retry(&self, work: ConsumeWork) -> Result<(), WorkerError> {
-        let retryable_indexes = (0..work.transactions.len()).collect();
+        let num_transactions = work.transactions.len();
+        self.slot_stats
+            .num_transactions
+            .fetch_add(num_transactions, Ordering::Relaxed);
+        self.slot_stats
+            .num_retryable_transactions
+            .fetch_add(num_transactions, Ordering::Relaxed);
+
+        let retryable_indexes = (0..num_transactions).collect();
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes,
