@@ -3,7 +3,7 @@ use {
         consumer::Consumer,
         forwarder::Forwarder,
         scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedForwardWork, ForwardWork},
-        stats_reporter::Stats,
+        stats_reporter::{WorkerSlotStats, WorkerTimeStats},
         ForwardOption,
     },
     crossbeam_channel::{select, Receiver, RecvError, SendError, Sender},
@@ -56,10 +56,13 @@ pub(crate) struct Worker {
     forwarded_sender: Sender<FinishedForwardWork>,
 
     leader_bank_notifier: Arc<LeaderBankNotifier>,
-    stats: Stats,
+
+    slot_stats: Arc<WorkerSlotStats>,
+    time_stats: Arc<WorkerTimeStats>,
 }
 
 impl Worker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         consume_receiver: Receiver<ConsumeWork>,
         consumer: Consumer,
@@ -69,7 +72,8 @@ impl Worker {
         forwarder: Forwarder,
         forwarded_sender: Sender<FinishedForwardWork>,
         leader_bank_notifier: Arc<LeaderBankNotifier>,
-        stats: Stats,
+        slot_stats: Arc<WorkerSlotStats>,
+        time_stats: Arc<WorkerTimeStats>,
     ) -> Self {
         Self {
             consume_receiver,
@@ -80,7 +84,8 @@ impl Worker {
             forwarder,
             forwarded_sender,
             leader_bank_notifier,
-            stats,
+            slot_stats,
+            time_stats,
         }
     }
 
@@ -105,9 +110,7 @@ impl Worker {
         for work in std::iter::once(consume_work).chain(self.consume_receiver.try_iter()) {
             if bank.is_complete() {
                 let (maybe_new_bank, wait_for_bank_time_us) = measure_us!(self.get_consume_bank());
-                self.stats
-                    .time_stats
-                    .worker_stats
+                self.time_stats
                     .wait_for_bank_time_us
                     .fetch_add(wait_for_bank_time_us, Ordering::Relaxed);
 
@@ -129,32 +132,22 @@ impl Worker {
             self.consumer
                 .process_and_record_transactions(bank, &consume_work.transactions, 0);
 
-        self.stats
-            .slot_stats
-            .worker_stats
+        self.slot_stats
             .num_transactions
             .fetch_add(consume_work.transactions.len() as u64, Ordering::Relaxed);
-        self.stats
-            .slot_stats
-            .worker_stats
-            .num_executed_transactions
-            .fetch_add(
-                summary
-                    .execute_and_commit_transactions_output
-                    .executed_transactions_count as u64,
-                Ordering::Relaxed,
-            );
-        self.stats
-            .slot_stats
-            .worker_stats
-            .num_retryable_transactions
-            .fetch_add(
-                summary
-                    .execute_and_commit_transactions_output
-                    .retryable_transaction_indexes
-                    .len() as u64,
-                Ordering::Relaxed,
-            );
+        self.slot_stats.num_executed_transactions.fetch_add(
+            summary
+                .execute_and_commit_transactions_output
+                .executed_transactions_count as u64,
+            Ordering::Relaxed,
+        );
+        self.slot_stats.num_retryable_transactions.fetch_add(
+            summary
+                .execute_and_commit_transactions_output
+                .retryable_transaction_indexes
+                .len() as u64,
+            Ordering::Relaxed,
+        );
 
         self.consumed_sender.send(FinishedConsumeWork {
             work: consume_work,
@@ -336,7 +329,8 @@ mod tests {
             forwarder,
             forwarded_sender,
             poh_recorder.read().unwrap().new_leader_bank_notifier(),
-            Stats::default(),
+            Arc::default(),
+            Arc::default(),
         );
 
         (

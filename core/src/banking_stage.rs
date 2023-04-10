@@ -585,7 +585,8 @@ impl BankingStage {
                 forward_work_sender,
                 finished_forward_work_receiver,
                 PacketDeserializer::new(non_vote_receiver),
-                stats.clone(),
+                stats.scheduler_slot_stats.clone(),
+                stats.scheduler_time_stats.clone(),
             );
 
             Builder::new()
@@ -629,7 +630,8 @@ impl BankingStage {
                 forwarder,
                 finished_forward_work_sender.clone(),
                 poh_recorder.read().unwrap().new_leader_bank_notifier(),
-                stats.clone(),
+                stats.worker_slot_stats.clone(),
+                stats.worker_time_stats.clone(),
             );
 
             bank_thread_hdls.push(
