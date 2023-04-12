@@ -58,15 +58,6 @@ mod stats_reporter;
 mod thread_aware_account_locks;
 mod worker;
 
-#[allow(dead_code)]
-mod multi_iterator_scheduler;
-
-#[allow(dead_code)]
-mod thread_aware_account_locks;
-
-#[allow(dead_code)]
-mod stats_reporter;
-
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;
 
