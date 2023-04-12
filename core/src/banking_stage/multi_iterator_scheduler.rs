@@ -856,8 +856,8 @@ mod tests {
 
         consume_work_receivers: Vec<Receiver<ConsumeWork>>,
         finished_consume_work_sender: Sender<FinishedConsumeWork>,
-        _forward_work_receiver: Receiver<ForwardWork>,
-        _finished_forward_work_sender: Sender<FinishedForwardWork>,
+        forward_work_receiver: Receiver<ForwardWork>,
+        finished_forward_work_sender: Sender<FinishedForwardWork>,
     }
 
     fn create_test_frame(num_threads: usize) -> (TestFrame, MultiIteratorScheduler) {
@@ -902,8 +902,8 @@ mod tests {
             banking_packet_sender,
             consume_work_receivers,
             finished_consume_work_sender,
-            _forward_work_receiver: forward_work_receiver,
-            _finished_forward_work_sender: finished_forward_work_sender,
+            forward_work_receiver,
+            finished_forward_work_sender,
         };
         let multi_iterator_scheduler = MultiIteratorScheduler::new(
             num_threads,
