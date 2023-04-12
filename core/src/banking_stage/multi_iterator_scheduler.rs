@@ -17,8 +17,9 @@ use {
         unprocessed_packet_batches::DeserializedPacket,
     },
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError},
+    crossbeam_skiplist::SkipSet,
+    dashmap::DashMap,
     itertools::Itertools,
-    min_max_heap::MinMaxHeap,
     solana_measure::measure_us,
     solana_perf::perf_libs,
     solana_runtime::{
@@ -36,7 +37,7 @@ use {
         transaction::SanitizedTransaction,
     },
     std::{
-        collections::{hash_map::Entry, HashMap},
+        collections::HashMap,
         sync::{atomic::Ordering, Arc, RwLockReadGuard},
         time::Duration,
     },
@@ -44,9 +45,10 @@ use {
 };
 
 struct TransactionPacketContainer {
-    priority_queue: MinMaxHeap<TransactionId>,
-    id_to_transaction: HashMap<TransactionId, SanitizedTransaction>,
-    id_to_packet: HashMap<TransactionId, DeserializedPacket>,
+    capacity: usize,
+    priority_queue: SkipSet<TransactionId>,
+    id_to_transaction: DashMap<TransactionId, SanitizedTransaction>,
+    id_to_packet: DashMap<TransactionId, DeserializedPacket>,
 
     time_stats: Arc<SchedulerTimeStats>,
 }
@@ -54,9 +56,10 @@ struct TransactionPacketContainer {
 impl TransactionPacketContainer {
     fn with_capacity(capacity: usize, time_stats: Arc<SchedulerTimeStats>) -> Self {
         Self {
-            priority_queue: MinMaxHeap::with_capacity(capacity),
-            id_to_transaction: HashMap::with_capacity(capacity),
-            id_to_packet: HashMap::with_capacity(capacity),
+            capacity,
+            priority_queue: SkipSet::new(),
+            id_to_transaction: DashMap::with_capacity(capacity),
+            id_to_packet: DashMap::with_capacity(capacity),
             time_stats,
         }
     }
@@ -78,20 +81,21 @@ impl TransactionPacketContainer {
 
     /// Returns true if the id was successfully pushed into the priority queue
     fn push_priority_queue(&mut self, transaction_id: TransactionId) -> bool {
-        if self.priority_queue.len() == self.priority_queue.capacity() {
+        if self.priority_queue.len() == self.capacity {
             self.time_stats
                 .num_packets_dropped
                 .fetch_add(1, Ordering::Relaxed);
 
-            let popped_id = self.priority_queue.push_pop_min(transaction_id);
-            if popped_id == transaction_id {
+            self.priority_queue.insert(transaction_id);
+            let popped_id = self.priority_queue.front().unwrap();
+            if *popped_id.value() == transaction_id {
                 return false;
             } else {
                 self.id_to_packet.remove(&popped_id).unwrap();
                 self.id_to_transaction.remove(&popped_id).unwrap();
             }
         } else {
-            self.priority_queue.push(transaction_id);
+            self.priority_queue.insert(transaction_id);
         }
 
         true
@@ -293,16 +297,6 @@ impl MultiIteratorScheduler {
     }
 
     fn schedule_consume(&mut self) -> Result<(), SchedulerError> {
-        struct TopIter<'a, T: Ord + Sized> {
-            heap: &'a mut MinMaxHeap<T>,
-        }
-
-        impl<'a, T: Ord + Sized> TopIter<'a, T> {
-            fn take(&mut self, n: usize) -> impl Iterator<Item = T> + '_ {
-                (0..n).map_while(|_| self.heap.pop_max())
-            }
-        }
-
         // Take the top transactions from the priority queue
         // Note: we do not take all the transactions into a single batch
         //       because serialization time can be excessive when the queue
@@ -310,7 +304,7 @@ impl MultiIteratorScheduler {
         const MAX_TRANSACTIONS_PER_SCHEDULE_ITERATION: usize = 100_000;
         let transaction_ids = {
             TopIter {
-                heap: &mut self.container.priority_queue,
+                heap: &self.container.priority_queue,
             }
             .take(MAX_TRANSACTIONS_PER_SCHEDULE_ITERATION)
             .collect_vec()
@@ -374,7 +368,18 @@ impl MultiIteratorScheduler {
     }
 
     fn schedule_forward(&mut self, hold: bool) -> Result<(), SchedulerError> {
-        let transaction_ids = self.container.priority_queue.drain_desc().collect_vec();
+        // Take the top transactions from the priority queue
+        // Note: we do not take all the transactions into a single batch
+        //       because serialization time can be excessive when the queue
+        //       is very large
+        const MAX_TRANSACTIONS_PER_SCHEDULE_ITERATION: usize = 100_000;
+        let transaction_ids = {
+            TopIter {
+                heap: &self.container.priority_queue,
+            }
+            .take(MAX_TRANSACTIONS_PER_SCHEDULE_ITERATION)
+            .collect_vec()
+        };
         let bank = self.root_bank_cache.root_bank();
 
         let mut scanner = MultiIteratorScanner::new(
@@ -412,6 +417,7 @@ impl MultiIteratorScheduler {
                             .id_to_packet
                             .remove(id)
                             .unwrap()
+                            .1
                             .immutable_section()
                             .clone()
                     })
@@ -461,8 +467,7 @@ impl MultiIteratorScheduler {
             NON_EMPTY_RECEIVE_TIMEOUT
         };
 
-        let remaining_capacity =
-            self.container.priority_queue.capacity() - self.container.priority_queue.len();
+        let remaining_capacity = self.container.capacity - self.container.priority_queue.len();
 
         let receive_packet_results = self
             .packet_deserializer
@@ -599,8 +604,8 @@ impl MultiIteratorScheduler {
     ) {
         if successful {
             for id in ids {
-                if let Some(deserialized_packet) = self.container.id_to_packet.get_mut(&id) {
-                    deserialized_packet.forwarded = true;
+                if let Some(mut deserialized_packet) = self.container.id_to_packet.get_mut(&id) {
+                    deserialized_packet.value_mut().forwarded = true;
                 } else {
                     // If a packet is not in the map, then it was forwarded *without* holding
                     // and this can return early without iterating over the remaining ids.
@@ -657,7 +662,7 @@ impl<'a> ConsumePayload<'a> {
 
     fn should_consume(transaction_id: &TransactionId, payload: &mut Self) -> ProcessingDecision {
         let scheduler = &mut *payload.scheduler;
-        let Entry::Occupied(transaction_entry) = scheduler.container.id_to_transaction.entry(*transaction_id) else {
+        let dashmap::mapref::entry::Entry::Occupied(transaction_entry) = scheduler.container.id_to_transaction.entry(*transaction_id) else {
             panic!("transaction id should exist in container");
         };
         let transaction = transaction_entry.get();
@@ -779,7 +784,7 @@ impl<'a> ForwardPayload<'a> {
         if payload
             .bank
             .check_transaction_age(
-                transaction,
+                &transaction,
                 payload.max_age,
                 &payload.next_durable_nonce,
                 &payload.blockhash_queue,
@@ -794,7 +799,7 @@ impl<'a> ForwardPayload<'a> {
         // If the transaction is already in the bank we don't forward it
         if payload
             .bank
-            .is_transaction_already_processed(transaction, &payload.status_cache)
+            .is_transaction_already_processed(&transaction, &payload.status_cache)
         {
             payload.error_counters.already_processed += 1;
             return ProcessingDecision::Never;
@@ -807,6 +812,20 @@ impl<'a> ForwardPayload<'a> {
         } else {
             ProcessingDecision::Later
         }
+    }
+}
+
+struct TopIter<'a> {
+    heap: &'a SkipSet<TransactionId>,
+}
+
+impl<'a> TopIter<'a> {
+    fn take(&mut self, n: usize) -> impl Iterator<Item = TransactionId> + '_ {
+        (0..n).map_while(|_| self.heap.back()).map(|x| {
+            let id = *x.value();
+            x.remove();
+            id
+        })
     }
 }
 
