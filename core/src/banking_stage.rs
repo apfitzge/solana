@@ -11,7 +11,8 @@ use {
     },
     crate::{
         banking_stage::{
-            committer::Committer, multi_iterator_scheduler::MultiIteratorScheduler, worker::Worker,
+            committer::Committer, deserializer_service::DeserializerService,
+            multi_iterator_scheduler::MultiIteratorScheduler, worker::Worker,
         },
         banking_trace::BankingPacketReceiver,
         latest_unprocessed_votes::{LatestUnprocessedVotes, VoteSource},
@@ -50,6 +51,7 @@ use {
 pub mod committer;
 pub mod consumer;
 mod decision_maker;
+mod deserializer_service;
 mod forwarder;
 mod multi_iterator_scheduler;
 mod packet_receiver;
@@ -566,29 +568,47 @@ impl BankingStage {
         bank_thread_hdls.push(stats_reporter_hdl.slot_thread_hdl);
         bank_thread_hdls.push(stats_reporter_hdl.time_thread_hdl);
 
-        bank_thread_hdls.push({
-            let scheduler = MultiIteratorScheduler::new(
-                num_workers as usize,
-                DecisionMaker::new(cluster_info.id(), poh_recorder.clone()),
-                RootBankCache::new(bank_forks.clone()),
-                consume_work_senders,
-                finished_consume_work_receiver,
-                forward_work_sender,
-                finished_forward_work_receiver,
-                PacketDeserializer::new(non_vote_receiver),
-                stats.scheduler_slot_stats.clone(),
-                stats.scheduler_time_stats.clone(),
-            );
+        let scheduler = MultiIteratorScheduler::new(
+            num_workers as usize,
+            DecisionMaker::new(cluster_info.id(), poh_recorder.clone()),
+            RootBankCache::new(bank_forks.clone()),
+            consume_work_senders,
+            finished_consume_work_receiver,
+            forward_work_sender,
+            finished_forward_work_receiver,
+            PacketDeserializer::new(non_vote_receiver.clone()),
+            stats.scheduler_slot_stats.clone(),
+            stats.scheduler_time_stats.clone(),
+        );
+        let transaction_container = scheduler.container();
+        let transaction_id_generator = scheduler.transaction_id_generator.clone();
 
+        bank_thread_hdls.push({
             Builder::new()
                 .name("solTxScheduler".to_string())
-                .spawn(|| {
+                .spawn(move || {
                     if let Err(err) = scheduler.run() {
                         warn!("Transaction scheduler exited with: {err:?}");
                     }
                 })
                 .unwrap()
         });
+
+        for index in 0..4 {
+            let root_bank_cache = RootBankCache::new(bank_forks.clone());
+            let deserializer_service = DeserializerService::new(
+                non_vote_receiver.clone(),
+                transaction_container.clone(),
+                transaction_id_generator.clone(),
+                root_bank_cache,
+            );
+            bank_thread_hdls.push({
+                Builder::new()
+                    .name(format!("solTxInserter{index}"))
+                    .spawn(move || deserializer_service.run())
+                    .unwrap()
+            });
+        }
 
         for (index, consume_work_receiver) in consume_work_receivers.into_iter().enumerate() {
             let id: u32 = index as u32 + NUM_VOTE_PROCESSING_THREADS;

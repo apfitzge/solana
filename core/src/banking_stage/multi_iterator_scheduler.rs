@@ -38,13 +38,16 @@ use {
     },
     std::{
         collections::HashMap,
-        sync::{atomic::Ordering, Arc, RwLockReadGuard},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc, RwLockReadGuard,
+        },
         time::Duration,
     },
     thiserror::Error,
 };
 
-struct TransactionPacketContainer {
+pub struct TransactionPacketContainer {
     capacity: usize,
     priority_queue: SkipSet<TransactionId>,
     id_to_transaction: DashMap<TransactionId, SanitizedTransaction>,
@@ -64,48 +67,57 @@ impl TransactionPacketContainer {
         }
     }
 
-    fn push_priority_queue_with_map_inserts(
-        &mut self,
+    pub fn push_priority_queue_with_map_inserts(
+        &self,
         transaction_id: TransactionId,
         packet: ImmutableDeserializedPacket,
         transaction: SanitizedTransaction,
     ) {
-        if self.push_priority_queue(transaction_id) {
-            self.id_to_packet.insert(
-                transaction_id,
-                DeserializedPacket::from_immutable_section(packet),
-            );
-            self.id_to_transaction.insert(transaction_id, transaction);
-        }
+        // Insert into maps first, then into priority queue
+        self.id_to_packet.insert(
+            transaction_id,
+            DeserializedPacket::from_immutable_section(packet),
+        );
+        self.id_to_transaction.insert(transaction_id, transaction);
+
+        self.push_priority_queue(transaction_id);
+
+        // if self.push_priority_queue(transaction_id) {
+        //     self.id_to_packet.insert(
+        //         transaction_id,
+        //         DeserializedPacket::from_immutable_section(packet),
+        //     );
+        //     self.id_to_transaction.insert(transaction_id, transaction);
+        // }
     }
 
     /// Returns true if the id was successfully pushed into the priority queue
-    fn push_priority_queue(&mut self, transaction_id: TransactionId) -> bool {
-        if self.priority_queue.len() == self.capacity {
-            self.time_stats
-                .num_packets_dropped
-                .fetch_add(1, Ordering::Relaxed);
+    fn push_priority_queue(&self, transaction_id: TransactionId) -> bool {
+        // if self.priority_queue.len() == self.capacity {
+        //     self.time_stats
+        //         .num_packets_dropped
+        //         .fetch_add(1, Ordering::Relaxed);
 
-            self.priority_queue.insert(transaction_id);
-            let popped_id = self.priority_queue.front().unwrap();
-            if *popped_id.value() == transaction_id {
-                return false;
-            } else {
-                self.id_to_packet.remove(&popped_id).unwrap();
-                self.id_to_transaction.remove(&popped_id).unwrap();
-            }
-        } else {
-            self.priority_queue.insert(transaction_id);
-        }
+        //     self.priority_queue.insert(transaction_id);
+        //     let popped_id = self.priority_queue.front().unwrap();
+        //     if *popped_id.value() == transaction_id {
+        //         return false;
+        //     } else {
+        //         self.id_to_packet.remove(&popped_id).unwrap();
+        //         self.id_to_transaction.remove(&popped_id).unwrap();
+        //     }
+        // } else {
+        self.priority_queue.insert(transaction_id);
+        // }
 
         true
     }
 
-    fn succeed_transaction(&mut self, id: TransactionId) {
+    fn succeed_transaction(&self, id: TransactionId) {
         self.id_to_packet.remove(&id).unwrap();
     }
 
-    fn retry_transaction(&mut self, id: TransactionId, transaction: SanitizedTransaction) {
+    fn retry_transaction(&self, id: TransactionId, transaction: SanitizedTransaction) {
         if self.push_priority_queue(id) {
             // The packet remained in the map while we executed, so we only need to
             // push the transaction back in.
@@ -117,21 +129,32 @@ impl TransactionPacketContainer {
     }
 }
 
-struct TransactionIdGenerator {
-    index: u64,
+pub struct TransactionIdGenerator {
+    index: AtomicU64,
 }
 
 impl Default for TransactionIdGenerator {
     fn default() -> Self {
-        Self { index: u64::MAX }
+        Self {
+            index: AtomicU64::new(u64::MAX),
+        }
     }
 }
 
 impl TransactionIdGenerator {
-    fn next(&mut self, priority: u64) -> TransactionId {
-        let index = self.index;
-        self.index = self.index.wrapping_sub(1);
-        TransactionId::new(priority, index)
+    pub fn generate_n_ids(
+        &self,
+        n: u64,
+        priorities: impl Iterator<Item = u64>,
+    ) -> Vec<TransactionId> {
+        let mut start_id = self.index.fetch_sub(n, Ordering::Relaxed);
+        priorities
+            .map(|priority| {
+                let index = start_id;
+                start_id = start_id.wrapping_sub(1);
+                TransactionId::new(priority, index)
+            })
+            .collect_vec()
     }
 }
 
@@ -214,7 +237,7 @@ pub struct MultiIteratorScheduler {
     /// Tracks locks for in-flight transactions
     account_locks: ThreadAwareAccountLocks,
     /// Tracks all transactions/packets within scheduler
-    container: TransactionPacketContainer,
+    container: Arc<TransactionPacketContainer>,
     /// Tracks all in-flight transactions
     in_flight_tracker: InFlightTracker,
     /// Cached root bank for sanitizing transactions - updates only as new root banks are set
@@ -230,7 +253,7 @@ pub struct MultiIteratorScheduler {
     /// Receiver for packets from sigverify
     packet_deserializer: PacketDeserializer,
     /// Generator for transaction ids
-    transaction_id_generator: TransactionIdGenerator,
+    pub transaction_id_generator: Arc<TransactionIdGenerator>,
     /// Generator for batch ids
     batch_id_generator: BatchIdGenerator,
 
@@ -257,7 +280,10 @@ impl MultiIteratorScheduler {
             thread_in_flight_limit: 6400, // ~100 batches
             decision_maker,
             account_locks: ThreadAwareAccountLocks::new(num_threads),
-            container: TransactionPacketContainer::with_capacity(700_000, time_stats.clone()),
+            container: Arc::new(TransactionPacketContainer::with_capacity(
+                700_000,
+                time_stats.clone(),
+            )),
             in_flight_tracker: InFlightTracker::new(num_threads),
             root_bank_cache,
             consume_work_senders,
@@ -265,7 +291,7 @@ impl MultiIteratorScheduler {
             forward_work_sender,
             finished_forward_work_receiver,
             packet_deserializer,
-            transaction_id_generator: TransactionIdGenerator::default(),
+            transaction_id_generator: Arc::default(),
             batch_id_generator: BatchIdGenerator::default(),
             slot_stats,
             time_stats,
@@ -291,9 +317,16 @@ impl MultiIteratorScheduler {
                 }
             }
 
-            self.receive_and_buffer_packets()?;
+            // No long receive and buffer packets in the scheduling thread
+            // That's handled by the new threads
+            // self.receive_and_buffer_packets()?;
+
             self.receive_and_process_finished_work()?;
         }
+    }
+
+    pub fn container(&self) -> Arc<TransactionPacketContainer> {
+        self.container.clone()
     }
 
     fn schedule_consume(&mut self) -> Result<(), SchedulerError> {
@@ -385,7 +418,7 @@ impl MultiIteratorScheduler {
         let mut scanner = MultiIteratorScanner::new(
             &transaction_ids,
             MAX_NUM_TRANSACTIONS_PER_BATCH,
-            ForwardPayload::new(&mut self.container, &bank),
+            ForwardPayload::new(&self.container, &bank),
             ForwardPayload::should_forward,
         );
 
@@ -458,72 +491,72 @@ impl MultiIteratorScheduler {
             })
     }
 
-    fn receive_and_buffer_packets(&mut self) -> Result<(), SchedulerError> {
-        const EMPTY_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
-        const NON_EMPTY_RECEIVE_TIMEOUT: Duration = Duration::from_millis(0);
-        let timeout = if self.container.priority_queue.is_empty() {
-            EMPTY_RECEIVE_TIMEOUT
-        } else {
-            NON_EMPTY_RECEIVE_TIMEOUT
-        };
+    // fn receive_and_buffer_packets(&mut self) -> Result<(), SchedulerError> {
+    //     const EMPTY_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
+    //     const NON_EMPTY_RECEIVE_TIMEOUT: Duration = Duration::from_millis(0);
+    //     let timeout = if self.container.priority_queue.is_empty() {
+    //         EMPTY_RECEIVE_TIMEOUT
+    //     } else {
+    //         NON_EMPTY_RECEIVE_TIMEOUT
+    //     };
 
-        let remaining_capacity = self.container.capacity - self.container.priority_queue.len();
+    //     let remaining_capacity = self.container.capacity - self.container.priority_queue.len();
 
-        let receive_packet_results = self
-            .packet_deserializer
-            .receive_packets(timeout, remaining_capacity);
+    //     let receive_packet_results = self
+    //         .packet_deserializer
+    //         .receive_packets(timeout, remaining_capacity);
 
-        match receive_packet_results {
-            Ok(receive_packet_results) => {
-                self.time_stats.num_packets_received.fetch_add(
-                    receive_packet_results.deserialized_packets.len(),
-                    Ordering::Relaxed,
-                );
-                self.sanitize_and_buffer(receive_packet_results)
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(SchedulerError::DisconnectedReceiveChannel(
-                    "packet deserializer",
-                ));
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-        }
+    //     match receive_packet_results {
+    //         Ok(receive_packet_results) => {
+    //             self.time_stats.num_packets_received.fetch_add(
+    //                 receive_packet_results.deserialized_packets.len(),
+    //                 Ordering::Relaxed,
+    //             );
+    //             self.sanitize_and_buffer(receive_packet_results)
+    //         }
+    //         Err(RecvTimeoutError::Disconnected) => {
+    //             return Err(SchedulerError::DisconnectedReceiveChannel(
+    //                 "packet deserializer",
+    //             ));
+    //         }
+    //         Err(RecvTimeoutError::Timeout) => {}
+    //     }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
-    fn sanitize_and_buffer(&mut self, receive_packet_results: ReceivePacketResults) {
-        let root_bank = self.root_bank_cache.root_bank();
-        let tx_account_lock_limit = root_bank.get_transaction_account_lock_limit();
+    // fn sanitize_and_buffer(&mut self, receive_packet_results: ReceivePacketResults) {
+    //     let root_bank = self.root_bank_cache.root_bank();
+    //     let tx_account_lock_limit = root_bank.get_transaction_account_lock_limit();
 
-        for (packet, transaction) in receive_packet_results
-            .deserialized_packets
-            .into_iter()
-            .filter_map(|packet| {
-                packet
-                    .build_sanitized_transaction(
-                        &root_bank.feature_set,
-                        root_bank.vote_only_bank(),
-                        root_bank.as_ref(),
-                    )
-                    .map(|tx| (packet, tx))
-            })
-            .filter(|(_, transaction)| {
-                SanitizedTransaction::validate_account_locks(
-                    transaction.message(),
-                    tx_account_lock_limit,
-                )
-                .is_ok()
-            })
-        {
-            let transaction_id = self.transaction_id_generator.next(packet.priority());
-            self.container.push_priority_queue_with_map_inserts(
-                transaction_id,
-                packet,
-                transaction,
-            );
-        }
-    }
+    //     for (packet, transaction) in receive_packet_results
+    //         .deserialized_packets
+    //         .into_iter()
+    //         .filter_map(|packet| {
+    //             packet
+    //                 .build_sanitized_transaction(
+    //                     &root_bank.feature_set,
+    //                     root_bank.vote_only_bank(),
+    //                     root_bank.as_ref(),
+    //                 )
+    //                 .map(|tx| (packet, tx))
+    //         })
+    //         .filter(|(_, transaction)| {
+    //             SanitizedTransaction::validate_account_locks(
+    //                 transaction.message(),
+    //                 tx_account_lock_limit,
+    //             )
+    //             .is_ok()
+    //         })
+    //     {
+    //         let transaction_id = self.transaction_id_generator.next(packet.priority());
+    //         self.container.push_priority_queue_with_map_inserts(
+    //             transaction_id,
+    //             packet,
+    //             transaction,
+    //         );
+    //     }
+    // }
 
     fn receive_and_process_finished_work(&mut self) -> Result<(), SchedulerError> {
         self.receive_and_process_finished_consume_work()?;
@@ -734,7 +767,7 @@ struct ForwardPayload<'a> {
     /// Account locks used to prevent us from spam forwarding hot accounts
     account_locks: ReadWriteAccountSet,
 
-    container: &'a mut TransactionPacketContainer,
+    container: &'a TransactionPacketContainer,
     bank: &'a Bank,
     blockhash_queue: RwLockReadGuard<'a, BlockhashQueue>,
     status_cache: RwLockReadGuard<'a, BankStatusCache>,
@@ -744,7 +777,7 @@ struct ForwardPayload<'a> {
 }
 
 impl<'a> ForwardPayload<'a> {
-    fn new(container: &'a mut TransactionPacketContainer, bank: &'a Bank) -> Self {
+    fn new(container: &'a TransactionPacketContainer, bank: &'a Bank) -> Self {
         let blockhash_queue = bank.blockhash_queue.read().unwrap();
         let status_cache = bank.status_cache.read().unwrap();
         let next_durable_nonce = DurableNonce::from_blockhash(&blockhash_queue.last_hash());
