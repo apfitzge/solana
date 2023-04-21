@@ -151,8 +151,8 @@ impl BlockVerificationMethod {
 #[derive(Copy, Clone, EnumString, EnumVariantNames, Default, IntoStaticStr, Display)]
 #[strum(serialize_all = "kebab-case")]
 pub enum BlockProductionMethod {
-    #[default]
     ThreadLocalMultiIterator,
+    #[default]
     CentralSchedulerMultiIterator,
 }
 
