@@ -573,10 +573,11 @@ impl MultiIteratorScheduler {
                 )
                 .is_ok()
             })
-            .filter_map(|(packet, transaction)| {
-                r_blockhash
+            .map(|(packet, transaction)| {
+                let age = r_blockhash
                     .get_hash_age(transaction.message().recent_blockhash())
-                    .map(|age| (packet, transaction, age))
+                    .unwrap_or(0);
+                (packet, transaction, age)
             })
         {
             let max_age_slot = root_bank_slot
