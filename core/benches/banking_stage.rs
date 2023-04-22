@@ -182,7 +182,11 @@ enum TransactionType {
     ProgramsAndVotes,
 }
 
-fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
+fn bench_banking(
+    bencher: &mut Bencher,
+    tx_type: TransactionType,
+    block_production_method: BlockProductionMethod,
+) {
     solana_logger::setup();
     let num_threads = BankingStage::num_threads() as usize;
     //   a multiple of packet chunk duplicates to avoid races
@@ -282,7 +286,7 @@ fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
         let cluster_info = Arc::new(cluster_info);
         let (s, _r) = unbounded();
         let _banking_stage = BankingStage::new(
-            BlockProductionMethod::ThreadLocalMultiIterator,
+            block_production_method,
             &cluster_info,
             &poh_recorder,
             non_vote_receiver,
@@ -360,22 +364,74 @@ fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
 
 #[bench]
 fn bench_banking_stage_multi_accounts(bencher: &mut Bencher) {
-    bench_banking(bencher, TransactionType::Accounts);
+    bench_banking(
+        bencher,
+        TransactionType::Accounts,
+        BlockProductionMethod::ThreadLocalMultiIterator,
+    );
 }
 
 #[bench]
 fn bench_banking_stage_multi_programs(bencher: &mut Bencher) {
-    bench_banking(bencher, TransactionType::Programs);
+    bench_banking(
+        bencher,
+        TransactionType::Programs,
+        BlockProductionMethod::ThreadLocalMultiIterator,
+    );
 }
 
 #[bench]
 fn bench_banking_stage_multi_accounts_with_voting(bencher: &mut Bencher) {
-    bench_banking(bencher, TransactionType::AccountsAndVotes);
+    bench_banking(
+        bencher,
+        TransactionType::AccountsAndVotes,
+        BlockProductionMethod::ThreadLocalMultiIterator,
+    );
 }
 
 #[bench]
 fn bench_banking_stage_multi_programs_with_voting(bencher: &mut Bencher) {
-    bench_banking(bencher, TransactionType::ProgramsAndVotes);
+    bench_banking(
+        bencher,
+        TransactionType::ProgramsAndVotes,
+        BlockProductionMethod::ThreadLocalMultiIterator,
+    );
+}
+
+#[bench]
+fn bench_banking_stage_central_scheduler_multi_accounts(bencher: &mut Bencher) {
+    bench_banking(
+        bencher,
+        TransactionType::Accounts,
+        BlockProductionMethod::CentralSchedulerMultiIterator,
+    );
+}
+
+#[bench]
+fn bench_banking_stage_central_scheduler_multi_programs(bencher: &mut Bencher) {
+    bench_banking(
+        bencher,
+        TransactionType::Programs,
+        BlockProductionMethod::CentralSchedulerMultiIterator,
+    );
+}
+
+#[bench]
+fn bench_banking_stage_central_scheduler_multi_accounts_with_voting(bencher: &mut Bencher) {
+    bench_banking(
+        bencher,
+        TransactionType::AccountsAndVotes,
+        BlockProductionMethod::CentralSchedulerMultiIterator,
+    );
+}
+
+#[bench]
+fn bench_banking_stage_central_scheduler_multi_programs_with_voting(bencher: &mut Bencher) {
+    bench_banking(
+        bencher,
+        TransactionType::ProgramsAndVotes,
+        BlockProductionMethod::CentralSchedulerMultiIterator,
+    );
 }
 
 fn simulate_process_entries(
