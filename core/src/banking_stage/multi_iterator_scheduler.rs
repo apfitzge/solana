@@ -554,7 +554,7 @@ impl MultiIteratorScheduler {
             .get_last_slot_in_epoch(root_bank.epoch());
         let r_blockhash = root_bank.blockhash_queue.read().unwrap();
 
-        for (packet, transaction, age) in receive_packet_results
+        for (packet, transaction) in receive_packet_results
             .deserialized_packets
             .into_iter()
             .filter_map(|packet| {
@@ -573,16 +573,21 @@ impl MultiIteratorScheduler {
                 )
                 .is_ok()
             })
-            .map(|(packet, transaction)| {
-                let age = r_blockhash
-                    .get_hash_age(transaction.message().recent_blockhash())
-                    .unwrap_or(0);
-                (packet, transaction, age)
-            })
         {
-            let max_age_slot = root_bank_slot
-                .saturating_add((MAX_PROCESSING_AGE as u64).saturating_sub(age))
-                .min(last_slot_in_epoch);
+            let max_age_slot =
+                match r_blockhash.get_hash_age(transaction.message().recent_blockhash()) {
+                    Some(age) if age > (MAX_PROCESSING_AGE as u64) => {
+                        // Skip over this transaction if it's already too old
+                        continue;
+                    }
+                    Some(age) => root_bank_slot
+                        .saturating_add((MAX_PROCESSING_AGE as u64).saturating_sub(age))
+                        .min(last_slot_in_epoch),
+                    None => root_bank_slot
+                        .saturating_add(r_blockhash.get_max_age() as u64)
+                        .saturating_add(MAX_PROCESSING_AGE as u64)
+                        .min(last_slot_in_epoch),
+                };
 
             let transaction_ttl = SanitizedTransactionTTL {
                 transaction,
