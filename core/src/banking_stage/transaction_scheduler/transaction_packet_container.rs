@@ -5,6 +5,7 @@ use {
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         unprocessed_packet_batches::DeserializedPacket,
     },
+    ahash::RandomState,
     min_max_heap::MinMaxHeap,
     solana_poh::poh_recorder::Slot,
     solana_sdk::transaction::SanitizedTransaction,
@@ -21,16 +22,21 @@ pub(crate) struct SanitizedTransactionTTL {
 
 pub(crate) struct TransactionPacketContainer {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
-    id_to_transaction_ttl: HashMap<TransactionId, SanitizedTransactionTTL>,
-    id_to_packet: HashMap<TransactionId, DeserializedPacket>,
+    id_to_transaction_ttl: HashMap<TransactionId, SanitizedTransactionTTL, RandomState>,
+    id_to_packet: HashMap<TransactionId, DeserializedPacket, RandomState>,
 }
 
 impl TransactionPacketContainer {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
+        let mut id_to_transaction_ttl = HashMap::default();
+        id_to_transaction_ttl.reserve(capacity);
+
+        let mut id_to_packet = HashMap::default();
+        id_to_packet.reserve(capacity);
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),
-            id_to_transaction_ttl: HashMap::with_capacity(capacity),
-            id_to_packet: HashMap::with_capacity(capacity),
+            id_to_transaction_ttl,
+            id_to_packet,
         }
     }
 
