@@ -98,7 +98,7 @@ impl InFlightTracker {
     }
 
     fn track_batch(
-        &mut self,
+        &self,
         batch_id: TransactionBatchId,
         num_transactions: usize,
         thread_id: ThreadId,
@@ -110,11 +110,7 @@ impl InFlightTracker {
     }
 
     // returns the thread id of the batch
-    fn complete_batch(
-        &mut self,
-        batch_id: TransactionBatchId,
-        num_transactions: usize,
-    ) -> ThreadId {
+    fn complete_batch(&self, batch_id: TransactionBatchId, num_transactions: usize) -> ThreadId {
         let (_batch_id, thread_id) = self
             .batch_id_to_thread_id
             .remove(&batch_id)
@@ -143,11 +139,11 @@ pub struct MultiIteratorScheduler {
     /// Makes decision about whether to consume, forward, or do nothing with packets.
     decision_maker: DecisionMaker,
     /// Tracks locks for in-flight transactions
-    account_locks: ThreadAwareAccountLocks,
+    account_locks: Arc<ThreadAwareAccountLocks>,
     /// Tracks all transactions/packets within scheduler
-    container: TransactionPacketContainer,
+    container: Arc<TransactionPacketContainer>,
     /// Tracks all in-flight transactions
-    in_flight_tracker: InFlightTracker,
+    in_flight_tracker: Arc<InFlightTracker>,
     /// BankForks for getting working bank for sanitization
     bank_forks: Arc<RwLock<BankForks>>,
     /// Senders for consuming transactions - 1 per worker
@@ -181,9 +177,9 @@ impl MultiIteratorScheduler {
             num_threads,
             thread_in_flight_limit: 6400, // ~100 batches
             decision_maker,
-            account_locks: ThreadAwareAccountLocks::new(num_threads),
-            container: TransactionPacketContainer::with_capacity(700_000),
-            in_flight_tracker: InFlightTracker::new(num_threads),
+            account_locks: Arc::new(ThreadAwareAccountLocks::new(num_threads)),
+            container: Arc::new(TransactionPacketContainer::with_capacity(700_000)),
+            in_flight_tracker: Arc::new(InFlightTracker::new(num_threads)),
             bank_forks,
             consume_work_senders,
             finished_consume_work_receiver,
@@ -290,7 +286,7 @@ impl MultiIteratorScheduler {
         let mut scanner = MultiIteratorScanner::new(
             &transaction_priority_ids,
             MAX_NUM_TRANSACTIONS_PER_BATCH,
-            ForwardPayload::new(&mut self.container, &bank),
+            ForwardPayload::new(&self.container, &bank),
             ForwardPayload::should_forward,
         );
 
@@ -743,7 +739,7 @@ struct ForwardPayload<'a> {
     /// Account locks used to prevent us from spam forwarding hot accounts
     account_locks: ReadWriteAccountSet,
 
-    container: &'a mut TransactionPacketContainer,
+    container: &'a TransactionPacketContainer,
     bank: &'a Bank,
     blockhash_queue: RwLockReadGuard<'a, BlockhashQueue>,
     status_cache: RwLockReadGuard<'a, BankStatusCache>,
@@ -753,7 +749,7 @@ struct ForwardPayload<'a> {
 }
 
 impl<'a> ForwardPayload<'a> {
-    fn new(container: &'a mut TransactionPacketContainer, bank: &'a Bank) -> Self {
+    fn new(container: &'a TransactionPacketContainer, bank: &'a Bank) -> Self {
         let blockhash_queue = bank.read_blockhash_queue().unwrap();
         let status_cache = bank.status_cache.read().unwrap();
         let next_durable_nonce = DurableNonce::from_blockhash(&blockhash_queue.last_hash());

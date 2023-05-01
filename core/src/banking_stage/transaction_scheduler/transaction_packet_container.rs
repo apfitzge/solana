@@ -80,7 +80,7 @@ impl TransactionPacketContainer {
 
     /// Get packet by id.
     pub(crate) fn get_packet_entry(
-        &mut self,
+        &self,
         id: TransactionId,
     ) -> Option<OccupiedEntry<TransactionId, DeserializedPacket, RandomState>> {
         match self.id_to_packet.entry(id) {
@@ -92,7 +92,7 @@ impl TransactionPacketContainer {
     /// Get transaction by id.
     /// Panics if the transaction does not exist.
     pub(crate) fn get_transaction_entry(
-        &mut self,
+        &self,
         id: TransactionId,
     ) -> OccupiedEntry<TransactionId, SanitizedTransactionTTL, RandomState> {
         match self.id_to_transaction_ttl.entry(id) {
@@ -104,7 +104,7 @@ impl TransactionPacketContainer {
     /// Get transaction and packet entries by id.
     /// Panics if either does not exist.
     pub(crate) fn get_transaction_and_packet_entries(
-        &mut self,
+        &self,
         id: TransactionId,
     ) -> (
         OccupiedEntry<TransactionId, SanitizedTransactionTTL, RandomState>,
@@ -123,7 +123,7 @@ impl TransactionPacketContainer {
 
     /// Insert a new transaction into the container's queues and maps.
     pub(crate) fn insert_new_transaction(
-        &mut self,
+        &self,
         transaction_id: TransactionId,
         packet: ImmutableDeserializedPacket,
         transaction_ttl: SanitizedTransactionTTL,
@@ -141,7 +141,7 @@ impl TransactionPacketContainer {
 
     /// Retries a transaction - inserts transaction back into map (but not packet).
     pub(crate) fn retry_transaction(
-        &mut self,
+        &self,
         transaction_id: TransactionId,
         transaction: SanitizedTransaction,
         max_age_slot: Slot,
@@ -166,7 +166,7 @@ impl TransactionPacketContainer {
 
     /// Pushes a transaction id into the priority queue, without inserting the packet or transaction.
     /// Returns true if the id was successfully pushed into the priority queue
-    pub(crate) fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
+    pub(crate) fn push_id_into_queue(&self, priority_id: TransactionPriorityId) -> bool {
         self.priority_queue.insert(priority_id);
         true
 
@@ -174,7 +174,7 @@ impl TransactionPacketContainer {
     }
 
     /// Remove packet and transaction by id.
-    pub(crate) fn remove_by_id(&mut self, id: &TransactionId) {
+    pub(crate) fn remove_by_id(&self, id: &TransactionId) {
         self.id_to_packet.remove(id);
         self.id_to_transaction_ttl.remove(id);
     }
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_push_id_into_queue() {
-        let mut container = TransactionPacketContainer::with_capacity(1);
+        let container = TransactionPacketContainer::with_capacity(1);
         assert!(container.push_id_into_queue(TransactionPriorityId::new(1, TransactionId::new(0))));
         assert_eq!(container.priority_queue.len(), 1);
         assert_eq!(container.id_to_packet.len(), 0);
