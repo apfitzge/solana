@@ -15,7 +15,7 @@ impl TransactionPriorityId {
 
 impl Ord for TransactionPriorityId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
+        other.priority.cmp(&self.priority) // reversed for skiplist...
     }
 }
 
