@@ -1,5 +1,6 @@
 use {
     super::{
+        sanitizer::Sanitizer,
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
         transaction_id_generator::TransactionIdGenerator,
         transaction_packet_container::{SanitizedTransactionTTL, TransactionPacketContainer},
@@ -14,12 +15,12 @@ use {
                 TransactionBatchId, TransactionId,
             },
         },
+        banking_trace::BankingPacketReceiver,
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         multi_iterator_scanner::{MultiIteratorScanner, ProcessingDecision},
-        packet_deserializer::{PacketDeserializer, ReceivePacketResults},
         read_write_account_set::ReadWriteAccountSet,
     },
-    crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError},
+    crossbeam_channel::{Receiver, Sender, TryRecvError},
     dashmap::DashMap,
     itertools::{izip, Itertools},
     solana_perf::perf_libs,
@@ -37,12 +38,9 @@ use {
         nonce::state::DurableNonce,
         transaction::SanitizedTransaction,
     },
-    std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc, RwLock, RwLockReadGuard,
-        },
-        time::Duration,
+    std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, RwLock, RwLockReadGuard,
     },
     thiserror::Error,
 };
@@ -138,7 +136,7 @@ pub struct MultiIteratorScheduler {
     /// Receiver for finished forwarded transactions
     finished_forward_work_receiver: Receiver<FinishedForwardWork>,
     /// Receiver for packets from sigverify
-    packet_deserializer: PacketDeserializer,
+    packet_receiver: BankingPacketReceiver,
     /// Generator for transaction ids
     transaction_id_generator: Arc<TransactionIdGenerator>,
     /// Generator for batch ids
@@ -154,7 +152,7 @@ impl MultiIteratorScheduler {
         finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
         forward_work_sender: Sender<ForwardWork>,
         finished_forward_work_receiver: Receiver<FinishedForwardWork>,
-        packet_deserializer: PacketDeserializer,
+        packet_receiver: BankingPacketReceiver,
     ) -> Self {
         Self {
             num_threads,
@@ -168,13 +166,42 @@ impl MultiIteratorScheduler {
             finished_consume_work_receiver,
             forward_work_sender,
             finished_forward_work_receiver,
-            packet_deserializer,
+            packet_receiver,
             transaction_id_generator: Arc::default(),
             batch_id_generator: BatchIdGenerator::default(),
         }
     }
 
-    pub fn run(mut self) -> Result<(), SchedulerError> {
+    pub fn run(self) -> Result<(), SchedulerError> {
+        // Spawn sanitizing threads
+        let exit = Arc::new(AtomicBool::new(false));
+        let sanitizing_threads = (0..4)
+            .map(|id| {
+                let sanitizer = Sanitizer::new(
+                    exit.clone(),
+                    self.packet_receiver.clone(),
+                    self.transaction_id_generator.clone(),
+                    self.container.clone(),
+                    self.bank_forks.clone(),
+                );
+                std::thread::Builder::new()
+                    .name(format!("solSanitizer-{id:02}"))
+                    .spawn(move || sanitizer.run())
+                    .unwrap()
+            })
+            .collect_vec();
+
+        self.run_scheduler()?;
+
+        exit.store(true, Ordering::Relaxed);
+        for sanitizing_thread in sanitizing_threads {
+            sanitizing_thread.join().unwrap();
+        }
+
+        Ok(())
+    }
+
+    fn run_scheduler(mut self) -> Result<(), SchedulerError> {
         loop {
             // If there are queued transactions/packets, make a decision about what to do with them
             // and schedule work accordingly
@@ -190,7 +217,6 @@ impl MultiIteratorScheduler {
                 }
             }
 
-            self.receive_and_buffer_packets()?;
             self.receive_and_process_finished_work()?;
         }
     }
@@ -338,78 +364,6 @@ impl MultiIteratorScheduler {
             .for_each(|id| {
                 self.container.push_id_into_queue(id);
             })
-    }
-
-    fn receive_and_buffer_packets(&mut self) -> Result<(), SchedulerError> {
-        const EMPTY_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
-        const NON_EMPTY_RECEIVE_TIMEOUT: Duration = Duration::from_millis(0);
-        let timeout = if self.container.is_empty() {
-            EMPTY_RECEIVE_TIMEOUT
-        } else {
-            NON_EMPTY_RECEIVE_TIMEOUT
-        };
-
-        let remaining_capacity = self.container.remaining_queue_capacity();
-        let receive_packet_results = self
-            .packet_deserializer
-            .receive_packets(timeout, remaining_capacity);
-
-        match receive_packet_results {
-            Ok(receive_packet_results) => self.sanitize_and_buffer(receive_packet_results),
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(SchedulerError::DisconnectedReceiveChannel(
-                    "packet deserializer",
-                ));
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-        }
-
-        Ok(())
-    }
-
-    fn sanitize_and_buffer(&mut self, receive_packet_results: ReceivePacketResults) {
-        let bank = self.bank_forks.read().unwrap().working_bank();
-        let tx_account_lock_limit = bank.get_transaction_account_lock_limit();
-        let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
-        let r_blockhash = bank.read_blockhash_queue().unwrap();
-
-        let transaction_ids = self
-            .transaction_id_generator
-            .next_batch(receive_packet_results.deserialized_packets.len() as u64);
-
-        for (id, packet, transaction) in transaction_ids
-            .zip(receive_packet_results.deserialized_packets.into_iter())
-            .filter_map(|(id, packet)| {
-                packet
-                    .build_sanitized_transaction(
-                        &bank.feature_set,
-                        bank.vote_only_bank(),
-                        bank.as_ref(),
-                    )
-                    .map(|tx| (id, packet, tx))
-            })
-            .filter(|(_, _, transaction)| {
-                SanitizedTransaction::validate_account_locks(
-                    transaction.message(),
-                    tx_account_lock_limit,
-                )
-                .is_ok()
-            })
-            .filter_map(|(id, packet, transaction)| {
-                r_blockhash
-                    .get_hash_age(transaction.message().recent_blockhash())
-                    .filter(|age| *age <= MAX_PROCESSING_AGE as u64)
-                    .map(|_| (id, packet, transaction))
-            })
-        {
-            let transaction_ttl = SanitizedTransactionTTL {
-                transaction,
-                max_age_slot: last_slot_in_epoch,
-            };
-
-            self.container
-                .insert_new_transaction(id, packet, transaction_ttl);
-        }
     }
 
     fn receive_and_process_finished_work(&mut self) -> Result<(), SchedulerError> {
@@ -835,7 +789,10 @@ mod tests {
             poh_config::PohConfig, pubkey::Pubkey, signature::Keypair, signer::Signer,
             system_instruction, transaction::Transaction,
         },
-        std::sync::{atomic::AtomicBool, Arc, RwLock},
+        std::{
+            sync::{atomic::AtomicBool, Arc, RwLock},
+            time::Duration,
+        },
         tempfile::TempDir,
     };
 
@@ -886,7 +843,6 @@ mod tests {
         let decision_maker = DecisionMaker::new(Pubkey::new_unique(), poh_recorder.clone());
 
         let (banking_packet_sender, banking_packet_receiver) = unbounded();
-        let packet_deserializer = PacketDeserializer::new(banking_packet_receiver);
 
         let (consume_work_senders, consume_work_receivers) = create_channels(num_threads);
         let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
@@ -913,7 +869,7 @@ mod tests {
             finished_consume_work_receiver,
             forward_work_sender,
             finished_forward_work_receiver,
-            packet_deserializer,
+            banking_packet_receiver,
         );
 
         (test_frame, multi_iterator_scheduler)

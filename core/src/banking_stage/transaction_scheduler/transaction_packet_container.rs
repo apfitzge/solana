@@ -21,7 +21,6 @@ pub(crate) struct SanitizedTransactionTTL {
 }
 
 pub(crate) struct TransactionPacketContainer {
-    capacity: usize,
     priority_queue: SkipSet<TransactionPriorityId>,
     id_to_transaction_ttl: DashMap<TransactionId, SanitizedTransactionTTL>,
     id_to_packet: DashMap<TransactionId, DeserializedPacket>,
@@ -50,7 +49,6 @@ impl<'a> Iterator for SkipSetDrain<'a> {
 impl TransactionPacketContainer {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
-            capacity,
             priority_queue: SkipSet::new(),
             id_to_transaction_ttl: DashMap::with_capacity(capacity),
             id_to_packet: DashMap::with_capacity(capacity),
@@ -60,11 +58,6 @@ impl TransactionPacketContainer {
     /// Returns true if the queue is empty.
     pub(crate) fn is_empty(&self) -> bool {
         self.priority_queue.is_empty()
-    }
-
-    /// Returns the remaining capacity of the queue
-    pub(crate) fn remaining_queue_capacity(&self) -> usize {
-        self.capacity - self.priority_queue.len()
     }
 
     /// Draining iterator (leaves the queue empty).

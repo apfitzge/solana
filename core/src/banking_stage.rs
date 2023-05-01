@@ -18,7 +18,6 @@ use {
         banking_trace::BankingPacketReceiver,
         latest_unprocessed_votes::{LatestUnprocessedVotes, VoteSource},
         leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
-        packet_deserializer::PacketDeserializer,
         qos_service::QosService,
         tracer_packet_stats::TracerPacketStats,
         unprocessed_packet_batches::*,
@@ -567,7 +566,7 @@ impl BankingStage {
                 finished_consume_work_receiver,
                 forward_work_sender,
                 finished_forward_work_receiver,
-                PacketDeserializer::new(non_vote_receiver),
+                non_vote_receiver,
             );
 
             Builder::new()
