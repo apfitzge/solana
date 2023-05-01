@@ -8,3 +8,4 @@ pub(crate) mod multi_iterator_scheduler;
 mod in_flight_tracker;
 mod sanitizer;
 mod transaction_id_generator;
+mod work_finisher;

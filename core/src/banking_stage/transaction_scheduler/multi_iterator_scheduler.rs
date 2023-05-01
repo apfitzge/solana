@@ -6,6 +6,7 @@ use {
         transaction_id_generator::TransactionIdGenerator,
         transaction_packet_container::{SanitizedTransactionTTL, TransactionPacketContainer},
         transaction_priority_id::TransactionPriorityId,
+        work_finisher::WorkFinisher,
     },
     crate::{
         banking_stage::{
@@ -21,8 +22,8 @@ use {
         multi_iterator_scanner::{MultiIteratorScanner, ProcessingDecision},
         read_write_account_set::ReadWriteAccountSet,
     },
-    crossbeam_channel::{Receiver, Sender, TryRecvError},
-    itertools::{izip, Itertools},
+    crossbeam_channel::{Receiver, Sender},
+    itertools::Itertools,
     solana_perf::perf_libs,
     solana_runtime::{
         bank::{Bank, BankStatusCache},
@@ -150,11 +151,33 @@ impl MultiIteratorScheduler {
             })
             .collect_vec();
 
+        // Spawn work finishing threads
+        let work_finishing_threads = (0..4)
+            .map(|id| {
+                let work_finisher = WorkFinisher::new(
+                    exit.clone(),
+                    self.finished_consume_work_receiver.clone(),
+                    self.finished_forward_work_receiver.clone(),
+                    self.bank_forks.clone(),
+                    self.account_locks.clone(),
+                    self.container.clone(),
+                    self.in_flight_tracker.clone(),
+                );
+                std::thread::Builder::new()
+                    .name(format!("solWkFinisher-{id:02}"))
+                    .spawn(move || work_finisher.run())
+                    .unwrap()
+            })
+            .collect_vec();
+
         self.run_scheduler()?;
 
         exit.store(true, Ordering::Relaxed);
         for sanitizing_thread in sanitizing_threads {
             sanitizing_thread.join().unwrap();
+        }
+        for work_finishing_thread in work_finishing_threads {
+            work_finishing_thread.join().unwrap();
         }
 
         Ok(())
@@ -175,8 +198,6 @@ impl MultiIteratorScheduler {
                     BufferedPacketsDecision::Hold => {}
                 }
             }
-
-            self.receive_and_process_finished_work()?;
         }
     }
 
@@ -325,98 +346,6 @@ impl MultiIteratorScheduler {
             })
     }
 
-    fn receive_and_process_finished_work(&mut self) -> Result<(), SchedulerError> {
-        self.receive_and_process_finished_consume_work()?;
-        self.receive_and_process_finished_forward_work()
-    }
-
-    fn receive_and_process_finished_consume_work(&mut self) -> Result<(), SchedulerError> {
-        let bank = self.bank_forks.read().unwrap().working_bank();
-        let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
-        let r_blockhash_queue = bank.read_blockhash_queue().unwrap();
-        loop {
-            match self.finished_consume_work_receiver.try_recv() {
-                Ok(finished_consume_work) => self.process_finished_consume_work(
-                    &bank,
-                    &r_blockhash_queue,
-                    last_slot_in_epoch,
-                    finished_consume_work,
-                ),
-                Err(TryRecvError::Empty) => return Ok(()),
-                Err(TryRecvError::Disconnected) => {
-                    return Err(SchedulerError::DisconnectedReceiveChannel(
-                        "finished consume work receiver",
-                    ));
-                }
-            }
-        }
-    }
-
-    fn process_finished_consume_work(
-        &mut self,
-        bank: &Bank,
-        r_blockhash_queue: &BlockhashQueue,
-        last_slot_in_epoch: Slot,
-        FinishedConsumeWork {
-            work:
-                ConsumeWork {
-                    batch_id,
-                    ids,
-                    transactions,
-                    max_age_slots,
-                },
-            retryable_indexes,
-        }: FinishedConsumeWork,
-    ) {
-        let thread_id = self.in_flight_tracker.complete_batch(batch_id, ids.len());
-        let mut retryable_id_iter = retryable_indexes.into_iter().peekable();
-        for (index, (id, transaction, max_age_slot)) in
-            izip!(ids, transactions, max_age_slots).enumerate()
-        {
-            let locks = transaction.get_account_locks_unchecked();
-            self.account_locks.unlock_accounts(
-                locks.writable.into_iter(),
-                locks.readonly.into_iter(),
-                thread_id,
-            );
-
-            match retryable_id_iter.peek() {
-                Some(retryable_index) if index == *retryable_index => {
-                    self.container
-                        .retry_transaction(id, transaction, max_age_slot);
-                    retryable_id_iter.next(); // advance the iterator
-                }
-                _ => {
-                    let packet_entry = self
-                        .container
-                        .get_packet_entry(id)
-                        .expect("packet must exist");
-
-                    if max_age_slot == 0 {
-                        if let Some(resanitized_transaction) =
-                            Self::should_retry_expired_transaction(
-                                packet_entry.get().immutable_section(),
-                                bank,
-                                r_blockhash_queue,
-                            )
-                        {
-                            // re-insert
-                            drop(packet_entry);
-                            self.container.retry_transaction(
-                                id,
-                                resanitized_transaction,
-                                last_slot_in_epoch,
-                            );
-                            continue;
-                        }
-                    }
-
-                    packet_entry.remove_entry();
-                }
-            }
-        }
-    }
-
     fn should_retry_expired_transaction(
         packet: &ImmutableDeserializedPacket,
         bank: &Bank,
@@ -434,42 +363,6 @@ impl MultiIteratorScheduler {
             .filter(|age| *age <= MAX_PROCESSING_AGE as u64)?;
 
         packet.build_sanitized_transaction(&bank.feature_set, bank.vote_only_bank(), bank)
-    }
-
-    fn receive_and_process_finished_forward_work(&mut self) -> Result<(), SchedulerError> {
-        loop {
-            match self.finished_forward_work_receiver.try_recv() {
-                Ok(finished_forward_work) => {
-                    self.process_finished_forward_work(finished_forward_work)
-                }
-                Err(TryRecvError::Empty) => return Ok(()),
-                Err(TryRecvError::Disconnected) => {
-                    return Err(SchedulerError::DisconnectedReceiveChannel(
-                        "finished forward work receiver",
-                    ));
-                }
-            }
-        }
-    }
-
-    fn process_finished_forward_work(
-        &mut self,
-        FinishedForwardWork {
-            work: ForwardWork { ids, packets: _ },
-            successful,
-        }: FinishedForwardWork,
-    ) {
-        if successful {
-            for id in ids {
-                if let Some(mut deserialized_packet) = self.container.get_packet_entry(id) {
-                    deserialized_packet.get_mut().forwarded = true;
-                } else {
-                    // If a packet is not in the map, then it was forwarded *without* holding
-                    // and this can return early without iterating over the remaining ids.
-                    return;
-                }
-            }
-        }
     }
 }
 
@@ -852,32 +745,6 @@ mod tests {
     fn to_banking_packet_batch(txs: &[Transaction]) -> BankingPacketBatch {
         let packet_batch = to_packet_batches(txs, NUM_PACKETS);
         Arc::new((packet_batch, None))
-    }
-
-    #[test]
-    #[should_panic(expected = "transaction batch id should exist in in-flight tracker")]
-    fn test_unexpected_batch_id() {
-        let (test_frame, mut multi_iterator_scheduler) = create_test_frame(1);
-        let TestFrame {
-            finished_consume_work_sender,
-            ..
-        } = &test_frame;
-
-        finished_consume_work_sender
-            .send(FinishedConsumeWork {
-                work: ConsumeWork {
-                    batch_id: TransactionBatchId::new(0),
-                    ids: vec![],
-                    transactions: vec![],
-                    max_age_slots: vec![],
-                },
-                retryable_indexes: vec![],
-            })
-            .unwrap();
-
-        multi_iterator_scheduler
-            .receive_and_process_finished_work()
-            .unwrap();
     }
 
     #[test]
