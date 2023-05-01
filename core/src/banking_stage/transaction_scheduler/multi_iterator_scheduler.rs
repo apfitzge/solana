@@ -1,5 +1,6 @@
 use {
     super::{
+        in_flight_tracker::InFlightTracker,
         sanitizer::Sanitizer,
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
         transaction_id_generator::TransactionIdGenerator,
@@ -21,7 +22,6 @@ use {
         read_write_account_set::ReadWriteAccountSet,
     },
     crossbeam_channel::{Receiver, Sender, TryRecvError},
-    dashmap::DashMap,
     itertools::{izip, Itertools},
     solana_perf::perf_libs,
     solana_runtime::{
@@ -60,47 +60,6 @@ impl BatchIdGenerator {
         let index = self.index;
         self.index = self.index.wrapping_sub(1);
         TransactionBatchId::new(index)
-    }
-}
-
-struct InFlightTracker {
-    num_in_flight: AtomicUsize,
-    num_in_flight_per_thread: Vec<AtomicUsize>,
-    batch_id_to_thread_id: DashMap<TransactionBatchId, ThreadId>,
-}
-
-impl InFlightTracker {
-    fn new(num_threads: usize) -> Self {
-        Self {
-            num_in_flight: AtomicUsize::new(0),
-            num_in_flight_per_thread: (0..num_threads).map(|_| AtomicUsize::new(0)).collect(),
-            batch_id_to_thread_id: DashMap::new(),
-        }
-    }
-
-    fn track_batch(
-        &self,
-        batch_id: TransactionBatchId,
-        num_transactions: usize,
-        thread_id: ThreadId,
-    ) {
-        self.num_in_flight
-            .fetch_add(num_transactions, Ordering::Relaxed);
-        self.num_in_flight_per_thread[thread_id].fetch_add(num_transactions, Ordering::Relaxed);
-        self.batch_id_to_thread_id.insert(batch_id, thread_id);
-    }
-
-    // returns the thread id of the batch
-    fn complete_batch(&self, batch_id: TransactionBatchId, num_transactions: usize) -> ThreadId {
-        let (_batch_id, thread_id) = self
-            .batch_id_to_thread_id
-            .remove(&batch_id)
-            .expect("transaction batch id should exist in in-flight tracker");
-        self.num_in_flight
-            .fetch_sub(num_transactions, Ordering::Relaxed);
-        self.num_in_flight_per_thread[thread_id].fetch_sub(num_transactions, Ordering::Relaxed);
-
-        thread_id
     }
 }
 
@@ -558,8 +517,10 @@ impl<'a> ConsumePayload<'a> {
         self.schedulable_threads = ThreadSet::any(self.scheduler.num_threads);
         // Don't allow the scheduler to send more than the limit
         for thread_id in 0..self.scheduler.num_threads {
-            if self.scheduler.in_flight_tracker.num_in_flight_per_thread[thread_id]
-                .load(Ordering::Relaxed)
+            if self
+                .scheduler
+                .in_flight_tracker
+                .num_in_flight_for_thread(thread_id)
                 >= self.scheduler.thread_in_flight_limit
             {
                 self.schedulable_threads.remove(thread_id);
@@ -615,7 +576,7 @@ impl<'a> ConsumePayload<'a> {
 
         let outstanding_locks = &mut scheduler.account_locks;
         let batches = &payload.transaction_batches;
-        let in_flight = &scheduler.in_flight_tracker.num_in_flight_per_thread;
+        let in_flight = scheduler.in_flight_tracker.num_in_flight_per_thread();
         let Some(thread_id) = outstanding_locks.try_lock_accounts(
             account_locks.writable.into_iter(),
             account_locks.readonly.into_iter(),
