@@ -41,6 +41,7 @@ pub mod epoch_accounts_hash;
 pub mod epoch_stakes;
 pub mod genesis_utils;
 pub mod hardened_unpack;
+pub mod hot_account_cache;
 pub mod in_mem_accounts_index;
 pub mod inline_spl_associated_token_account;
 pub mod inline_spl_token;

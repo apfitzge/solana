@@ -15,6 +15,7 @@ use {
         ancestors::Ancestors,
         bank::{Bank, NonceFull, NonceInfo, TransactionCheckResult, TransactionExecutionResult},
         blockhash_queue::BlockhashQueue,
+        hot_account_cache::HotAccountCache,
         rent_collector::RentCollector,
         rent_debits::RentDebits,
         storable_accounts::StorableAccounts,
@@ -434,6 +435,270 @@ impl Accounts {
                                 }
                                 (default_account.data().len(), default_account, 0)
                             })
+                    };
+                    Self::accumulate_and_check_loaded_account_data_size(
+                        &mut accumulated_accounts_data_size,
+                        account_size,
+                        requested_loaded_accounts_data_size_limit,
+                        error_counters,
+                    )?;
+
+                    if !validated_fee_payer && message.is_non_loader_key(i) {
+                        if i != 0 {
+                            warn!("Payer index should be 0! {:?}", tx);
+                        }
+
+                        Self::validate_fee_payer(
+                            key,
+                            &mut account,
+                            i as IndexOfAccount,
+                            error_counters,
+                            rent_collector,
+                            feature_set,
+                            fee,
+                        )?;
+
+                        validated_fee_payer = true;
+                    }
+
+                    if bpf_loader_upgradeable::check_id(account.owner()) {
+                        if !feature_set.is_active(&simplify_writable_program_account_check::id())
+                            && message.is_writable(i)
+                            && !message.is_upgradeable_loader_present()
+                        {
+                            error_counters.invalid_writable_account += 1;
+                            return Err(TransactionError::InvalidWritableAccount);
+                        }
+                    } else if account.executable() && message.is_writable(i) {
+                        error_counters.invalid_writable_account += 1;
+                        return Err(TransactionError::InvalidWritableAccount);
+                    }
+
+                    tx_rent += rent;
+                    rent_debits.insert(key, rent, account.lamports());
+
+                    account
+                };
+
+                accounts_found.push(account_found);
+                Ok((*key, account))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        if !validated_fee_payer {
+            error_counters.account_not_found += 1;
+            return Err(TransactionError::AccountNotFound);
+        }
+
+        // Appends the account_deps at the end of the accounts,
+        // this way they can be accessed in a uniform way.
+        // At places where only the accounts are needed,
+        // the account_deps are truncated using e.g:
+        // accounts.iter().take(message.account_keys.len())
+        accounts.append(&mut account_deps);
+
+        let disable_builtin_loader_ownership_chains =
+            feature_set.is_active(&feature_set::disable_builtin_loader_ownership_chains::ID);
+        let builtins_start_index = accounts.len();
+        let program_indices = message
+            .instructions()
+            .iter()
+            .map(|instruction| {
+                let mut account_indices = Vec::new();
+                let mut program_index = instruction.program_id_index as usize;
+                for _ in 0..5 {
+                    let (program_id, program_account) = accounts
+                        .get(program_index)
+                        .ok_or(TransactionError::ProgramAccountNotFound)?;
+                    let account_found = accounts_found.get(program_index).unwrap_or(&true);
+                    if native_loader::check_id(program_id) {
+                        return Ok(account_indices);
+                    }
+                    if !account_found {
+                        error_counters.account_not_found += 1;
+                        return Err(TransactionError::ProgramAccountNotFound);
+                    }
+                    if !program_account.executable() {
+                        error_counters.invalid_program_for_execution += 1;
+                        return Err(TransactionError::InvalidProgramForExecution);
+                    }
+                    account_indices.insert(0, program_index as IndexOfAccount);
+                    let owner_id = program_account.owner();
+                    if native_loader::check_id(owner_id) {
+                        return Ok(account_indices);
+                    }
+                    program_index = if let Some(owner_index) = accounts
+                        .get(builtins_start_index..)
+                        .ok_or(TransactionError::ProgramAccountNotFound)?
+                        .iter()
+                        .position(|(key, _)| key == owner_id)
+                    {
+                        builtins_start_index.saturating_add(owner_index)
+                    } else {
+                        let owner_index = accounts.len();
+                        if let Some((program_account, _)) =
+                            self.accounts_db.load_with_fixed_root(ancestors, owner_id)
+                        {
+                            Self::accumulate_and_check_loaded_account_data_size(
+                                &mut accumulated_accounts_data_size,
+                                program_account.data().len(),
+                                requested_loaded_accounts_data_size_limit,
+                                error_counters,
+                            )?;
+                            accounts.push((*owner_id, program_account));
+                        } else {
+                            error_counters.account_not_found += 1;
+                            return Err(TransactionError::ProgramAccountNotFound);
+                        }
+                        owner_index
+                    };
+                    if disable_builtin_loader_ownership_chains {
+                        account_indices.insert(0, program_index as IndexOfAccount);
+                        return Ok(account_indices);
+                    }
+                }
+                error_counters.call_chain_too_deep += 1;
+                Err(TransactionError::CallChainTooDeep)
+            })
+            .collect::<Result<Vec<Vec<IndexOfAccount>>>>()?;
+
+        Ok(LoadedTransaction {
+            accounts,
+            program_indices,
+            rent: tx_rent,
+            rent_debits,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_transaction_accounts_with_hot_cache(
+        &self,
+        hot_account_cache: &HotAccountCache,
+        ancestors: &Ancestors,
+        tx: &SanitizedTransaction,
+        fee: u64,
+        error_counters: &mut TransactionErrorMetrics,
+        rent_collector: &RentCollector,
+        feature_set: &FeatureSet,
+        account_overrides: Option<&AccountOverrides>,
+        program_accounts: &HashMap<Pubkey, &Pubkey>,
+        loaded_programs: &HashMap<Pubkey, Arc<LoadedProgram>>,
+    ) -> Result<LoadedTransaction> {
+        // NOTE: this check will never fail because `tx` is sanitized
+        if tx.signatures().is_empty() && fee != 0 {
+            return Err(TransactionError::MissingSignatureForFee);
+        }
+
+        // There is no way to predict what program will execute without an error
+        // If a fee can pay for execution then the program will be scheduled
+        let mut validated_fee_payer = false;
+        let mut tx_rent: TransactionRent = 0;
+        let message = tx.message();
+        let account_keys = message.account_keys();
+        let mut accounts_found = Vec::with_capacity(account_keys.len());
+        let mut account_deps = Vec::with_capacity(account_keys.len());
+        let mut rent_debits = RentDebits::default();
+
+        let set_exempt_rent_epoch_max =
+            feature_set.is_active(&solana_sdk::feature_set::set_exempt_rent_epoch_max::id());
+
+        let requested_loaded_accounts_data_size_limit =
+            Self::get_requested_loaded_accounts_data_size_limit(tx, feature_set)?;
+        let mut accumulated_accounts_data_size: usize = 0;
+
+        let instruction_accounts = message
+            .instructions()
+            .iter()
+            .flat_map(|instruction| &instruction.accounts)
+            .unique()
+            .collect::<Vec<&u8>>();
+
+        let mut accounts = account_keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                let mut account_found = true;
+                #[allow(clippy::collapsible_else_if)]
+                let account = if solana_sdk::sysvar::instructions::check_id(key) {
+                    Self::construct_instructions_account(
+                        message,
+                        feature_set
+                            .is_active(&feature_set::instructions_sysvar_owned_by_sysvar::id()),
+                    )
+                } else {
+                    let instruction_account = u8::try_from(i)
+                        .map(|i| instruction_accounts.contains(&&i))
+                        .unwrap_or(false);
+                    let (account_size, mut account, rent) = if let Some(account_override) =
+                        account_overrides.and_then(|overrides| overrides.get(key))
+                    {
+                        (account_override.data().len(), account_override.clone(), 0)
+                    } else if let Some(program) = (!instruction_account && !message.is_writable(i))
+                        .then_some(())
+                        .and_then(|_| loaded_programs.get(key))
+                    {
+                        // This condition block does special handling for accounts that are passed
+                        // as instruction account to any of the instructions in the transaction.
+                        // It's been noticed that some programs are reading other program accounts
+                        // (that are passed to the program as instruction accounts). So such accounts
+                        // are needed to be loaded even though corresponding compiled program may
+                        // already be present in the cache.
+                        Self::account_shared_data_from_program(
+                            key,
+                            feature_set,
+                            program,
+                            program_accounts,
+                        )
+                        .map(|program_account| (program.account_size, program_account, 0))?
+                    } else {
+                        if let Some(mut account) = hot_account_cache.get_account(key) {
+                            if message.is_writable(i) {
+                                let rent_due = rent_collector
+                                    .collect_from_existing_account(
+                                        key,
+                                        &mut account,
+                                        self.accounts_db.filler_account_suffix.as_ref(),
+                                        set_exempt_rent_epoch_max,
+                                    )
+                                    .rent_amount;
+                                (account.data().len(), account, rent_due)
+                            } else {
+                                (account.data().len(), account, 0)
+                            }
+                        } else {
+                            let (data_len, account, rent_due) = self
+                                .accounts_db
+                                .load_with_fixed_root(ancestors, key)
+                                .map(|(mut account, _)| {
+                                    if message.is_writable(i) {
+                                        let rent_due = rent_collector
+                                            .collect_from_existing_account(
+                                                key,
+                                                &mut account,
+                                                self.accounts_db.filler_account_suffix.as_ref(),
+                                                set_exempt_rent_epoch_max,
+                                            )
+                                            .rent_amount;
+                                        (account.data().len(), account, rent_due)
+                                    } else {
+                                        (account.data().len(), account, 0)
+                                    }
+                                })
+                                .unwrap_or_else(|| {
+                                    account_found = false;
+                                    let mut default_account = AccountSharedData::default();
+                                    if set_exempt_rent_epoch_max {
+                                        // All new accounts must be rent-exempt (enforced in Bank::execute_loaded_transaction).
+                                        // Currently, rent collection sets rent_epoch to u64::MAX, but initializing the account
+                                        // with this field already set would allow us to skip rent collection for these accounts.
+                                        default_account.set_rent_epoch(u64::MAX);
+                                    }
+                                    (default_account.data().len(), default_account, 0)
+                                });
+
+                            hot_account_cache.insert_account(key, account.clone());
+                            (data_len, account, rent_due)
+                        }
                     };
                     Self::accumulate_and_check_loaded_account_data_size(
                         &mut accumulated_accounts_data_size,
