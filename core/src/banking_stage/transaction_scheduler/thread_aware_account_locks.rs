@@ -1,7 +1,7 @@
 use {
+    dashmap::{mapref::entry::Entry, DashMap},
     solana_sdk::pubkey::Pubkey,
     std::{
-        collections::{hash_map::Entry, HashMap},
         fmt::{Debug, Display},
         ops::{BitAnd, BitAndAssign, Sub},
     },
@@ -37,11 +37,11 @@ pub(crate) struct ThreadAwareAccountLocks {
     num_threads: usize, // 0..MAX_THREADS
     /// Write locks - only one thread can hold a write lock at a time.
     /// Contains how many write locks are held by the thread.
-    write_locks: HashMap<Pubkey, AccountWriteLocks>,
+    write_locks: DashMap<Pubkey, AccountWriteLocks>,
     /// Read locks - multiple threads can hold a read lock at a time.
     /// Contains thread-set for easily checking which threads are scheduled.
     /// Contains how many read locks are held by each thread.
-    read_locks: HashMap<Pubkey, AccountReadLocks>,
+    read_locks: DashMap<Pubkey, AccountReadLocks>,
 }
 
 impl ThreadAwareAccountLocks {
@@ -55,8 +55,8 @@ impl ThreadAwareAccountLocks {
 
         Self {
             num_threads,
-            write_locks: HashMap::new(),
-            read_locks: HashMap::new(),
+            write_locks: DashMap::new(),
+            read_locks: DashMap::new(),
         }
     }
 
@@ -66,7 +66,7 @@ impl ThreadAwareAccountLocks {
     /// If accounts are schedulable, then they are locked for the thread
     /// selected by the `thread_selector` function.
     pub(crate) fn try_lock_accounts<'a>(
-        &mut self,
+        &self,
         write_account_locks: impl Iterator<Item = &'a Pubkey> + Clone,
         read_account_locks: impl Iterator<Item = &'a Pubkey> + Clone,
         allowed_threads: ThreadSet,
@@ -85,7 +85,7 @@ impl ThreadAwareAccountLocks {
 
     /// Unlocks the accounts for the given thread.
     pub(crate) fn unlock_accounts<'a>(
-        &mut self,
+        &self,
         write_account_locks: impl Iterator<Item = &'a Pubkey>,
         read_account_locks: impl Iterator<Item = &'a Pubkey>,
         thread_id: ThreadId,
@@ -168,7 +168,7 @@ impl ThreadAwareAccountLocks {
 
     /// Add locks for all writable and readable accounts on `thread_id`.
     fn lock_accounts<'a>(
-        &mut self,
+        &self,
         write_account_locks: impl Iterator<Item = &'a Pubkey>,
         read_account_locks: impl Iterator<Item = &'a Pubkey>,
         thread_id: ThreadId,
@@ -188,7 +188,7 @@ impl ThreadAwareAccountLocks {
 
     /// Locks the given `account` for writing on `thread_id`.
     /// Panics if the account is already locked for writing on another thread.
-    fn write_lock_account(&mut self, account: &Pubkey, thread_id: ThreadId) {
+    fn write_lock_account(&self, account: &Pubkey, thread_id: ThreadId) {
         match self.write_locks.entry(*account) {
             Entry::Occupied(mut entry) => {
                 let AccountWriteLocks {
@@ -222,7 +222,7 @@ impl ThreadAwareAccountLocks {
 
     /// Unlocks the given `account` for writing on `thread_id`.
     /// Panics if the account is not locked for writing on `thread_id`.
-    fn write_unlock_account(&mut self, account: &Pubkey, thread_id: ThreadId) {
+    fn write_unlock_account(&self, account: &Pubkey, thread_id: ThreadId) {
         match self.write_locks.entry(*account) {
             Entry::Occupied(mut entry) => {
                 let AccountWriteLocks {
@@ -246,7 +246,7 @@ impl ThreadAwareAccountLocks {
 
     /// Locks the given `account` for reading on `thread_id`.
     /// Panics if the account is already locked for writing on another thread.
-    fn read_lock_account(&mut self, account: &Pubkey, thread_id: ThreadId) {
+    fn read_lock_account(&self, account: &Pubkey, thread_id: ThreadId) {
         match self.read_locks.entry(*account) {
             Entry::Occupied(mut entry) => {
                 let AccountReadLocks {
@@ -277,7 +277,7 @@ impl ThreadAwareAccountLocks {
 
     /// Unlocks the given `account` for reading on `thread_id`.
     /// Panics if the account is not locked for reading on `thread_id`.
-    fn read_unlock_account(&mut self, account: &Pubkey, thread_id: ThreadId) {
+    fn read_unlock_account(&self, account: &Pubkey, thread_id: ThreadId) {
         match self.read_locks.entry(*account) {
             Entry::Occupied(mut entry) => {
                 let AccountReadLocks {
@@ -426,7 +426,7 @@ mod tests {
     fn test_try_lock_accounts_none() {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.read_lock_account(&pk1, 2);
         locks.read_lock_account(&pk1, 3);
         assert_eq!(
@@ -444,7 +444,7 @@ mod tests {
     fn test_try_lock_accounts_one() {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.write_lock_account(&pk2, 3);
 
         assert_eq!(
@@ -462,7 +462,7 @@ mod tests {
     fn test_try_lock_accounts_multiple() {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.read_lock_account(&pk2, 0);
         locks.read_lock_account(&pk2, 0);
 
@@ -481,7 +481,7 @@ mod tests {
     fn test_try_lock_accounts_any() {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         assert_eq!(
             locks.try_lock_accounts(
                 [&pk1].into_iter(),
@@ -512,7 +512,7 @@ mod tests {
     fn test_accounts_schedulable_threads_outstanding_write_only() {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
 
         locks.write_lock_account(&pk1, 2);
         assert_eq!(
@@ -529,7 +529,7 @@ mod tests {
     fn test_accounts_schedulable_threads_outstanding_read_only() {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
 
         locks.read_lock_account(&pk1, 2);
         assert_eq!(
@@ -556,7 +556,7 @@ mod tests {
     fn test_accounts_schedulable_threads_outstanding_mixed() {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
 
         locks.read_lock_account(&pk1, 2);
         locks.write_lock_account(&pk1, 2);
@@ -574,7 +574,7 @@ mod tests {
     #[should_panic(expected = "outstanding write lock must be on same thread")]
     fn test_write_lock_account_write_conflict_panic() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.write_lock_account(&pk1, 0);
         locks.write_lock_account(&pk1, 1);
     }
@@ -583,7 +583,7 @@ mod tests {
     #[should_panic(expected = "outstanding read lock must be on same thread")]
     fn test_write_lock_account_read_conflict_panic() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.read_lock_account(&pk1, 0);
         locks.write_lock_account(&pk1, 1);
     }
@@ -592,7 +592,7 @@ mod tests {
     #[should_panic(expected = "write lock must exist")]
     fn test_write_unlock_account_not_locked() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.write_unlock_account(&pk1, 0);
     }
 
@@ -600,7 +600,7 @@ mod tests {
     #[should_panic(expected = "outstanding write lock must be on same thread")]
     fn test_write_unlock_account_thread_mismatch() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.write_lock_account(&pk1, 1);
         locks.write_unlock_account(&pk1, 0);
     }
@@ -609,7 +609,7 @@ mod tests {
     #[should_panic(expected = "outstanding write lock must be on same thread")]
     fn test_read_lock_account_write_conflict_panic() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.write_lock_account(&pk1, 0);
         locks.read_lock_account(&pk1, 1);
     }
@@ -618,7 +618,7 @@ mod tests {
     #[should_panic(expected = "read lock must exist")]
     fn test_read_unlock_account_not_locked() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.read_unlock_account(&pk1, 1);
     }
 
@@ -626,7 +626,7 @@ mod tests {
     #[should_panic(expected = "outstanding read lock must be on same thread")]
     fn test_read_unlock_account_thread_mismatch() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.read_lock_account(&pk1, 0);
         locks.read_unlock_account(&pk1, 1);
     }
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn test_write_locking() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.write_lock_account(&pk1, 1);
         locks.write_lock_account(&pk1, 1);
         locks.write_unlock_account(&pk1, 1);
@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn test_read_locking() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.read_lock_account(&pk1, 1);
         locks.read_lock_account(&pk1, 1);
         locks.read_unlock_account(&pk1, 1);
@@ -657,7 +657,7 @@ mod tests {
     #[should_panic(expected = "thread_id must be < num_threads")]
     fn test_lock_accounts_invalid_thread() {
         let pk1 = Pubkey::new_unique();
-        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
         locks.lock_accounts([&pk1].into_iter(), std::iter::empty(), TEST_NUM_THREADS);
     }
 
