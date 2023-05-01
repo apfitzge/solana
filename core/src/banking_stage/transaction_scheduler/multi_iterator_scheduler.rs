@@ -502,6 +502,7 @@ impl MultiIteratorScheduler {
                             )
                         {
                             // re-insert
+                            drop(packet_entry);
                             self.container.retry_transaction(
                                 id,
                                 resanitized_transaction,
@@ -797,6 +798,7 @@ impl<'a> ForwardPayload<'a> {
                 .0
                 .is_err()
         {
+            drop(transaction_entry);
             payload.container.remove_by_id(&priority_id.id);
             return ProcessingDecision::Never;
         }

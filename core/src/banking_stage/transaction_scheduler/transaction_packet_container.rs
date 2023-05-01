@@ -5,13 +5,14 @@ use {
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         unprocessed_packet_batches::DeserializedPacket,
     },
+    dashmap::{
+        mapref::entry::{Entry, OccupiedEntry},
+        DashMap,
+    },
     min_max_heap::MinMaxHeap,
     solana_poh::poh_recorder::Slot,
     solana_sdk::transaction::SanitizedTransaction,
-    std::collections::{
-        hash_map::{Entry, OccupiedEntry},
-        HashMap,
-    },
+    std::collections::hash_map::RandomState,
 };
 
 pub(crate) struct SanitizedTransactionTTL {
@@ -21,16 +22,16 @@ pub(crate) struct SanitizedTransactionTTL {
 
 pub(crate) struct TransactionPacketContainer {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
-    id_to_transaction_ttl: HashMap<TransactionId, SanitizedTransactionTTL>,
-    id_to_packet: HashMap<TransactionId, DeserializedPacket>,
+    id_to_transaction_ttl: DashMap<TransactionId, SanitizedTransactionTTL>,
+    id_to_packet: DashMap<TransactionId, DeserializedPacket>,
 }
 
 impl TransactionPacketContainer {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),
-            id_to_transaction_ttl: HashMap::with_capacity(capacity),
-            id_to_packet: HashMap::with_capacity(capacity),
+            id_to_transaction_ttl: DashMap::with_capacity(capacity),
+            id_to_packet: DashMap::with_capacity(capacity),
         }
     }
 
@@ -61,7 +62,7 @@ impl TransactionPacketContainer {
     pub(crate) fn get_packet_entry(
         &mut self,
         id: TransactionId,
-    ) -> Option<OccupiedEntry<TransactionId, DeserializedPacket>> {
+    ) -> Option<OccupiedEntry<TransactionId, DeserializedPacket, RandomState>> {
         match self.id_to_packet.entry(id) {
             Entry::Occupied(entry) => Some(entry),
             Entry::Vacant(_) => None,
@@ -73,7 +74,7 @@ impl TransactionPacketContainer {
     pub(crate) fn get_transaction_entry(
         &mut self,
         id: TransactionId,
-    ) -> OccupiedEntry<TransactionId, SanitizedTransactionTTL> {
+    ) -> OccupiedEntry<TransactionId, SanitizedTransactionTTL, RandomState> {
         match self.id_to_transaction_ttl.entry(id) {
             Entry::Occupied(entry) => entry,
             Entry::Vacant(_) => panic!("transaction must exist"),
@@ -86,8 +87,8 @@ impl TransactionPacketContainer {
         &mut self,
         id: TransactionId,
     ) -> (
-        OccupiedEntry<TransactionId, SanitizedTransactionTTL>,
-        OccupiedEntry<TransactionId, DeserializedPacket>,
+        OccupiedEntry<TransactionId, SanitizedTransactionTTL, RandomState>,
+        OccupiedEntry<TransactionId, DeserializedPacket, RandomState>,
     ) {
         let Entry::Occupied(transaction_entry) = self.id_to_transaction_ttl.entry(id) else {
             panic!("transaction must exist");
@@ -232,7 +233,7 @@ mod tests {
             container
                 .id_to_packet
                 .iter()
-                .map(|p| p.1.immutable_section().priority())
+                .map(|p| p.immutable_section().priority())
                 .next()
                 .unwrap(),
             4
