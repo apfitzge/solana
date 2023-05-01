@@ -19,6 +19,7 @@ use {
         read_write_account_set::ReadWriteAccountSet,
     },
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError},
+    dashmap::DashMap,
     itertools::{izip, Itertools},
     solana_perf::perf_libs,
     solana_runtime::{
@@ -36,8 +37,10 @@ use {
         transaction::SanitizedTransaction,
     },
     std::{
-        collections::HashMap,
-        sync::{Arc, RwLock, RwLockReadGuard},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, RwLock, RwLockReadGuard,
+        },
         time::Duration,
     },
     thiserror::Error,
@@ -80,17 +83,17 @@ impl BatchIdGenerator {
 }
 
 struct InFlightTracker {
-    num_in_flight: usize,
-    num_in_flight_per_thread: Vec<usize>,
-    batch_id_to_thread_id: HashMap<TransactionBatchId, ThreadId>,
+    num_in_flight: AtomicUsize,
+    num_in_flight_per_thread: Vec<AtomicUsize>,
+    batch_id_to_thread_id: DashMap<TransactionBatchId, ThreadId>,
 }
 
 impl InFlightTracker {
     fn new(num_threads: usize) -> Self {
         Self {
-            num_in_flight: 0,
-            num_in_flight_per_thread: vec![0; num_threads],
-            batch_id_to_thread_id: HashMap::new(),
+            num_in_flight: AtomicUsize::new(0),
+            num_in_flight_per_thread: (0..num_threads).map(|_| AtomicUsize::new(0)).collect(),
+            batch_id_to_thread_id: DashMap::new(),
         }
     }
 
@@ -100,8 +103,9 @@ impl InFlightTracker {
         num_transactions: usize,
         thread_id: ThreadId,
     ) {
-        self.num_in_flight += num_transactions;
-        self.num_in_flight_per_thread[thread_id] += num_transactions;
+        self.num_in_flight
+            .fetch_add(num_transactions, Ordering::Relaxed);
+        self.num_in_flight_per_thread[thread_id].fetch_add(num_transactions, Ordering::Relaxed);
         self.batch_id_to_thread_id.insert(batch_id, thread_id);
     }
 
@@ -111,12 +115,13 @@ impl InFlightTracker {
         batch_id: TransactionBatchId,
         num_transactions: usize,
     ) -> ThreadId {
-        let thread_id = self
+        let (_batch_id, thread_id) = self
             .batch_id_to_thread_id
             .remove(&batch_id)
             .expect("transaction batch id should exist in in-flight tracker");
-        self.num_in_flight -= num_transactions;
-        self.num_in_flight_per_thread[thread_id] -= num_transactions;
+        self.num_in_flight
+            .fetch_sub(num_transactions, Ordering::Relaxed);
+        self.num_in_flight_per_thread[thread_id].fetch_sub(num_transactions, Ordering::Relaxed);
 
         thread_id
     }
@@ -619,6 +624,7 @@ impl<'a> ConsumePayload<'a> {
         // Don't allow the scheduler to send more than the limit
         for thread_id in 0..self.scheduler.num_threads {
             if self.scheduler.in_flight_tracker.num_in_flight_per_thread[thread_id]
+                .load(Ordering::Relaxed)
                 >= self.scheduler.thread_in_flight_limit
             {
                 self.schedulable_threads.remove(thread_id);
@@ -703,7 +709,8 @@ impl<'a> ConsumePayload<'a> {
         }
 
         // Don't allow further scheduling if this thread is at the limit
-        if payload.transaction_batches[thread_id].len() + in_flight[thread_id]
+        if payload.transaction_batches[thread_id].len()
+            + in_flight[thread_id].load(Ordering::Relaxed)
             >= scheduler.thread_in_flight_limit
         {
             payload.schedulable_threads.remove(thread_id);
@@ -714,7 +721,7 @@ impl<'a> ConsumePayload<'a> {
 
     fn select_thread(
         batches_per_thread: &[Vec<SanitizedTransaction>],
-        in_flight_per_thread: &[usize],
+        in_flight_per_thread: &[AtomicUsize],
         thread_set: ThreadSet,
     ) -> ThreadId {
         thread_set
@@ -722,7 +729,8 @@ impl<'a> ConsumePayload<'a> {
             .map(|thread_id| {
                 (
                     thread_id,
-                    batches_per_thread[thread_id].len() + in_flight_per_thread[thread_id],
+                    batches_per_thread[thread_id].len()
+                        + in_flight_per_thread[thread_id].load(Ordering::Relaxed),
                 )
             })
             .min_by(|a, b| a.1.cmp(&b.1))
