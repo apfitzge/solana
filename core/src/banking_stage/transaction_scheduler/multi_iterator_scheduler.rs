@@ -1,6 +1,7 @@
 use {
     super::{
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
+        transaction_id_generator::TransactionIdGenerator,
         transaction_packet_container::{SanitizedTransactionTTL, TransactionPacketContainer},
         transaction_priority_id::TransactionPriorityId,
     },
@@ -45,24 +46,6 @@ use {
     },
     thiserror::Error,
 };
-
-struct TransactionIdGenerator {
-    index: u64,
-}
-
-impl Default for TransactionIdGenerator {
-    fn default() -> Self {
-        Self { index: u64::MAX }
-    }
-}
-
-impl TransactionIdGenerator {
-    fn next(&mut self) -> TransactionId {
-        let index = self.index;
-        self.index = self.index.wrapping_sub(1);
-        TransactionId::new(index)
-    }
-}
 
 struct BatchIdGenerator {
     index: u64,
@@ -157,7 +140,7 @@ pub struct MultiIteratorScheduler {
     /// Receiver for packets from sigverify
     packet_deserializer: PacketDeserializer,
     /// Generator for transaction ids
-    transaction_id_generator: TransactionIdGenerator,
+    transaction_id_generator: Arc<TransactionIdGenerator>,
     /// Generator for batch ids
     batch_id_generator: BatchIdGenerator,
 }
@@ -186,7 +169,7 @@ impl MultiIteratorScheduler {
             forward_work_sender,
             finished_forward_work_receiver,
             packet_deserializer,
-            transaction_id_generator: TransactionIdGenerator::default(),
+            transaction_id_generator: Arc::default(),
             batch_id_generator: BatchIdGenerator::default(),
         }
     }
@@ -390,30 +373,33 @@ impl MultiIteratorScheduler {
         let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
         let r_blockhash = bank.read_blockhash_queue().unwrap();
 
-        for (packet, transaction) in receive_packet_results
-            .deserialized_packets
-            .into_iter()
-            .filter_map(|packet| {
+        let transaction_ids = self
+            .transaction_id_generator
+            .next_batch(receive_packet_results.deserialized_packets.len() as u64);
+
+        for (id, packet, transaction) in transaction_ids
+            .zip(receive_packet_results.deserialized_packets.into_iter())
+            .filter_map(|(id, packet)| {
                 packet
                     .build_sanitized_transaction(
                         &bank.feature_set,
                         bank.vote_only_bank(),
                         bank.as_ref(),
                     )
-                    .map(|tx| (packet, tx))
+                    .map(|tx| (id, packet, tx))
             })
-            .filter(|(_, transaction)| {
+            .filter(|(_, _, transaction)| {
                 SanitizedTransaction::validate_account_locks(
                     transaction.message(),
                     tx_account_lock_limit,
                 )
                 .is_ok()
             })
-            .filter_map(|(packet, transaction)| {
+            .filter_map(|(id, packet, transaction)| {
                 r_blockhash
                     .get_hash_age(transaction.message().recent_blockhash())
                     .filter(|age| *age <= MAX_PROCESSING_AGE as u64)
-                    .map(|_| (packet, transaction))
+                    .map(|_| (id, packet, transaction))
             })
         {
             let transaction_ttl = SanitizedTransactionTTL {
@@ -421,9 +407,8 @@ impl MultiIteratorScheduler {
                 max_age_slot: last_slot_in_epoch,
             };
 
-            let transaction_id = self.transaction_id_generator.next();
             self.container
-                .insert_new_transaction(transaction_id, packet, transaction_ttl);
+                .insert_new_transaction(id, packet, transaction_ttl);
         }
     }
 

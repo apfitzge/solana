@@ -4,3 +4,5 @@ pub(crate) mod transaction_priority_id;
 
 #[allow(dead_code)]
 pub(crate) mod multi_iterator_scheduler;
+
+mod transaction_id_generator;
