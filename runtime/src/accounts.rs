@@ -573,6 +573,7 @@ impl Accounts {
     #[allow(clippy::too_many_arguments)]
     pub fn load_transaction_accounts_with_hot_cache(
         &self,
+        slot: Slot,
         hot_account_cache: &HotAccountCache,
         ancestors: &Ancestors,
         tx: &SanitizedTransaction,
@@ -696,7 +697,12 @@ impl Accounts {
                                     (default_account.data().len(), default_account, 0)
                                 });
 
-                            hot_account_cache.insert_account(key, account.clone());
+                            hot_account_cache.insert_account(
+                                *key,
+                                slot,
+                                account.clone(),
+                                message.is_writable(i),
+                            );
                             (data_len, account, rent_due)
                         }
                     };
@@ -1025,6 +1031,7 @@ impl Accounts {
     #[allow(clippy::too_many_arguments)]
     pub fn load_accounts_with_hot_cache(
         &self,
+        slot: Slot,
         ancestors: &Ancestors,
         txs: &[SanitizedTransaction],
         lock_results: Vec<TransactionCheckResult>,
@@ -1065,6 +1072,7 @@ impl Accounts {
                     };
 
                     let loaded_transaction = match self.load_transaction_accounts_with_hot_cache(
+                        slot,
                         hot_account_cache,
                         ancestors,
                         tx,

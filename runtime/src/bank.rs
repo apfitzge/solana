@@ -4884,6 +4884,7 @@ impl Bank {
 
         let mut load_time = Measure::start("accounts_load");
         let mut loaded_transactions = self.rc.accounts.load_accounts_with_hot_cache(
+            self.slot,
             &self.ancestors,
             sanitized_txs,
             check_results,
@@ -5554,7 +5555,8 @@ impl Bank {
         );
 
         for (key, account) in accounts {
-            hot_account_cache.insert_account(key, account.clone());
+            // accounts were written in the current slot
+            hot_account_cache.insert_account(*key, self.slot, account.clone(), true);
         }
 
         let rent_debits = self.collect_rent(&execution_results, loaded_txs);
