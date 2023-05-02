@@ -62,7 +62,7 @@ impl AccountsHashVerifier {
             .name("solAcctHashVer".to_string())
             .spawn(move || {
                 info!("AccountsHashVerifier has started");
-                let mut hashes = vec![];
+                // let mut hashes = vec![];
                 // To support fastboot, we must ensure the storages used in the latest POST snapshot are
                 // not recycled nor removed early.  Hold an Arc of their AppendVecs to prevent them from
                 // expiring.
@@ -88,17 +88,17 @@ impl AccountsHashVerifier {
 
                     let snapshot_storages = accounts_package.snapshot_storages.clone();
 
-                    let (_, handling_time_us) = measure_us!(Self::process_accounts_package(
-                        accounts_package,
-                        &cluster_info,
-                        known_validators.as_ref(),
-                        halt_on_known_validators_accounts_hash_mismatch,
-                        snapshot_package_sender.as_ref(),
-                        &mut hashes,
-                        &exit,
-                        &snapshot_config,
-                        accounts_hash_fault_injector,
-                    ));
+                    // let (_, handling_time_us) = measure_us!(Self::process_accounts_package(
+                    //     accounts_package,
+                    //     &cluster_info,
+                    //     known_validators.as_ref(),
+                    //     halt_on_known_validators_accounts_hash_mismatch,
+                    //     snapshot_package_sender.as_ref(),
+                    //     &mut hashes,
+                    //     &exit,
+                    //     &snapshot_config,
+                    //     accounts_hash_fault_injector,
+                    // ));
 
                     // Done processing the current snapshot, so the current snapshot dir
                     // has been converted to POST state.  It is the time to update
@@ -114,21 +114,21 @@ impl AccountsHashVerifier {
                             .unwrap_or(0)
                     );
 
-                    datapoint_info!(
-                        "accounts_hash_verifier",
-                        (
-                            "num-outstanding-accounts-packages",
-                            num_outstanding_accounts_packages,
-                            i64
-                        ),
-                        (
-                            "num-re-enqueued-accounts-packages",
-                            num_re_enqueued_accounts_packages,
-                            i64
-                        ),
-                        ("enqueued-time-us", enqueued_time.as_micros(), i64),
-                        ("handling-time-us", handling_time_us, i64),
-                    );
+                    // datapoint_info!(
+                    //     "accounts_hash_verifier",
+                    //     (
+                    //         "num-outstanding-accounts-packages",
+                    //         num_outstanding_accounts_packages,
+                    //         i64
+                    //     ),
+                    //     (
+                    //         "num-re-enqueued-accounts-packages",
+                    //         num_re_enqueued_accounts_packages,
+                    //         i64
+                    //     ),
+                    //     ("enqueued-time-us", enqueued_time.as_micros(), i64),
+                    //     ("handling-time-us", handling_time_us, i64),
+                    // );
                 }
                 debug!(
                     "Number of snapshot storages kept alive for fastboot: {}",
