@@ -105,22 +105,28 @@ impl ThreadAwareAccountLocks {
 
         for account in write_account_locks {
             if self.write_unlock_account(account, thread_id) {
-                let hot_cache_entry = self.hot_account_caches[thread_id].remove_account(account);
-                accounts_to_write
-                    .entry(hot_cache_entry.slot)
-                    .or_default()
-                    .push((*account, hot_cache_entry.account));
+                if let Some(hot_cache_entry) =
+                    self.hot_account_caches[thread_id].remove_account(account)
+                {
+                    accounts_to_write
+                        .entry(hot_cache_entry.slot)
+                        .or_default()
+                        .push((*account, hot_cache_entry.account));
+                }
             }
         }
 
         for account in read_account_locks {
             if self.read_unlock_account(account, thread_id) {
-                let hot_cache_entry = self.hot_account_caches[thread_id].remove_account(account);
-                if hot_cache_entry.written {
-                    accounts_to_write
-                        .entry(hot_cache_entry.slot)
-                        .or_default()
-                        .push((*account, hot_cache_entry.account));
+                if let Some(hot_cache_entry) =
+                    self.hot_account_caches[thread_id].remove_account(account)
+                {
+                    if hot_cache_entry.written {
+                        accounts_to_write
+                            .entry(hot_cache_entry.slot)
+                            .or_default()
+                            .push((*account, hot_cache_entry.account));
+                    }
                 }
             }
         }

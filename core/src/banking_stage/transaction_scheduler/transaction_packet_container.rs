@@ -122,14 +122,14 @@ impl TransactionPacketContainer {
         transaction_ttl: SanitizedTransactionTTL,
     ) {
         let priority_id = TransactionPriorityId::new(packet.priority(), transaction_id);
-        if self.push_id_into_queue(priority_id) {
-            self.id_to_packet.insert(
-                transaction_id,
-                DeserializedPacket::from_immutable_section(packet),
-            );
-            self.id_to_transaction_ttl
-                .insert(transaction_id, transaction_ttl);
-        }
+
+        self.id_to_packet.insert(
+            transaction_id,
+            DeserializedPacket::from_immutable_section(packet),
+        );
+        self.id_to_transaction_ttl
+            .insert(transaction_id, transaction_ttl);
+        self.push_id_into_queue(priority_id);
     }
 
     /// Retries a transaction - inserts transaction back into map (but not packet).

@@ -48,7 +48,7 @@ impl HotAccountCache {
         self.accounts.get(pubkey).map(|a| a.value().account.clone())
     }
 
-    pub fn remove_account(&self, pubkey: &Pubkey) -> HotAccountCacheEntry {
-        self.accounts.remove(pubkey).expect("account must exist").1
+    pub fn remove_account(&self, pubkey: &Pubkey) -> Option<HotAccountCacheEntry> {
+        self.accounts.remove(pubkey).map(|a| a.1)
     }
 }
