@@ -503,8 +503,12 @@ impl Consumer {
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
         // and WouldExceedMaxAccountDataCostLimit
-        let execute_and_commit_transactions_output =
-            self.execute_and_commit_transactions_locked(bank, &batch);
+        let execute_and_commit_transactions_output = self
+            .execute_and_commit_transactions_locked_with_hot_cache(
+                bank,
+                &batch,
+                &self.hot_account_cache,
+            );
 
         // Once the accounts are new transactions can enter the pipeline to process them
         drop(batch);
@@ -567,6 +571,167 @@ impl Consumer {
                 &mut execute_and_commit_timings.execute_timings,
                 None, // account_overrides
                 self.log_messages_bytes_limit
+            ));
+        execute_and_commit_timings.load_execute_us = load_execute_us;
+
+        let LoadAndExecuteTransactionsOutput {
+            mut loaded_transactions,
+            execution_results,
+            mut retryable_transaction_indexes,
+            executed_transactions_count,
+            executed_non_vote_transactions_count,
+            executed_with_successful_result_count,
+            signature_count,
+            error_counters,
+            ..
+        } = load_and_execute_transactions_output;
+
+        let transactions_attempted_execution_count = execution_results.len();
+        let (executed_transactions, execution_results_to_transactions_us) =
+            measure_us!(execution_results
+                .iter()
+                .zip(batch.sanitized_transactions())
+                .filter_map(|(execution_result, tx)| {
+                    if execution_result.was_executed() {
+                        Some(tx.to_versioned_transaction())
+                    } else {
+                        None
+                    }
+                })
+                .collect_vec());
+
+        let (freeze_lock, freeze_lock_us) = measure_us!(bank.freeze_lock());
+        execute_and_commit_timings.freeze_lock_us = freeze_lock_us;
+
+        if !executed_transactions.is_empty() {
+            inc_new_counter_info!("banking_stage-record_count", 1);
+            inc_new_counter_info!(
+                "banking_stage-record_transactions",
+                executed_transactions_count
+            );
+        }
+        let (record_transactions_summary, record_us) = measure_us!(self
+            .transaction_recorder
+            .record_transactions(bank.slot(), executed_transactions));
+        execute_and_commit_timings.record_us = record_us;
+
+        let RecordTransactionsSummary {
+            result: record_transactions_result,
+            record_transactions_timings,
+            starting_transaction_index,
+        } = record_transactions_summary;
+        execute_and_commit_timings.record_transactions_timings = RecordTransactionsTimings {
+            execution_results_to_transactions_us,
+            ..record_transactions_timings
+        };
+
+        if let Err(recorder_err) = record_transactions_result {
+            inc_new_counter_info!("banking_stage-max_height_reached", 1);
+            inc_new_counter_info!(
+                "banking_stage-max_height_reached_num_to_commit",
+                executed_transactions_count
+            );
+
+            retryable_transaction_indexes.extend(execution_results.iter().enumerate().filter_map(
+                |(index, execution_result)| execution_result.was_executed().then_some(index),
+            ));
+
+            return ExecuteAndCommitTransactionsOutput {
+                transactions_attempted_execution_count,
+                executed_transactions_count,
+                executed_with_successful_result_count,
+                retryable_transaction_indexes,
+                commit_transactions_result: Err(recorder_err),
+                execute_and_commit_timings,
+                error_counters,
+            };
+        }
+
+        let (commit_time_us, commit_transaction_statuses) = if executed_transactions_count != 0 {
+            self.committer.commit_transactions(
+                batch,
+                &mut loaded_transactions,
+                execution_results,
+                starting_transaction_index,
+                bank,
+                &mut pre_balance_info,
+                &mut execute_and_commit_timings,
+                signature_count,
+                executed_transactions_count,
+                executed_non_vote_transactions_count,
+                executed_with_successful_result_count,
+            )
+        } else {
+            (
+                0,
+                vec![CommitTransactionDetails::NotCommitted; execution_results.len()],
+            )
+        };
+
+        drop(freeze_lock);
+
+        debug!(
+            "bank: {} process_and_record_locked: {}us record: {}us commit: {}us txs_len: {}",
+            bank.slot(),
+            load_execute_us,
+            record_us,
+            commit_time_us,
+            batch.sanitized_transactions().len(),
+        );
+
+        debug!(
+            "execute_and_commit_transactions_locked: {:?}",
+            execute_and_commit_timings.execute_timings,
+        );
+
+        debug_assert_eq!(
+            commit_transaction_statuses.len(),
+            transactions_attempted_execution_count
+        );
+
+        ExecuteAndCommitTransactionsOutput {
+            transactions_attempted_execution_count,
+            executed_transactions_count,
+            executed_with_successful_result_count,
+            retryable_transaction_indexes,
+            commit_transactions_result: Ok(commit_transaction_statuses),
+            execute_and_commit_timings,
+            error_counters,
+        }
+    }
+
+    fn execute_and_commit_transactions_locked_with_hot_cache(
+        &self,
+        bank: &Arc<Bank>,
+        batch: &TransactionBatch,
+        hot_account_cache: &HotAccountCache,
+    ) -> ExecuteAndCommitTransactionsOutput {
+        let transaction_status_sender_enabled = self.committer.transaction_status_sender_enabled();
+        let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
+
+        let mut pre_balance_info = PreBalanceInfo::default();
+        let (_, collect_balances_us) = measure_us!({
+            // If the extra meta-data services are enabled for RPC, collect the
+            // pre-balances for native and token programs.
+            if transaction_status_sender_enabled {
+                pre_balance_info.native = bank.collect_balances(batch);
+                pre_balance_info.token =
+                    collect_token_balances(bank, batch, &mut pre_balance_info.mint_decimals)
+            }
+        });
+        execute_and_commit_timings.collect_balances_us = collect_balances_us;
+
+        let (load_and_execute_transactions_output, load_execute_us) = measure_us!(bank
+            .load_and_execute_transactions_with_hot_cache(
+                batch,
+                MAX_PROCESSING_AGE,
+                transaction_status_sender_enabled,
+                transaction_status_sender_enabled,
+                transaction_status_sender_enabled,
+                &mut execute_and_commit_timings.execute_timings,
+                None, // account_overrides
+                self.log_messages_bytes_limit,
+                hot_account_cache,
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
 

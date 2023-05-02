@@ -1022,6 +1022,86 @@ impl Accounts {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_accounts_with_hot_cache(
+        &self,
+        ancestors: &Ancestors,
+        txs: &[SanitizedTransaction],
+        lock_results: Vec<TransactionCheckResult>,
+        hash_queue: &BlockhashQueue,
+        error_counters: &mut TransactionErrorMetrics,
+        rent_collector: &RentCollector,
+        feature_set: &FeatureSet,
+        fee_structure: &FeeStructure,
+        account_overrides: Option<&AccountOverrides>,
+        program_accounts: &HashMap<Pubkey, &Pubkey>,
+        loaded_programs: &HashMap<Pubkey, Arc<LoadedProgram>>,
+        hot_account_cache: &HotAccountCache,
+    ) -> Vec<TransactionLoadResult> {
+        txs.iter()
+            .zip(lock_results)
+            .map(|etx| match etx {
+                (tx, (Ok(()), nonce)) => {
+                    let lamports_per_signature = nonce
+                        .as_ref()
+                        .map(|nonce| nonce.lamports_per_signature())
+                        .unwrap_or_else(|| {
+                            hash_queue.get_lamports_per_signature(tx.message().recent_blockhash())
+                        });
+                    let fee = if let Some(lamports_per_signature) = lamports_per_signature {
+                        Bank::calculate_fee(
+                            tx.message(),
+                            lamports_per_signature,
+                            fee_structure,
+                            feature_set.is_active(&use_default_units_in_fee_calculation::id()),
+                            !feature_set.is_active(&remove_deprecated_request_unit_ix::id()),
+                            feature_set.is_active(&remove_congestion_multiplier_from_fee_calculation::id()),
+                            feature_set.is_active(&enable_request_heap_frame_ix::id()) || self.accounts_db.expected_cluster_type() != ClusterType::MainnetBeta,
+                            feature_set.is_active(&add_set_tx_loaded_accounts_data_size_instruction::id()),
+                            feature_set.is_active(&include_loaded_accounts_data_size_in_fee_calculation::id()),
+                        )
+                    } else {
+                        return (Err(TransactionError::BlockhashNotFound), None);
+                    };
+
+                    let loaded_transaction = match self.load_transaction_accounts_with_hot_cache(
+                        hot_account_cache,
+                        ancestors,
+                        tx,
+                        fee,
+                        error_counters,
+                        rent_collector,
+                        feature_set,
+                        account_overrides,
+                        program_accounts,
+                        loaded_programs,
+                    ) {
+                        Ok(loaded_transaction) => loaded_transaction,
+                        Err(e) => return (Err(e), None),
+                    };
+
+                    // Update nonce with fee-subtracted accounts
+                    let nonce = if let Some(nonce) = nonce {
+                        match NonceFull::from_partial(
+                            nonce,
+                            tx.message(),
+                            &loaded_transaction.accounts,
+                            &loaded_transaction.rent_debits,
+                        ) {
+                            Ok(nonce) => Some(nonce),
+                            Err(e) => return (Err(e), None),
+                        }
+                    } else {
+                        None
+                    };
+
+                    (Ok(loaded_transaction), nonce)
+                }
+                (_, (Err(e), _nonce)) => (Err(e), None),
+            })
+            .collect()
+    }
+
     pub fn load_lookup_table_addresses(
         &self,
         ancestors: &Ancestors,

@@ -272,6 +272,7 @@ pub struct BankRc {
     pub(crate) bank_id_generator: Arc<AtomicU64>,
 }
 
+use crate::hot_account_cache::HotAccountCache;
 #[cfg(RUSTC_WITH_SPECIALIZATION)]
 use solana_frozen_abi::abi_example::AbiExample;
 
@@ -4585,6 +4586,316 @@ impl Bank {
             account_overrides,
             &program_accounts_map,
             &loaded_programs_map,
+        );
+        load_time.stop();
+
+        let mut execution_time = Measure::start("execution_time");
+        let mut signature_count: u64 = 0;
+
+        let execution_results: Vec<TransactionExecutionResult> = loaded_transactions
+            .iter_mut()
+            .zip(sanitized_txs.iter())
+            .map(|(accs, tx)| match accs {
+                (Err(e), _nonce) => TransactionExecutionResult::NotExecuted(e.clone()),
+                (Ok(loaded_transaction), nonce) => {
+                    let compute_budget = if let Some(compute_budget) =
+                        self.runtime_config.compute_budget
+                    {
+                        compute_budget
+                    } else {
+                        let mut compute_budget =
+                            ComputeBudget::new(compute_budget::MAX_COMPUTE_UNIT_LIMIT as u64);
+
+                        let mut compute_budget_process_transaction_time =
+                            Measure::start("compute_budget_process_transaction_time");
+                        let process_transaction_result = compute_budget.process_instructions(
+                            tx.message().program_instructions_iter(),
+                            true,
+                            !self
+                                .feature_set
+                                .is_active(&remove_deprecated_request_unit_ix::id()),
+                            true, // don't reject txs that use request heap size ix
+                            self.feature_set
+                                .is_active(&add_set_tx_loaded_accounts_data_size_instruction::id()),
+                        );
+                        compute_budget_process_transaction_time.stop();
+                        saturating_add_assign!(
+                            timings
+                                .execute_accessories
+                                .compute_budget_process_transaction_us,
+                            compute_budget_process_transaction_time.as_us()
+                        );
+                        if let Err(err) = process_transaction_result {
+                            return TransactionExecutionResult::NotExecuted(err);
+                        }
+                        compute_budget
+                    };
+
+                    self.execute_loaded_transaction(
+                        tx,
+                        loaded_transaction,
+                        compute_budget,
+                        nonce.as_ref().map(DurableNonceFee::from),
+                        enable_cpi_recording,
+                        enable_log_recording,
+                        enable_return_data_recording,
+                        timings,
+                        &mut error_counters,
+                        log_messages_bytes_limit,
+                        tx_executor_cache.clone(),
+                    )
+                }
+            })
+            .collect();
+
+        execution_time.stop();
+
+        const EVICT_CACHE_TO_PERCENTAGE: u8 = 90;
+        self.loaded_programs_cache
+            .write()
+            .unwrap()
+            .sort_and_evict(Percentage::from(EVICT_CACHE_TO_PERCENTAGE));
+
+        debug!(
+            "check: {}us load: {}us execute: {}us txs_len={}",
+            check_time.as_us(),
+            load_time.as_us(),
+            execution_time.as_us(),
+            sanitized_txs.len(),
+        );
+
+        timings.saturating_add_in_place(ExecuteTimingType::CheckUs, check_time.as_us());
+        timings.saturating_add_in_place(ExecuteTimingType::LoadUs, load_time.as_us());
+        timings.saturating_add_in_place(ExecuteTimingType::ExecuteUs, execution_time.as_us());
+
+        let mut executed_transactions_count: usize = 0;
+        let mut executed_non_vote_transactions_count: usize = 0;
+        let mut executed_with_successful_result_count: usize = 0;
+        let err_count = &mut error_counters.total;
+        let transaction_log_collector_config =
+            self.transaction_log_collector_config.read().unwrap();
+
+        let mut collect_logs_time = Measure::start("collect_logs_time");
+        for (execution_result, tx) in execution_results.iter().zip(sanitized_txs) {
+            if let Some(debug_keys) = &self.transaction_debug_keys {
+                for key in tx.message().account_keys().iter() {
+                    if debug_keys.contains(key) {
+                        let result = execution_result.flattened_result();
+                        info!("slot: {} result: {:?} tx: {:?}", self.slot, result, tx);
+                        break;
+                    }
+                }
+            }
+
+            let is_vote = tx.is_simple_vote_transaction();
+
+            if execution_result.was_executed() // Skip log collection for unprocessed transactions
+                && transaction_log_collector_config.filter != TransactionLogCollectorFilter::None
+            {
+                let mut filtered_mentioned_addresses = Vec::new();
+                if !transaction_log_collector_config
+                    .mentioned_addresses
+                    .is_empty()
+                {
+                    for key in tx.message().account_keys().iter() {
+                        if transaction_log_collector_config
+                            .mentioned_addresses
+                            .contains(key)
+                        {
+                            filtered_mentioned_addresses.push(*key);
+                        }
+                    }
+                }
+
+                let store = match transaction_log_collector_config.filter {
+                    TransactionLogCollectorFilter::All => {
+                        !is_vote || !filtered_mentioned_addresses.is_empty()
+                    }
+                    TransactionLogCollectorFilter::AllWithVotes => true,
+                    TransactionLogCollectorFilter::None => false,
+                    TransactionLogCollectorFilter::OnlyMentionedAddresses => {
+                        !filtered_mentioned_addresses.is_empty()
+                    }
+                };
+
+                if store {
+                    if let Some(TransactionExecutionDetails {
+                        status,
+                        log_messages: Some(log_messages),
+                        ..
+                    }) = execution_result.details()
+                    {
+                        let mut transaction_log_collector =
+                            self.transaction_log_collector.write().unwrap();
+                        let transaction_log_index = transaction_log_collector.logs.len();
+
+                        transaction_log_collector.logs.push(TransactionLogInfo {
+                            signature: *tx.signature(),
+                            result: status.clone(),
+                            is_vote,
+                            log_messages: log_messages.clone(),
+                        });
+                        for key in filtered_mentioned_addresses.into_iter() {
+                            transaction_log_collector
+                                .mentioned_address_map
+                                .entry(key)
+                                .or_default()
+                                .push(transaction_log_index);
+                        }
+                    }
+                }
+            }
+
+            if execution_result.was_executed() {
+                // Signature count must be accumulated only if the transaction
+                // is executed, otherwise a mismatched count between banking and
+                // replay could occur
+                signature_count += u64::from(tx.message().header().num_required_signatures);
+                executed_transactions_count += 1;
+            }
+
+            match execution_result.flattened_result() {
+                Ok(()) => {
+                    if !is_vote {
+                        executed_non_vote_transactions_count += 1;
+                    }
+                    executed_with_successful_result_count += 1;
+                }
+                Err(err) => {
+                    if *err_count == 0 {
+                        debug!("tx error: {:?} {:?}", err, tx);
+                    }
+                    *err_count += 1;
+                }
+            }
+        }
+        collect_logs_time.stop();
+        timings
+            .saturating_add_in_place(ExecuteTimingType::CollectLogsUs, collect_logs_time.as_us());
+
+        if *err_count > 0 {
+            debug!(
+                "{} errors of {} txs",
+                *err_count,
+                *err_count + executed_with_successful_result_count
+            );
+        }
+        LoadAndExecuteTransactionsOutput {
+            loaded_transactions,
+            execution_results,
+            retryable_transaction_indexes,
+            executed_transactions_count,
+            executed_non_vote_transactions_count,
+            executed_with_successful_result_count,
+            signature_count,
+            error_counters,
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_and_execute_transactions_with_hot_cache(
+        &self,
+        batch: &TransactionBatch,
+        max_age: usize,
+        enable_cpi_recording: bool,
+        enable_log_recording: bool,
+        enable_return_data_recording: bool,
+        timings: &mut ExecuteTimings,
+        account_overrides: Option<&AccountOverrides>,
+        log_messages_bytes_limit: Option<usize>,
+        hot_account_cache: &HotAccountCache,
+    ) -> LoadAndExecuteTransactionsOutput {
+        let sanitized_txs = batch.sanitized_transactions();
+        debug!("processing transactions: {}", sanitized_txs.len());
+        inc_new_counter_info!("bank-process_transactions", sanitized_txs.len());
+        let mut error_counters = TransactionErrorMetrics::default();
+
+        let retryable_transaction_indexes: Vec<_> = batch
+            .lock_results()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, res)| match res {
+                // following are retryable errors
+                Err(TransactionError::AccountInUse) => {
+                    error_counters.account_in_use += 1;
+                    Some(index)
+                }
+                Err(TransactionError::WouldExceedMaxBlockCostLimit) => {
+                    error_counters.would_exceed_max_block_cost_limit += 1;
+                    Some(index)
+                }
+                Err(TransactionError::WouldExceedMaxVoteCostLimit) => {
+                    error_counters.would_exceed_max_vote_cost_limit += 1;
+                    Some(index)
+                }
+                Err(TransactionError::WouldExceedMaxAccountCostLimit) => {
+                    error_counters.would_exceed_max_account_cost_limit += 1;
+                    Some(index)
+                }
+                Err(TransactionError::WouldExceedAccountDataBlockLimit) => {
+                    error_counters.would_exceed_account_data_block_limit += 1;
+                    Some(index)
+                }
+                // following are non-retryable errors
+                Err(TransactionError::TooManyAccountLocks) => {
+                    error_counters.too_many_account_locks += 1;
+                    None
+                }
+                Err(_) => None,
+                Ok(_) => None,
+            })
+            .collect();
+
+        let mut check_time = Measure::start("check_transactions");
+        let mut check_results = self.check_transactions(
+            sanitized_txs,
+            batch.lock_results(),
+            max_age,
+            &mut error_counters,
+        );
+        check_time.stop();
+
+        let program_owners: Vec<Pubkey> = vec![
+            bpf_loader_upgradeable::id(),
+            bpf_loader::id(),
+            bpf_loader_deprecated::id(),
+        ];
+        let program_owners_refs: Vec<&Pubkey> = program_owners.iter().collect();
+        let program_accounts_map = self.rc.accounts.filter_executable_program_accounts(
+            &self.ancestors,
+            sanitized_txs,
+            &mut check_results,
+            &program_owners_refs,
+            &self.blockhash_queue.read().unwrap(),
+        );
+
+        // The following code is currently commented out. This is how the new cache will
+        // finally be used, once rest of the code blocks are in place.
+        /*
+        let loaded_programs_map =
+            self.load_and_get_programs_from_cache(&program_accounts_map);
+        */
+        let loaded_programs_map = self.replenish_executor_cache(&program_accounts_map);
+
+        let tx_executor_cache = Rc::new(RefCell::new(TransactionExecutorCache::new(
+            loaded_programs_map.clone().into_iter(),
+        )));
+
+        let mut load_time = Measure::start("accounts_load");
+        let mut loaded_transactions = self.rc.accounts.load_accounts_with_hot_cache(
+            &self.ancestors,
+            sanitized_txs,
+            check_results,
+            &self.blockhash_queue.read().unwrap(),
+            &mut error_counters,
+            &self.rent_collector,
+            &self.feature_set,
+            &self.fee_structure,
+            account_overrides,
+            &program_accounts_map,
+            &loaded_programs_map,
+            hot_account_cache,
         );
         load_time.stop();
 
