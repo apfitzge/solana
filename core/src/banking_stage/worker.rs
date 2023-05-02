@@ -270,7 +270,13 @@ mod tests {
             replay_vote_sender,
             Arc::new(PrioritizationFeeCache::new(0u64)),
         );
-        let consumer = Consumer::new(committer, recorder, QosService::new(1), None);
+        let consumer = Consumer::new(
+            committer,
+            recorder,
+            QosService::new(1),
+            None,
+            Arc::default(),
+        );
 
         let (_local_node, cluster_info) = new_test_cluster_info(None);
         let cluster_info = Arc::new(cluster_info);

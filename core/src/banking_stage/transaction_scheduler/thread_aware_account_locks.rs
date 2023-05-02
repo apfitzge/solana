@@ -1,9 +1,11 @@
 use {
     dashmap::{mapref::entry::Entry, DashMap},
+    solana_runtime::hot_account_cache::HotAccountCache,
     solana_sdk::pubkey::Pubkey,
     std::{
         fmt::{Debug, Display},
         ops::{BitAnd, BitAndAssign, Sub},
+        sync::Arc,
     },
 };
 
@@ -42,6 +44,9 @@ pub(crate) struct ThreadAwareAccountLocks {
     /// Contains thread-set for easily checking which threads are scheduled.
     /// Contains how many read locks are held by each thread.
     read_locks: DashMap<Pubkey, AccountReadLocks>,
+
+    /// Cache of hot accounts for each thread
+    hot_account_caches: Vec<Arc<HotAccountCache>>,
 }
 
 impl ThreadAwareAccountLocks {
@@ -57,7 +62,12 @@ impl ThreadAwareAccountLocks {
             num_threads,
             write_locks: DashMap::new(),
             read_locks: DashMap::new(),
+            hot_account_caches: (0..num_threads).map(|_| Arc::default()).collect(),
         }
+    }
+
+    pub(crate) fn get_hot_account_caches(&self) -> Vec<Arc<HotAccountCache>> {
+        self.hot_account_caches.clone()
     }
 
     /// Returns the `ThreadId` if the accounts are able to be locked

@@ -29,6 +29,7 @@ use {
         bank::{Bank, BankStatusCache},
         bank_forks::BankForks,
         blockhash_queue::BlockhashQueue,
+        hot_account_cache::HotAccountCache,
         transaction_error_metrics::TransactionErrorMetrics,
     },
     solana_sdk::{
@@ -130,6 +131,10 @@ impl MultiIteratorScheduler {
             transaction_id_generator: Arc::default(),
             batch_id_generator: BatchIdGenerator::default(),
         }
+    }
+
+    pub(crate) fn get_hot_account_caches(&self) -> Vec<Arc<HotAccountCache>> {
+        self.account_locks.get_hot_account_caches()
     }
 
     pub fn run(self) -> Result<(), SchedulerError> {

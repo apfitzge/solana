@@ -557,18 +557,19 @@ impl BankingStage {
         let (forward_work_sender, forward_work_receiver) = unbounded();
         let (finished_forward_work_sender, finished_forward_work_receiver) = unbounded();
 
-        bank_thread_hdls.push({
-            let scheduler = MultiIteratorScheduler::new(
-                num_workers as usize,
-                DecisionMaker::new(cluster_info.id(), poh_recorder.clone()),
-                bank_forks.clone(),
-                consume_work_senders,
-                finished_consume_work_receiver,
-                forward_work_sender,
-                finished_forward_work_receiver,
-                non_vote_receiver,
-            );
+        let scheduler = MultiIteratorScheduler::new(
+            num_workers as usize,
+            DecisionMaker::new(cluster_info.id(), poh_recorder.clone()),
+            bank_forks.clone(),
+            consume_work_senders,
+            finished_consume_work_receiver,
+            forward_work_sender,
+            finished_forward_work_receiver,
+            non_vote_receiver,
+        );
+        let hot_account_caches = scheduler.get_hot_account_caches();
 
+        bank_thread_hdls.push({
             Builder::new()
                 .name("solTxScheduler".to_string())
                 .spawn(|| {
@@ -579,7 +580,11 @@ impl BankingStage {
                 .unwrap()
         });
 
-        for (index, consume_work_receiver) in consume_work_receivers.into_iter().enumerate() {
+        for (index, (consume_work_receiver, hot_account_cache)) in consume_work_receivers
+            .into_iter()
+            .zip(hot_account_caches.into_iter())
+            .enumerate()
+        {
             let id = index + NUM_VOTE_PROCESSING_THREADS as usize;
 
             let forwarder = Forwarder::new(
@@ -599,6 +604,7 @@ impl BankingStage {
                 poh_recorder.read().unwrap().new_recorder(),
                 QosService::new(id as u32),
                 log_messages_bytes_limit,
+                hot_account_cache,
             );
 
             let worker = Worker::new(
@@ -667,6 +673,7 @@ impl BankingStage {
             transaction_recorder,
             QosService::new(id),
             log_messages_bytes_limit,
+            Arc::default(), // unused
         );
 
         Builder::new()

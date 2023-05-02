@@ -7,6 +7,7 @@ use {
     solana_sdk::{account::AccountSharedData, pubkey::Pubkey},
 };
 
+#[derive(Default)]
 pub struct HotAccountCache {
     accounts: DashMap<Pubkey, AccountSharedData>,
 }
