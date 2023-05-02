@@ -12,6 +12,7 @@ use {
             TransactionResults,
         },
         bank_utils,
+        hot_account_cache::HotAccountCache,
         prioritization_fee_cache::PrioritizationFeeCache,
         transaction_batch::TransactionBatch,
         vote_sender_types::ReplayVoteSender,
@@ -40,6 +41,7 @@ pub struct Committer {
     transaction_status_sender: Option<TransactionStatusSender>,
     replay_vote_sender: ReplayVoteSender,
     prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+    hot_account_cache: Arc<HotAccountCache>,
 }
 
 impl Committer {
@@ -47,11 +49,13 @@ impl Committer {
         transaction_status_sender: Option<TransactionStatusSender>,
         replay_vote_sender: ReplayVoteSender,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+        hot_account_cache: Arc<HotAccountCache>,
     ) -> Self {
         Self {
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
+            hot_account_cache,
         }
     }
 
@@ -103,6 +107,80 @@ impl Committer {
                 signature_count,
             },
             &mut execute_and_commit_timings.execute_timings,
+        ));
+        execute_and_commit_timings.commit_us = commit_time_us;
+
+        let commit_transaction_statuses = tx_results
+            .execution_results
+            .iter()
+            .map(|execution_result| match execution_result.details() {
+                Some(details) => CommitTransactionDetails::Committed {
+                    compute_units: details.executed_units,
+                },
+                None => CommitTransactionDetails::NotCommitted,
+            })
+            .collect();
+
+        let ((), find_and_send_votes_us) = measure_us!({
+            bank_utils::find_and_send_votes(
+                batch.sanitized_transactions(),
+                &tx_results,
+                Some(&self.replay_vote_sender),
+            );
+            self.collect_balances_and_send_status_batch(
+                tx_results,
+                bank,
+                batch,
+                pre_balance_info,
+                starting_transaction_index,
+            );
+            self.prioritization_fee_cache
+                .update(bank, executed_transactions.into_iter());
+        });
+        execute_and_commit_timings.find_and_send_votes_us = find_and_send_votes_us;
+        (commit_time_us, commit_transaction_statuses)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn commit_transactions_with_hot_cache(
+        &self,
+        batch: &TransactionBatch,
+        loaded_transactions: &mut [TransactionLoadResult],
+        execution_results: Vec<TransactionExecutionResult>,
+        starting_transaction_index: Option<usize>,
+        bank: &Arc<Bank>,
+        pre_balance_info: &mut PreBalanceInfo,
+        execute_and_commit_timings: &mut LeaderExecuteAndCommitTimings,
+        signature_count: u64,
+        executed_transactions_count: usize,
+        executed_non_vote_transactions_count: usize,
+        executed_with_successful_result_count: usize,
+    ) -> (u64, Vec<CommitTransactionDetails>) {
+        let (last_blockhash, lamports_per_signature) =
+            bank.last_blockhash_and_lamports_per_signature();
+
+        let executed_transactions = execution_results
+            .iter()
+            .zip(batch.sanitized_transactions())
+            .filter_map(|(execution_result, tx)| execution_result.was_executed().then_some(tx))
+            .collect_vec();
+
+        let (tx_results, commit_time_us) = measure_us!(bank.commit_transactions_with_hot_cache(
+            batch.sanitized_transactions(),
+            loaded_transactions,
+            execution_results,
+            last_blockhash,
+            lamports_per_signature,
+            CommitTransactionCounts {
+                committed_transactions_count: executed_transactions_count as u64,
+                committed_non_vote_transactions_count: executed_non_vote_transactions_count as u64,
+                committed_with_failure_result_count: executed_transactions_count
+                    .saturating_sub(executed_with_successful_result_count)
+                    as u64,
+                signature_count,
+            },
+            &mut execute_and_commit_timings.execute_timings,
+            &self.hot_account_cache,
         ));
         execute_and_commit_timings.commit_us = commit_time_us;
 

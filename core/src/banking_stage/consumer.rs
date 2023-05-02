@@ -809,7 +809,7 @@ impl Consumer {
         }
 
         let (commit_time_us, commit_transaction_statuses) = if executed_transactions_count != 0 {
-            self.committer.commit_transactions(
+            self.committer.commit_transactions_with_hot_cache(
                 batch,
                 &mut loaded_transactions,
                 execution_results,
@@ -996,6 +996,7 @@ mod tests {
             None,
             replay_vote_sender,
             Arc::new(PrioritizationFeeCache::new(0u64)),
+            Arc::default(),
         );
         let consumer = Consumer::new(
             committer,
@@ -1146,6 +1147,7 @@ mod tests {
                 None,
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -1279,6 +1281,7 @@ mod tests {
                 None,
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -1357,6 +1360,7 @@ mod tests {
                 None,
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -1485,6 +1489,7 @@ mod tests {
                 None,
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -1688,6 +1693,7 @@ mod tests {
                 None,
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -1819,6 +1825,7 @@ mod tests {
                 }),
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -1963,6 +1970,7 @@ mod tests {
                 }),
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -2031,6 +2039,7 @@ mod tests {
                 None,
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -2117,6 +2126,7 @@ mod tests {
                 None,
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -2177,6 +2187,7 @@ mod tests {
                 None,
                 replay_vote_sender,
                 Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             let consumer = Consumer::new(
                 committer,

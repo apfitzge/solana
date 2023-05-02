@@ -598,6 +598,7 @@ impl BankingStage {
                 transaction_status_sender.clone(),
                 replay_vote_sender.clone(),
                 prioritization_fee_cache.clone(),
+                hot_account_cache.clone(),
             );
             let consumer = Consumer::new(
                 committer,
@@ -659,6 +660,7 @@ impl BankingStage {
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
+            Arc::default(), // unused
         );
         let decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
         let forwarder = Forwarder::new(

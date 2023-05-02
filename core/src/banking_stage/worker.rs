@@ -203,7 +203,8 @@ mod tests {
         solana_perf::packet::to_packet_batches,
         solana_poh::poh_recorder::{PohRecorder, WorkingBankEntry},
         solana_runtime::{
-            bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
+            bank_forks::BankForks, hot_account_cache::HotAccountCache,
+            prioritization_fee_cache::PrioritizationFeeCache,
             vote_sender_types::ReplayVoteReceiver,
         },
         solana_sdk::{
@@ -244,6 +245,7 @@ mod tests {
         let bank = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
         let bank_forks = Arc::new(RwLock::new(BankForks::new(bank)));
         let bank = bank_forks.read().unwrap().working_bank();
+        let hot_cache = Arc::new(HotAccountCache::default());
 
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Blockstore::open(ledger_path.path())
@@ -269,14 +271,9 @@ mod tests {
             None,
             replay_vote_sender,
             Arc::new(PrioritizationFeeCache::new(0u64)),
+            hot_cache.clone(),
         );
-        let consumer = Consumer::new(
-            committer,
-            recorder,
-            QosService::new(1),
-            None,
-            Arc::default(),
-        );
+        let consumer = Consumer::new(committer, recorder, QosService::new(1), None, hot_cache);
 
         let (_local_node, cluster_info) = new_test_cluster_info(None);
         let cluster_info = Arc::new(cluster_info);

@@ -1677,7 +1677,7 @@ impl Accounts {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn collect_accounts_to_store<'a>(
+    pub(crate) fn collect_accounts_to_store<'a>(
         &self,
         txs: &'a [SanitizedTransaction],
         execution_results: &'a [TransactionExecutionResult],

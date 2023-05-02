@@ -1,7 +1,10 @@
 #![allow(clippy::integer_arithmetic)]
 #![feature(test)]
 
-use solana_core::validator::BlockProductionMethod;
+use {
+    solana_core::validator::BlockProductionMethod,
+    solana_runtime::hot_account_cache::HotAccountCache,
+};
 
 extern crate test;
 
@@ -97,14 +100,14 @@ fn bench_consume_buffered(bencher: &mut Bencher) {
             ThreadType::Transactions,
         );
         let (s, _r) = unbounded();
-        let committer = Committer::new(None, s, Arc::new(PrioritizationFeeCache::new(0u64)));
-        let consumer = Consumer::new(
-            committer,
-            recorder,
-            QosService::new(1),
+        let hot_cache = Arc::new(HotAccountCache::default());
+        let committer = Committer::new(
             None,
-            Arc::default(),
+            s,
+            Arc::new(PrioritizationFeeCache::new(0u64)),
+            hot_cache.clone(),
         );
+        let consumer = Consumer::new(committer, recorder, QosService::new(1), None, hot_cache);
         // This tests the performance of buffering packets.
         // If the packet buffers are copied, performance will be poor.
         bencher.iter(move || {

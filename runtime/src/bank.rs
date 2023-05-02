@@ -5495,6 +5495,136 @@ impl Bank {
         }
     }
 
+    /// `committed_transactions_count` is the number of transactions out of `sanitized_txs`
+    /// that was executed. Of those, `committed_transactions_count`,
+    /// `committed_with_failure_result_count` is the number of executed transactions that returned
+    /// a failure result.
+    pub fn commit_transactions_with_hot_cache(
+        &self,
+        sanitized_txs: &[SanitizedTransaction],
+        loaded_txs: &mut [TransactionLoadResult],
+        execution_results: Vec<TransactionExecutionResult>,
+        last_blockhash: Hash,
+        lamports_per_signature: u64,
+        counts: CommitTransactionCounts,
+        timings: &mut ExecuteTimings,
+        hot_account_cache: &HotAccountCache,
+    ) -> TransactionResults {
+        assert!(
+            !self.freeze_started(),
+            "commit_transactions() working on a bank that is already frozen or is undergoing freezing!"
+        );
+
+        let CommitTransactionCounts {
+            committed_transactions_count,
+            committed_non_vote_transactions_count,
+            committed_with_failure_result_count,
+            signature_count,
+        } = counts;
+
+        self.increment_transaction_count(committed_transactions_count);
+        self.increment_non_vote_transaction_count_since_restart(
+            committed_non_vote_transactions_count,
+        );
+        self.increment_signature_count(signature_count);
+
+        if committed_with_failure_result_count > 0 {
+            self.transaction_error_count
+                .fetch_add(committed_with_failure_result_count, Relaxed);
+        }
+
+        // Should be equivalent to checking `committed_transactions_count > 0`
+        if execution_results.iter().any(|result| result.was_executed()) {
+            self.is_delta.store(true, Relaxed);
+            self.transaction_entries_count.fetch_add(1, Relaxed);
+            self.transactions_per_entry_max
+                .fetch_max(committed_transactions_count, Relaxed);
+        }
+
+        let mut write_time = Measure::start("write_time");
+
+        let durable_nonce = DurableNonce::from_blockhash(&last_blockhash);
+        let (accounts, _) = self.rc.accounts.collect_accounts_to_store(
+            sanitized_txs,
+            &execution_results,
+            loaded_txs,
+            &self.rent_collector,
+            &durable_nonce,
+            lamports_per_signature,
+        );
+
+        for (key, account) in accounts {
+            hot_account_cache.insert_account(key, account.clone());
+        }
+
+        let rent_debits = self.collect_rent(&execution_results, loaded_txs);
+
+        // Cached vote and stake accounts are synchronized with accounts-db
+        // after each transaction.
+        let mut update_stakes_cache_time = Measure::start("update_stakes_cache_time");
+        self.update_stakes_cache(sanitized_txs, &execution_results, loaded_txs);
+        update_stakes_cache_time.stop();
+
+        // once committed there is no way to unroll
+        write_time.stop();
+        debug!(
+            "store: {}us txs_len={}",
+            write_time.as_us(),
+            sanitized_txs.len()
+        );
+
+        let mut store_executors_which_were_deployed_time =
+            Measure::start("store_executors_which_were_deployed_time");
+        for execution_result in &execution_results {
+            if let TransactionExecutionResult::Executed {
+                details,
+                tx_executor_cache,
+            } = execution_result
+            {
+                if details.status.is_ok() {
+                    self.store_executors_which_were_deployed(tx_executor_cache);
+                }
+            }
+        }
+        store_executors_which_were_deployed_time.stop();
+        saturating_add_assign!(
+            timings.execute_accessories.update_executors_us,
+            store_executors_which_were_deployed_time.as_us()
+        );
+
+        let accounts_data_len_delta = execution_results
+            .iter()
+            .filter_map(|execution_result| {
+                execution_result
+                    .details()
+                    .map(|details| details.accounts_data_len_delta)
+            })
+            .sum();
+        self.update_accounts_data_size_delta_on_chain(accounts_data_len_delta);
+
+        timings.saturating_add_in_place(ExecuteTimingType::StoreUs, write_time.as_us());
+        timings.saturating_add_in_place(
+            ExecuteTimingType::UpdateStakesCacheUs,
+            update_stakes_cache_time.as_us(),
+        );
+
+        let mut update_transaction_statuses_time = Measure::start("update_transaction_statuses");
+        self.update_transaction_statuses(sanitized_txs, &execution_results);
+        let fee_collection_results =
+            self.filter_program_errors_and_collect_fee(sanitized_txs, &execution_results);
+        update_transaction_statuses_time.stop();
+        timings.saturating_add_in_place(
+            ExecuteTimingType::UpdateTransactionStatuses,
+            update_transaction_statuses_time.as_us(),
+        );
+
+        TransactionResults {
+            fee_collection_results,
+            execution_results,
+            rent_debits,
+        }
+    }
+
     // Distribute collected rent fees for this slot to staked validators (excluding stakers)
     // according to stake.
     //
