@@ -41,30 +41,25 @@ impl HotCacheFlusher {
     pub fn run(self) {
         const WAIT_DURATION: Duration = Duration::from_millis(100);
         while !self.exit.load(Ordering::Relaxed) {
-            if self
-                .leader_bank_notifier
-                .wait_for_completed(WAIT_DURATION)
-                .is_some()
-            {
-                let written_accounts = self.hot_account_cache.flush();
-                self.flush_accounts(written_accounts);
+            if let Some(slot) = self.leader_bank_notifier.wait_for_completed(WAIT_DURATION) {
+                eprintln!("Flushing hot cache");
+                let written_accounts = self.hot_account_cache.flush(slot);
+                self.flush_accounts(slot, written_accounts);
             }
         }
     }
 
-    fn flush_accounts(&self, accounts_to_write: Vec<(Slot, Vec<(Pubkey, AccountSharedData)>)>) {
-        for (slot, accounts) in accounts_to_write {
-            let account_refs = accounts
-                .iter()
-                .map(|(pubkey, account)| (pubkey, account))
-                .collect::<Vec<_>>();
+    fn flush_accounts(&self, slot: Slot, accounts_to_write: Vec<(Pubkey, AccountSharedData)>) {
+        let account_refs = accounts_to_write
+            .iter()
+            .map(|(pubkey, account)| (pubkey, account))
+            .collect::<Vec<_>>();
 
-            self.accounts.store_accounts_cached((
-                slot,
-                &account_refs[..],
-                // TODO: This will screw us over epoch boundaries. Best to just wait until the feature is activated.
-                self.include_slot_in_hash,
-            ));
-        }
+        self.accounts.store_accounts_cached((
+            slot,
+            &account_refs[..],
+            // TODO: This will screw us over epoch boundaries. Best to just wait until the feature is activated.
+            self.include_slot_in_hash,
+        ));
     }
 }

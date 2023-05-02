@@ -116,8 +116,6 @@ impl Worker {
             &mut consume_work.max_age_slots,
         );
 
-        eprintln!("execution summary: {summary:?}");
-
         self.consumed_sender.send(FinishedConsumeWork {
             work: consume_work,
             retryable_indexes: summary
