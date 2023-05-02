@@ -155,6 +155,7 @@ impl Committer {
         executed_transactions_count: usize,
         executed_non_vote_transactions_count: usize,
         executed_with_successful_result_count: usize,
+        hot_account_cache: &HotAccountCache,
     ) -> (u64, Vec<CommitTransactionDetails>) {
         let (last_blockhash, lamports_per_signature) =
             bank.last_blockhash_and_lamports_per_signature();
@@ -180,7 +181,7 @@ impl Committer {
                 signature_count,
             },
             &mut execute_and_commit_timings.execute_timings,
-            &self.hot_account_cache,
+            hot_account_cache,
         ));
         execute_and_commit_timings.commit_us = commit_time_us;
 

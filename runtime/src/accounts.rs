@@ -373,6 +373,7 @@ impl Accounts {
             .iter()
             .enumerate()
             .map(|(i, key)| {
+                eprintln!("loading account {key:?}");
                 let mut account_found = true;
                 #[allow(clippy::collapsible_else_if)]
                 let account = if solana_sdk::sysvar::instructions::check_id(key) {
@@ -443,6 +444,7 @@ impl Accounts {
                         error_counters,
                     )?;
 
+                    eprintln!("validate check: {key:?}");
                     if !validated_fee_payer && message.is_non_loader_key(i) {
                         if i != 0 {
                             warn!("Payer index should be 0! {:?}", tx);
@@ -479,6 +481,7 @@ impl Accounts {
 
                     account
                 };
+                eprintln!("found {key:?}? {account_found}");
 
                 accounts_found.push(account_found);
                 Ok((*key, account))
@@ -618,6 +621,7 @@ impl Accounts {
             .iter()
             .enumerate()
             .map(|(i, key)| {
+                eprintln!("loading account {key:?}");
                 let mut account_found = true;
                 #[allow(clippy::collapsible_else_if)]
                 let account = if solana_sdk::sysvar::instructions::check_id(key) {
@@ -652,59 +656,34 @@ impl Accounts {
                         )
                         .map(|program_account| (program.account_size, program_account, 0))?
                     } else {
-                        if let Some(mut account) = hot_account_cache.get_account(key) {
-                            if message.is_writable(i) {
-                                let rent_due = rent_collector
-                                    .collect_from_existing_account(
-                                        key,
-                                        &mut account,
-                                        self.accounts_db.filler_account_suffix.as_ref(),
-                                        set_exempt_rent_epoch_max,
-                                    )
-                                    .rent_amount;
-                                (account.data().len(), account, rent_due)
-                            } else {
-                                (account.data().len(), account, 0)
-                            }
-                        } else {
-                            let (data_len, account, rent_due) = self
-                                .accounts_db
-                                .load_with_fixed_root(ancestors, key)
-                                .map(|(mut account, _)| {
-                                    if message.is_writable(i) {
-                                        let rent_due = rent_collector
-                                            .collect_from_existing_account(
-                                                key,
-                                                &mut account,
-                                                self.accounts_db.filler_account_suffix.as_ref(),
-                                                set_exempt_rent_epoch_max,
-                                            )
-                                            .rent_amount;
-                                        (account.data().len(), account, rent_due)
-                                    } else {
-                                        (account.data().len(), account, 0)
-                                    }
-                                })
-                                .unwrap_or_else(|| {
-                                    account_found = false;
-                                    let mut default_account = AccountSharedData::default();
-                                    if set_exempt_rent_epoch_max {
-                                        // All new accounts must be rent-exempt (enforced in Bank::execute_loaded_transaction).
-                                        // Currently, rent collection sets rent_epoch to u64::MAX, but initializing the account
-                                        // with this field already set would allow us to skip rent collection for these accounts.
-                                        default_account.set_rent_epoch(u64::MAX);
-                                    }
-                                    (default_account.data().len(), default_account, 0)
-                                });
-
-                            hot_account_cache.insert_account(
-                                *key,
-                                slot,
-                                account.clone(),
-                                message.is_writable(i),
-                            );
-                            (data_len, account, rent_due)
-                        }
+                        self.accounts_db
+                            .load_with_fixed_root(ancestors, key)
+                            .map(|(mut account, _)| {
+                                if message.is_writable(i) {
+                                    let rent_due = rent_collector
+                                        .collect_from_existing_account(
+                                            key,
+                                            &mut account,
+                                            self.accounts_db.filler_account_suffix.as_ref(),
+                                            set_exempt_rent_epoch_max,
+                                        )
+                                        .rent_amount;
+                                    (account.data().len(), account, rent_due)
+                                } else {
+                                    (account.data().len(), account, 0)
+                                }
+                            })
+                            .unwrap_or_else(|| {
+                                account_found = false;
+                                let mut default_account = AccountSharedData::default();
+                                if set_exempt_rent_epoch_max {
+                                    // All new accounts must be rent-exempt (enforced in Bank::execute_loaded_transaction).
+                                    // Currently, rent collection sets rent_epoch to u64::MAX, but initializing the account
+                                    // with this field already set would allow us to skip rent collection for these accounts.
+                                    default_account.set_rent_epoch(u64::MAX);
+                                }
+                                (default_account.data().len(), default_account, 0)
+                            })
                     };
                     Self::accumulate_and_check_loaded_account_data_size(
                         &mut accumulated_accounts_data_size,
@@ -713,6 +692,7 @@ impl Accounts {
                         error_counters,
                     )?;
 
+                    eprintln!("validate check: {key:?}");
                     if !validated_fee_payer && message.is_non_loader_key(i) {
                         if i != 0 {
                             warn!("Payer index should be 0! {:?}", tx);
@@ -749,6 +729,7 @@ impl Accounts {
 
                     account
                 };
+                eprintln!("found {key:?}? {account_found}");
 
                 accounts_found.push(account_found);
                 Ok((*key, account))

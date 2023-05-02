@@ -557,6 +557,7 @@ impl BankingStage {
         let (forward_work_sender, forward_work_receiver) = unbounded();
         let (finished_forward_work_sender, finished_forward_work_receiver) = unbounded();
 
+        let leader_bank_notifier = poh_recorder.read().unwrap().new_leader_bank_notifier();
         let scheduler = MultiIteratorScheduler::new(
             num_workers as usize,
             DecisionMaker::new(cluster_info.id(), poh_recorder.clone()),
@@ -566,6 +567,7 @@ impl BankingStage {
             forward_work_sender,
             finished_forward_work_receiver,
             non_vote_receiver,
+            leader_bank_notifier,
         );
         let hot_account_caches = scheduler.get_hot_account_caches();
 

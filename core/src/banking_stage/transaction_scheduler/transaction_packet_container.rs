@@ -40,9 +40,10 @@ impl<'a> Iterator for SkipSetDrain<'a> {
     type Item = TransactionPriorityId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner
-            .pop_front()
-            .map(|x| TransactionPriorityId::new(x.priority, x.id))
+        self.inner.pop_front().map(|x| {
+            eprintln!("popping {:?}", x.id);
+            TransactionPriorityId::new(x.priority, x.id)
+        })
     }
 }
 
@@ -76,6 +77,7 @@ impl TransactionPacketContainer {
         &self,
         id: TransactionId,
     ) -> Option<OccupiedEntry<TransactionId, DeserializedPacket, RandomState>> {
+        eprintln!("get_packet_entry: {id:?}");
         match self.id_to_packet.entry(id) {
             Entry::Occupied(entry) => Some(entry),
             Entry::Vacant(_) => None,
@@ -88,6 +90,7 @@ impl TransactionPacketContainer {
         &self,
         id: TransactionId,
     ) -> OccupiedEntry<TransactionId, SanitizedTransactionTTL, RandomState> {
+        eprintln!("get_transaction_entry: {id:?}");
         match self.id_to_transaction_ttl.entry(id) {
             Entry::Occupied(entry) => entry,
             Entry::Vacant(_) => panic!("transaction must exist"),
@@ -104,11 +107,11 @@ impl TransactionPacketContainer {
         OccupiedEntry<TransactionId, DeserializedPacket, RandomState>,
     ) {
         let Entry::Occupied(transaction_entry) = self.id_to_transaction_ttl.entry(id) else {
-            panic!("transaction must exist");
+            panic!("transaction must exist for id {id:?}");
         };
 
         let Entry::Occupied(packet_entry) = self.id_to_packet.entry(id) else {
-            panic!("packet must exist");
+            panic!("packet must exist for id {id:?}");
         };
 
         (transaction_entry, packet_entry)
@@ -121,6 +124,7 @@ impl TransactionPacketContainer {
         packet: ImmutableDeserializedPacket,
         transaction_ttl: SanitizedTransactionTTL,
     ) {
+        eprintln!("insert_new_transaction: {transaction_id:?}");
         let priority_id = TransactionPriorityId::new(packet.priority(), transaction_id);
 
         self.id_to_packet.insert(
@@ -139,6 +143,7 @@ impl TransactionPacketContainer {
         transaction: SanitizedTransaction,
         max_age_slot: Slot,
     ) {
+        eprintln!("retry_transaction: {transaction_id:?}");
         let priority = self
             .id_to_packet
             .get(&transaction_id)
@@ -160,6 +165,7 @@ impl TransactionPacketContainer {
     /// Pushes a transaction id into the priority queue, without inserting the packet or transaction.
     /// Returns true if the id was successfully pushed into the priority queue
     pub(crate) fn push_id_into_queue(&self, priority_id: TransactionPriorityId) -> bool {
+        eprintln!("push_id_into_queue: {:?}", priority_id.id);
         self.priority_queue.insert(priority_id);
         true
 
@@ -168,6 +174,7 @@ impl TransactionPacketContainer {
 
     /// Remove packet and transaction by id.
     pub(crate) fn remove_by_id(&self, id: &TransactionId) {
+        eprintln!("remove_by_id: {id:?}");
         self.id_to_packet.remove(id);
         self.id_to_transaction_ttl.remove(id);
     }

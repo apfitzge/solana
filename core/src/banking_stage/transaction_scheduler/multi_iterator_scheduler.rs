@@ -1,5 +1,6 @@
 use {
     super::{
+        hot_cache_flusher::HotCacheFlusher,
         in_flight_tracker::InFlightTracker,
         sanitizer::Sanitizer,
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
@@ -25,6 +26,7 @@ use {
     crossbeam_channel::{Receiver, Sender},
     itertools::Itertools,
     solana_perf::perf_libs,
+    solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_runtime::{
         bank::{Bank, BankStatusCache},
         bank_forks::BankForks,
@@ -102,6 +104,8 @@ pub struct MultiIteratorScheduler {
     transaction_id_generator: Arc<TransactionIdGenerator>,
     /// Generator for batch ids
     batch_id_generator: BatchIdGenerator,
+
+    leader_bank_notifier: Arc<LeaderBankNotifier>,
 }
 
 impl MultiIteratorScheduler {
@@ -114,6 +118,7 @@ impl MultiIteratorScheduler {
         forward_work_sender: Sender<ForwardWork>,
         finished_forward_work_receiver: Receiver<FinishedForwardWork>,
         packet_receiver: BankingPacketReceiver,
+        leader_bank_notifier: Arc<LeaderBankNotifier>,
     ) -> Self {
         Self {
             num_threads,
@@ -130,6 +135,7 @@ impl MultiIteratorScheduler {
             packet_receiver,
             transaction_id_generator: Arc::default(),
             batch_id_generator: BatchIdGenerator::default(),
+            leader_bank_notifier,
         }
     }
 
@@ -175,6 +181,28 @@ impl MultiIteratorScheduler {
             })
             .collect_vec();
 
+        // Spawn flushers (force write of hot accounts to actual account cache at end of each slot)
+        let root_bank = self.bank_forks.read().unwrap().root_bank();
+        let flushers = self
+            .get_hot_account_caches()
+            .into_iter()
+            .enumerate()
+            .map(|(id, cache)| {
+                let hot_cache_flusher = HotCacheFlusher::new(
+                    exit.clone(),
+                    cache,
+                    self.leader_bank_notifier.clone(),
+                    root_bank.accounts(),
+                    root_bank.include_slot_in_hash(),
+                );
+
+                std::thread::Builder::new()
+                    .name(format!("solHACFlusher-{id:02}"))
+                    .spawn(move || hot_cache_flusher.run())
+                    .unwrap()
+            })
+            .collect_vec();
+
         self.run_scheduler()?;
 
         exit.store(true, Ordering::Relaxed);
@@ -183,6 +211,9 @@ impl MultiIteratorScheduler {
         }
         for work_finishing_thread in work_finishing_threads {
             work_finishing_thread.join().unwrap();
+        }
+        for flusher in flushers {
+            flusher.join().unwrap();
         }
 
         Ok(())
@@ -708,6 +739,7 @@ mod tests {
         let (forward_work_sender, forward_work_receiver) = unbounded();
         let (finished_forward_work_sender, finished_forward_work_receiver) = unbounded();
 
+        let leader_bank_notifier = poh_recorder.read().unwrap().new_leader_bank_notifier();
         let test_frame = TestFrame {
             bank,
             ledger_path,
@@ -729,6 +761,7 @@ mod tests {
             forward_work_sender,
             finished_forward_work_receiver,
             banking_packet_receiver,
+            leader_bank_notifier,
         );
 
         (test_frame, multi_iterator_scheduler)

@@ -39,6 +39,7 @@ use {
 
 pub const MAX_NUM_TRANSACTIONS_PER_BATCH: usize = 64;
 
+#[derive(Debug)]
 pub struct ProcessTransactionBatchOutput {
     // The number of transactions filtered out by the cost model
     cost_model_throttled_transactions_count: usize,
@@ -47,6 +48,7 @@ pub struct ProcessTransactionBatchOutput {
     pub(crate) execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput,
 }
 
+#[derive(Debug)]
 pub struct ExecuteAndCommitTransactionsOutput {
     // Total number of transactions that were passed as candidates for execution
     transactions_attempted_execution_count: usize,
@@ -509,6 +511,8 @@ impl Consumer {
                 &batch,
                 &self.hot_account_cache,
             );
+        // let execute_and_commit_transactions_output =
+        //     self.execute_and_commit_transactions_locked(bank, &batch);
 
         // Once the accounts are new transactions can enter the pipeline to process them
         drop(batch);
@@ -821,6 +825,7 @@ impl Consumer {
                 executed_transactions_count,
                 executed_non_vote_transactions_count,
                 executed_with_successful_result_count,
+                hot_account_cache,
             )
         } else {
             (
