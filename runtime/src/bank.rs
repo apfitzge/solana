@@ -6062,7 +6062,7 @@ impl Bank {
     }
 
     /// true if we should include the slot in account hash
-    fn include_slot_in_hash(&self) -> IncludeSlotInHash {
+    pub fn include_slot_in_hash(&self) -> IncludeSlotInHash {
         if self
             .feature_set
             .is_active(&feature_set::account_hash_ignore_slot::id())

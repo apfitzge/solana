@@ -1,8 +1,9 @@
 use {
     dashmap::{mapref::entry::Entry, DashMap},
     solana_runtime::hot_account_cache::HotAccountCache,
-    solana_sdk::pubkey::Pubkey,
+    solana_sdk::{account::AccountSharedData, clock::Slot, pubkey::Pubkey},
     std::{
+        collections::HashMap,
         fmt::{Debug, Display},
         ops::{BitAnd, BitAndAssign, Sub},
         sync::Arc,
@@ -99,14 +100,32 @@ impl ThreadAwareAccountLocks {
         write_account_locks: impl Iterator<Item = &'a Pubkey>,
         read_account_locks: impl Iterator<Item = &'a Pubkey>,
         thread_id: ThreadId,
-    ) {
+    ) -> Vec<(Slot, Vec<(Pubkey, AccountSharedData)>)> {
+        let mut accounts_to_write: HashMap<Slot, Vec<(Pubkey, AccountSharedData)>> = HashMap::new();
+
         for account in write_account_locks {
-            self.write_unlock_account(account, thread_id);
+            if self.write_unlock_account(account, thread_id) {
+                let hot_cache_entry = self.hot_account_caches[thread_id].remove_account(account);
+                accounts_to_write
+                    .entry(hot_cache_entry.slot)
+                    .or_default()
+                    .push((*account, hot_cache_entry.account));
+            }
         }
 
         for account in read_account_locks {
-            self.read_unlock_account(account, thread_id);
+            if self.read_unlock_account(account, thread_id) {
+                let hot_cache_entry = self.hot_account_caches[thread_id].remove_account(account);
+                if hot_cache_entry.written {
+                    accounts_to_write
+                        .entry(hot_cache_entry.slot)
+                        .or_default()
+                        .push((*account, hot_cache_entry.account));
+                }
+            }
         }
+
+        accounts_to_write.into_iter().collect()
     }
 
     /// Returns `ThreadSet` that the given accounts can be scheduled on.
@@ -231,8 +250,9 @@ impl ThreadAwareAccountLocks {
     }
 
     /// Unlocks the given `account` for writing on `thread_id`.
+    /// Returns true if the account was removed from the write locks.
     /// Panics if the account is not locked for writing on `thread_id`.
-    fn write_unlock_account(&self, account: &Pubkey, thread_id: ThreadId) {
+    fn write_unlock_account(&self, account: &Pubkey, thread_id: ThreadId) -> bool {
         match self.write_locks.entry(*account) {
             Entry::Occupied(mut entry) => {
                 let AccountWriteLocks {
@@ -246,7 +266,9 @@ impl ThreadAwareAccountLocks {
                 *lock_count -= 1;
                 if *lock_count == 0 {
                     entry.remove();
+                    return true;
                 }
+                return false;
             }
             Entry::Vacant(_) => {
                 panic!("write lock must exist for account: {account}");
@@ -286,8 +308,9 @@ impl ThreadAwareAccountLocks {
     }
 
     /// Unlocks the given `account` for reading on `thread_id`.
+    /// Returns true if the account was removed from the read locks.
     /// Panics if the account is not locked for reading on `thread_id`.
-    fn read_unlock_account(&self, account: &Pubkey, thread_id: ThreadId) {
+    fn read_unlock_account(&self, account: &Pubkey, thread_id: ThreadId) -> bool {
         match self.read_locks.entry(*account) {
             Entry::Occupied(mut entry) => {
                 let AccountReadLocks {
@@ -303,8 +326,11 @@ impl ThreadAwareAccountLocks {
                     thread_set.remove(thread_id);
                     if thread_set.is_empty() {
                         entry.remove();
+                        return true;
                     }
                 }
+
+                return false;
             }
             Entry::Vacant(_) => {
                 panic!("read lock must exist for account: {account}");

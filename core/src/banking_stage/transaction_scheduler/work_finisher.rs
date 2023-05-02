@@ -122,11 +122,25 @@ impl WorkFinisher {
             izip!(ids, transactions, max_age_slots).enumerate()
         {
             let locks = transaction.get_account_locks_unchecked();
-            self.account_locks.unlock_accounts(
+            let accounts_to_write = self.account_locks.unlock_accounts(
                 locks.writable.into_iter(),
                 locks.readonly.into_iter(),
                 thread_id,
             );
+
+            for (slot, accounts) in accounts_to_write {
+                let account_refs = accounts
+                    .iter()
+                    .map(|(pubkey, account)| (pubkey, account))
+                    .collect::<Vec<_>>();
+
+                bank.accounts().store_accounts_cached((
+                    slot,
+                    &account_refs[..],
+                    // TODO: This could screw us over epoch boundaries. Best to just wait until the feature is activated.
+                    bank.include_slot_in_hash(),
+                ));
+            }
 
             match retryable_id_iter.peek() {
                 Some(retryable_index) if index == *retryable_index => {
