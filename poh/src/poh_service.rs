@@ -248,91 +248,121 @@ impl PohService {
         poh: &Arc<Mutex<Poh>>,
         target_ns_per_tick: u64,
     ) -> bool {
-        match next_record.take() {
-            Some(mut record) => {
-                // received message to record
-                // so, record for as long as we have queued up record requests
-                let mut lock_time = Measure::start("lock");
-                let mut poh_recorder_l = poh_recorder.write().unwrap();
-                lock_time.stop();
-                timing.total_lock_time_ns += lock_time.as_ns();
-                let mut record_time = Measure::start("record");
-                loop {
-                    // Mark as picked up so caller knows it's being processed
-                    // If caller already timed out, `pick_up()` will return false - we skip the record
-                    if record.result_container.pick_up() {
-                        let res = poh_recorder_l.record(
-                            record.slot,
-                            record.mixin,
-                            std::mem::take(&mut record.transactions),
-                        );
-                        let (_, send_record_result_time) =
-                            measure!(record.result_container.send(res));
-                        timing.total_send_record_result_us += send_record_result_time.as_us();
-                        timing.num_hashes += 1; // note: may have also ticked inside record
-                    }
+        if !Self::record_loop(next_record, poh_recorder, timing, record_receiver) {
+            Self::hash_loop(
+                next_record,
+                timing,
+                record_receiver,
+                hashes_per_batch,
+                poh,
+                target_ns_per_tick,
+            )
+        } else {
+            false
+        }
+    }
 
-                    let new_record_result = record_receiver.try_recv();
-                    match new_record_result {
-                        Ok(new_record) => {
-                            // we already have second request to record, so record again while we still have the mutex
-                            record = new_record;
-                        }
-                        Err(_) => {
-                            break;
-                        }
-                    }
+    /// Returns whether or not there was a record to record.
+    fn record_loop(
+        next_record: &mut Option<Record>,
+        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        timing: &mut PohTiming,
+        record_receiver: &Receiver<Record>,
+    ) -> bool {
+        if let Some(mut record) = next_record.take() {
+            // received message to record
+            // so, record for as long as we have queued up record requests
+            let mut lock_time = Measure::start("lock");
+            let mut poh_recorder_l = poh_recorder.write().unwrap();
+            lock_time.stop();
+            timing.total_lock_time_ns += lock_time.as_ns();
+            let mut record_time = Measure::start("record");
+            loop {
+                // Mark as picked up so caller knows it's being processed
+                // If caller already timed out, `pick_up()` will return false - we skip the record
+                if record.result_container.pick_up() {
+                    let res = poh_recorder_l.record(
+                        record.slot,
+                        record.mixin,
+                        std::mem::take(&mut record.transactions),
+                    );
+                    let (_, send_record_result_time) = measure!(record.result_container.send(res));
+                    timing.total_send_record_result_us += send_record_result_time.as_us();
+                    timing.num_hashes += 1; // note: may have also ticked inside record
                 }
-                record_time.stop();
-                timing.total_record_time_us += record_time.as_us();
-                // PohRecorder.record would have ticked if it needed to, so should_tick will be false
-            }
-            None => {
-                // did not receive instructions to record, so hash until we notice we've been asked to record (or we need to tick) and then remember what to record
-                let mut lock_time = Measure::start("lock");
-                let mut poh_l = poh.lock().unwrap();
-                lock_time.stop();
-                timing.total_lock_time_ns += lock_time.as_ns();
-                loop {
-                    timing.num_hashes += hashes_per_batch;
-                    let mut hash_time = Measure::start("hash");
-                    let should_tick = poh_l.hash(hashes_per_batch);
-                    let ideal_time = poh_l.target_poh_time(target_ns_per_tick);
-                    hash_time.stop();
-                    timing.total_hash_time_ns += hash_time.as_ns();
-                    if should_tick {
-                        // nothing else can be done. tick required.
-                        return true;
+
+                let new_record_result = record_receiver.try_recv();
+                match new_record_result {
+                    Ok(new_record) => {
+                        // we already have second request to record, so record again while we still have the mutex
+                        record = new_record;
                     }
-                    // check to see if a record request has been sent
-                    if let Ok(record) = record_receiver.try_recv() {
-                        // remember the record we just received as the next record to occur
-                        *next_record = Some(record);
+                    Err(_) => {
                         break;
                     }
-                    // check to see if we need to wait to catch up to ideal
-                    let wait_start = Instant::now();
-                    if ideal_time <= wait_start {
-                        // no, keep hashing. We still hold the lock.
-                        continue;
-                    }
+                }
+            }
+            record_time.stop();
+            timing.total_record_time_us += record_time.as_us();
+            // PohRecorder.record would have ticked if it needed to, so should_tick will be false
+            true
+        } else {
+            false
+        }
+    }
 
-                    // busy wait, polling for new records and after dropping poh lock (reset can occur, for example)
-                    drop(poh_l);
-                    while ideal_time > Instant::now() {
-                        // check to see if a record request has been sent
-                        if let Ok(record) = record_receiver.try_recv() {
-                            // remember the record we just received as the next record to occur
-                            *next_record = Some(record);
-                            break;
-                        }
-                    }
-                    timing.total_sleep_us += wait_start.elapsed().as_micros() as u64;
+    fn hash_loop(
+        next_record: &mut Option<Record>,
+        timing: &mut PohTiming,
+        record_receiver: &Receiver<Record>,
+        hashes_per_batch: u64,
+        poh: &Arc<Mutex<Poh>>,
+        target_ns_per_tick: u64,
+    ) -> bool {
+        // did not receive instructions to record, so hash until we notice we've been asked to record (or we need to tick) and then remember what to record
+        let mut lock_time = Measure::start("lock");
+        let mut poh_l = poh.lock().unwrap();
+        lock_time.stop();
+        timing.total_lock_time_ns += lock_time.as_ns();
+        loop {
+            timing.num_hashes += hashes_per_batch;
+            let mut hash_time = Measure::start("hash");
+            let should_tick = poh_l.hash(hashes_per_batch);
+            let ideal_time = poh_l.target_poh_time(target_ns_per_tick);
+            hash_time.stop();
+            timing.total_hash_time_ns += hash_time.as_ns();
+            if should_tick {
+                // nothing else can be done. tick required.
+                return true;
+            }
+            // check to see if a record request has been sent
+            if let Ok(record) = record_receiver.try_recv() {
+                // remember the record we just received as the next record to occur
+                *next_record = Some(record);
+                break;
+            }
+            // check to see if we need to wait to catch up to ideal
+            let wait_start = Instant::now();
+            if ideal_time <= wait_start {
+                // no, keep hashing. We still hold the lock.
+                continue;
+            }
+
+            // busy wait, polling for new records and after dropping poh lock (reset can occur, for example)
+            drop(poh_l);
+            while ideal_time > Instant::now() {
+                // check to see if a record request has been sent
+                if let Ok(record) = record_receiver.try_recv() {
+                    // remember the record we just received as the next record to occur
+                    *next_record = Some(record);
                     break;
                 }
             }
-        };
-        false // should_tick = false for all code that reaches here
+            timing.total_sleep_us += wait_start.elapsed().as_micros() as u64;
+            break;
+        }
+
+        false
     }
 
     fn tick_producer(
@@ -371,6 +401,12 @@ impl PohService {
                     // Hot recording loop while we're in the tick sleep
                     if let Some(target_time) = target_time {
                         while Instant::now() < target_time {
+                            Self::record_loop(
+                                &mut next_record,
+                                &poh_recorder,
+                                &mut timing,
+                                &record_receiver,
+                            );
                             core::hint::spin_loop();
                         }
                     }
