@@ -14,7 +14,7 @@ pub use solana_sdk::clock::Slot;
 use {
     crate::{leader_bank_notifier::LeaderBankNotifier, poh_service::PohService},
     bitflags::bitflags,
-    crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, SendError, Sender, TrySendError},
+    crossbeam_channel::{unbounded, Receiver, SendError, Sender, TrySendError},
     log::*,
     solana_entry::{
         entry::{hash_transactions, Entry},
@@ -87,18 +87,18 @@ impl BankStart {
 
 bitflags! {
     struct RecordResultFlags: usize {
-        const Ok = 0b0001;
-        const MaxHeightReached = 0b0010;
-        const MinHeightNotReached = 0b0100;
-        const IncludesTransactionIndex = 0b1000;
+        const OK = 0b0001;
+        const MAX_HEIGHT_REACHED = 0b0010;
+        const MIN_HEIGHT_NOT_REACHED = 0b0100;
+        const INCLUDES_TRANSACTION_INDEX = 0b1000;
 
-        const OkNone = Self::Ok.bits();
-        const OkSome = Self::Ok.bits() | Self::IncludesTransactionIndex.bits();
+        const OK_NONE = Self::OK.bits();
+        const OK_SOME = Self::OK.bits() | Self::INCLUDES_TRANSACTION_INDEX.bits();
     }
 }
 
 #[derive(Default)]
-struct RecordResultContainer {
+pub struct RecordResultContainer {
     /// set to true by either caller (to abandon) or recorder (to pick up).
     latch: AtomicBool,
     /// bit-field of enumerated result & index:
@@ -113,22 +113,22 @@ struct RecordResultContainer {
 impl RecordResultContainer {
     /// Called by recorder to indicate it will record the `Record` and return the result.
     /// Returns true if the recorder should record the `Record`.
-    fn pick_up(&self) -> bool {
+    pub(crate) fn pick_up(&self) -> bool {
         self.latch()
     }
 
     /// "Send" the result of the record by setting state.
-    fn send(&self, result: Result<Option<usize>>) {
+    pub(crate) fn send(&self, result: Result<Option<usize>>) {
         let state = match result {
-            Ok(None) => RecordResultFlags::OkNone.bits(),
+            Ok(None) => RecordResultFlags::OK_NONE.bits(),
             Ok(Some(index)) => {
-                RecordResultFlags::OkSome.bits()
-                    | RecordResultFlags::IncludesTransactionIndex.bits()
+                RecordResultFlags::OK_SOME.bits()
+                    | RecordResultFlags::INCLUDES_TRANSACTION_INDEX.bits()
                     | index << 4
             }
-            Err(PohRecorderError::MaxHeightReached) => RecordResultFlags::MaxHeightReached.bits(),
+            Err(PohRecorderError::MaxHeightReached) => RecordResultFlags::MAX_HEIGHT_REACHED.bits(),
             Err(PohRecorderError::MinHeightNotReached) => {
-                RecordResultFlags::MinHeightNotReached.bits()
+                RecordResultFlags::MIN_HEIGHT_NOT_REACHED.bits()
             }
             _ => unreachable!("invalid state"),
         };
@@ -208,28 +208,19 @@ impl RecordResultContainer {
     }
 }
 
-// Sends the Result of the record operation, including the index in the slot of the first
-// transaction, if being tracked by WorkingBank
-type RecordResultSender = Sender<Result<Option<usize>>>;
-
 pub struct Record {
     pub mixin: Hash,
     pub transactions: Vec<VersionedTransaction>,
     pub slot: Slot,
-    pub sender: RecordResultSender,
+    pub result_container: Arc<RecordResultContainer>,
 }
 impl Record {
-    pub fn new(
-        mixin: Hash,
-        transactions: Vec<VersionedTransaction>,
-        slot: Slot,
-        sender: RecordResultSender,
-    ) -> Self {
+    pub fn new(mixin: Hash, transactions: Vec<VersionedTransaction>, slot: Slot) -> Self {
         Self {
             mixin,
             transactions,
             slot,
-            sender,
+            result_container: Arc::default(),
         }
     }
 }
@@ -323,37 +314,15 @@ impl TransactionRecorder {
         transactions: Vec<VersionedTransaction>,
     ) -> Result<Option<usize>> {
         // create a new channel so that there is only 1 sender and when it goes out of scope, the receiver fails
-        let (result_sender, result_receiver) = unbounded();
-        let res =
-            self.record_sender
-                .send(Record::new(mixin, transactions, bank_slot, result_sender));
-        if res.is_err() {
+        let record = Record::new(mixin, transactions, bank_slot);
+        let result_container = Arc::clone(&record.result_container);
+        if self.record_sender.send(record).is_err() {
             // If the channel is dropped, then the validator is shutting down so return that we are hitting
             //  the max tick height to stop transaction processing and flush any transactions in the pipeline.
             return Err(PohRecorderError::MaxHeightReached);
         }
-        // Besides validator exit, this timeout should primarily be seen to affect test execution environments where the various pieces can be shutdown abruptly
-        let mut is_exited = false;
-        loop {
-            let res = result_receiver.recv_timeout(Duration::from_millis(1000));
-            match res {
-                Err(RecvTimeoutError::Timeout) => {
-                    if is_exited {
-                        return Err(PohRecorderError::MaxHeightReached);
-                    } else {
-                        // A result may have come in between when we timed out checking this
-                        // bool, so check the channel again, even if is_exited == true
-                        is_exited = self.is_exited.load(Ordering::SeqCst);
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(PohRecorderError::MaxHeightReached);
-                }
-                Ok(result) => {
-                    return result;
-                }
-            }
-        }
+        const PICK_UP_TIMEOUT: Duration = Duration::from_millis(1000);
+        result_container.wait_for_record_result(PICK_UP_TIMEOUT)
     }
 }
 

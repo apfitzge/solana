@@ -192,17 +192,18 @@ impl PohService {
     ) {
         let record = record_receiver.recv_timeout(timeout);
         if let Ok(record) = record {
-            if record
-                .sender
+            if !record.result_container.pick_up() {
+                warn!("dropping record - abandoned by caller");
+                return;
+            }
+
+            record
+                .result_container
                 .send(poh_recorder.write().unwrap().record(
                     record.slot,
                     record.mixin,
                     record.transactions,
-                ))
-                .is_err()
-            {
-                panic!("Error returning mixin hash");
-            }
+                ));
         }
     }
 
@@ -257,16 +258,19 @@ impl PohService {
                 timing.total_lock_time_ns += lock_time.as_ns();
                 let mut record_time = Measure::start("record");
                 loop {
-                    let res = poh_recorder_l.record(
-                        record.slot,
-                        record.mixin,
-                        std::mem::take(&mut record.transactions),
-                    );
-                    // what do we do on failure here? Ignore for now.
-                    let (_send_res, send_record_result_time) =
-                        measure!(record.sender.send(res), "send_record_result");
-                    timing.total_send_record_result_us += send_record_result_time.as_us();
-                    timing.num_hashes += 1; // note: may have also ticked inside record
+                    // Mark as picked up so caller knows it's being processed
+                    // If caller already timed out, `pick_up()` will return false - we skip the record
+                    if record.result_container.pick_up() {
+                        let res = poh_recorder_l.record(
+                            record.slot,
+                            record.mixin,
+                            std::mem::take(&mut record.transactions),
+                        );
+                        let (_, send_record_result_time) =
+                            measure!(record.result_container.send(res));
+                        timing.total_send_record_result_us += send_record_result_time.as_us();
+                        timing.num_hashes += 1; // note: may have also ticked inside record
+                    }
 
                     let new_record_result = record_receiver.try_recv();
                     match new_record_result {
