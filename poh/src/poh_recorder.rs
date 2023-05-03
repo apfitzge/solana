@@ -834,6 +834,25 @@ impl PohRecorder {
     }
 
     pub fn tick(&mut self) {
+        if let Some(target_time) = self.tick_no_sleep() {
+            let sleep_time = measure!(
+                {
+                    // sleep is not accurate enough to get a predictable time.
+                    // Kernel can not schedule the thread for a while.
+                    while Instant::now() < target_time {
+                        // TODO: a caller could possibly desire to reset or record while we're spinning here
+                        std::hint::spin_loop();
+                    }
+                },
+                "poh_sleep",
+            )
+            .1;
+            self.total_sleep_us += sleep_time.as_us();
+        }
+    }
+
+    /// Tick without sleeping - returns `target_time`.
+    fn tick_no_sleep(&mut self) -> Option<Instant> {
         let ((poh_entry, target_time), tick_lock_contention_time) = measure!(
             {
                 let mut poh_l = self.poh.lock().unwrap();
@@ -853,13 +872,7 @@ impl PohRecorder {
             self.tick_height += 1;
             trace!("tick_height {}", self.tick_height);
             self.report_poh_timing_point();
-
-            if self
-                .leader_first_tick_height_including_grace_ticks
-                .is_none()
-            {
-                return;
-            }
+            self.leader_first_tick_height_including_grace_ticks?;
 
             self.tick_cache.push((
                 Entry {
@@ -873,22 +886,9 @@ impl PohRecorder {
             let (_flush_res, flush_cache_and_tick_time) =
                 measure!(self.flush_cache(true), "flush_cache_and_tick");
             self.flush_cache_tick_us += flush_cache_and_tick_time.as_us();
-
-            let sleep_time = measure!(
-                {
-                    let target_time = target_time.unwrap();
-                    // sleep is not accurate enough to get a predictable time.
-                    // Kernel can not schedule the thread for a while.
-                    while Instant::now() < target_time {
-                        // TODO: a caller could possibly desire to reset or record while we're spinning here
-                        std::hint::spin_loop();
-                    }
-                },
-                "poh_sleep",
-            )
-            .1;
-            self.total_sleep_us += sleep_time.as_us();
         }
+
+        target_time
     }
 
     fn report_metrics(&mut self, bank_slot: Slot) {
