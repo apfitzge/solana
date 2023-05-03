@@ -13,6 +13,7 @@
 pub use solana_sdk::clock::Slot;
 use {
     crate::{leader_bank_notifier::LeaderBankNotifier, poh_service::PohService},
+    bitflags::bitflags,
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, SendError, Sender, TrySendError},
     log::*,
     solana_entry::{
@@ -34,7 +35,7 @@ use {
     std::{
         cmp,
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc, Mutex, RwLock,
         },
         time::{Duration, Instant},
@@ -81,6 +82,129 @@ impl BankStart {
             &self.bank_creation_time,
             self.working_bank.ns_per_slot,
         )
+    }
+}
+
+bitflags! {
+    struct RecordResultFlags: usize {
+        const Ok = 0b0001;
+        const MaxHeightReached = 0b0010;
+        const MinHeightNotReached = 0b0100;
+        const IncludesTransactionIndex = 0b1000;
+
+        const OkNone = Self::Ok.bits();
+        const OkSome = Self::Ok.bits() | Self::IncludesTransactionIndex.bits();
+    }
+}
+
+#[derive(Default)]
+struct RecordResultContainer {
+    /// set to true by either caller (to abandon) or recorder (to pick up).
+    latch: AtomicBool,
+    /// bit-field of enumerated result & index:
+    ///     * [0] - set if `Ok`
+    ///     * [1] - set if `MaxHeightReached`
+    ///     * [2] - set if `MinHeightNotReached`
+    ///     * [3] - Includes transaction index
+    ///     * [4-63] - transaction index
+    state: AtomicUsize,
+}
+
+impl RecordResultContainer {
+    /// Called by recorder to indicate it will record the `Record` and return the result.
+    /// Returns true if the recorder should record the `Record`.
+    fn pick_up(&self) -> bool {
+        self.latch()
+    }
+
+    /// "Send" the result of the record by setting state.
+    fn send(&self, result: Result<Option<usize>>) {
+        let state = match result {
+            Ok(None) => RecordResultFlags::OkNone.bits(),
+            Ok(Some(index)) => {
+                RecordResultFlags::OkSome.bits()
+                    | RecordResultFlags::IncludesTransactionIndex.bits()
+                    | index << 4
+            }
+            Err(PohRecorderError::MaxHeightReached) => RecordResultFlags::MaxHeightReached.bits(),
+            Err(PohRecorderError::MinHeightNotReached) => {
+                RecordResultFlags::MinHeightNotReached.bits()
+            }
+            _ => unreachable!("invalid state"),
+        };
+        self.state.store(state, Ordering::SeqCst);
+    }
+
+    /// Checks if the recorder has picked up the record.
+    fn is_record_picked_up(&self) -> bool {
+        self.latch.load(Ordering::Acquire)
+    }
+
+    /// Called by callee to indicate the recorder should not pick up.
+    /// Returns true if the callee can abandon the record (recorder will not pick up).
+    fn abandon(&self) -> bool {
+        self.latch()
+    }
+
+    /// Internal function for setting latch and returning whether it was successful
+    fn latch(&self) -> bool {
+        !self.latch.swap(true, Ordering::AcqRel)
+    }
+
+    /// Wait for the result with a timeout.
+    /// Note - timeout only applies to the time for the recorder to pick_up.
+    fn wait_for_record_result(&self, timeout: Duration) -> Result<Option<usize>> {
+        // wait for pick up or timeout
+        let start = Instant::now();
+        let picked_up = loop {
+            if self.is_record_picked_up() {
+                break true;
+            }
+            if start.elapsed() > timeout {
+                // if timeout, try to abandon.
+                break self.abandon();
+            }
+            core::hint::spin_loop();
+        };
+
+        if !picked_up {
+            return Err(PohRecorderError::MaxHeightReached);
+        }
+
+        // if picked up, we wait indefinitely for the result to be set.
+        loop {
+            if let Some(result) = self.check_result() {
+                return result;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Checks if the recorder has set the state
+    fn check_result(&self) -> Option<Result<Option<usize>>> {
+        let state = self.state.load(Ordering::SeqCst);
+
+        match state & 0b111 {
+            // No bits set, recorder has not set the state
+            0b000 => None,
+            // Bit 0 set, recorder has set the state to Ok
+            0b001 => Some(Ok(self.load_state())),
+            // Bit 1 set, recorder has set the state to MaxHeightReached
+            0b010 => Some(Err(PohRecorderError::MaxHeightReached)),
+            // Bit 2 set, recorder has set the state to MinHeightNotReached
+            0b100 => Some(Err(PohRecorderError::MinHeightNotReached)),
+            _ => unreachable!("invalid state set by recorder"),
+        }
+    }
+
+    /// Loads the state (i.e. Option<usize>)
+    fn load_state(&self) -> Option<usize> {
+        let state = self.state.load(Ordering::SeqCst);
+        match state & 0b1000 {
+            0b0000 => None,
+            0b1000 => Some(state >> 4),
+            _ => unreachable!("bit is either set or not"),
+        }
     }
 }
 

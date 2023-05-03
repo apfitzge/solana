@@ -6250,6 +6250,7 @@ name = "solana-poh"
 version = "1.16.0"
 dependencies = [
  "bincode",
+ "bitflags",
  "core_affinity",
  "crossbeam-channel",
  "log",
