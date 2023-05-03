@@ -852,7 +852,7 @@ impl PohRecorder {
     }
 
     /// Tick without sleeping - returns `target_time`.
-    fn tick_no_sleep(&mut self) -> Option<Instant> {
+    pub(crate) fn tick_no_sleep(&mut self) -> Option<Instant> {
         let ((poh_entry, target_time), tick_lock_contention_time) = measure!(
             {
                 let mut poh_l = self.poh.lock().unwrap();

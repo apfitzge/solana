@@ -364,9 +364,16 @@ impl PohService {
                     lock_time.stop();
                     timing.total_lock_time_ns += lock_time.as_ns();
                     let mut tick_time = Measure::start("tick");
-                    poh_recorder_l.tick();
+                    let target_time = poh_recorder_l.tick_no_sleep();
                     tick_time.stop();
                     timing.total_tick_time_ns += tick_time.as_ns();
+
+                    // Hot recording loop while we're in the tick sleep
+                    if let Some(target_time) = target_time {
+                        while Instant::now() < target_time {
+                            core::hint::spin_loop();
+                        }
+                    }
                 }
                 timing.num_ticks += 1;
 
