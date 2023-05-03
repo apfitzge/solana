@@ -741,26 +741,11 @@ impl PohRecorder {
     }
 
     pub fn tick(&mut self) {
-        let ((poh_entry, target_time), tick_lock_contention_time) = measure!(
-            {
-                let mut poh_l = self.poh.lock().unwrap();
-                let poh_entry = poh_l.tick();
-                let target_time = if poh_entry.is_some() {
-                    Some(poh_l.target_poh_time(self.target_ns_per_tick))
-                } else {
-                    None
-                };
-                (poh_entry, target_time)
-            },
-            "tick_lock_contention",
-        );
-        self.tick_lock_contention_us += tick_lock_contention_time.as_us();
+        let poh_entry = { self.poh.lock().unwrap().tick() };
 
         if let Some(poh_entry) = poh_entry {
             self.tick_height += 1;
-            trace!("tick_height {}", self.tick_height);
             self.report_poh_timing_point();
-
             if self
                 .leader_first_tick_height_including_grace_ticks
                 .is_none()
@@ -777,25 +762,64 @@ impl PohRecorder {
                 self.tick_height,
             ));
 
-            let (_flush_res, flush_cache_and_tick_time) =
-                measure!(self.flush_cache(true), "flush_cache_and_tick");
-            self.flush_cache_tick_us += flush_cache_and_tick_time.as_us();
-
-            let sleep_time = measure!(
-                {
-                    let target_time = target_time.unwrap();
-                    // sleep is not accurate enough to get a predictable time.
-                    // Kernel can not schedule the thread for a while.
-                    while Instant::now() < target_time {
-                        // TODO: a caller could possibly desire to reset or record while we're spinning here
-                        std::hint::spin_loop();
-                    }
-                },
-                "poh_sleep",
-            )
-            .1;
-            self.total_sleep_us += sleep_time.as_us();
+            let _ = self.flush_cache(true);
         }
+
+        // let ((poh_entry, target_time), tick_lock_contention_time) = measure!(
+        //     {
+        //         let mut poh_l = self.poh.lock().unwrap();
+        //         let poh_entry = poh_l.tick();
+        //         let target_time = if poh_entry.is_some() {
+        //             Some(poh_l.target_poh_time(self.target_ns_per_tick))
+        //         } else {
+        //             None
+        //         };
+        //         (poh_entry, target_time)
+        //     },
+        //     "tick_lock_contention",
+        // );
+        // self.tick_lock_contention_us += tick_lock_contention_time.as_us();
+
+        // if let Some(poh_entry) = poh_entry {
+        //     self.tick_height += 1;
+        //     trace!("tick_height {}", self.tick_height);
+        //     self.report_poh_timing_point();
+
+        //     if self
+        //         .leader_first_tick_height_including_grace_ticks
+        //         .is_none()
+        //     {
+        //         return;
+        //     }
+
+        //     self.tick_cache.push((
+        //         Entry {
+        //             num_hashes: poh_entry.num_hashes,
+        //             hash: poh_entry.hash,
+        //             transactions: vec![],
+        //         },
+        //         self.tick_height,
+        //     ));
+
+        //     let (_flush_res, flush_cache_and_tick_time) =
+        //         measure!(self.flush_cache(true), "flush_cache_and_tick");
+        //     self.flush_cache_tick_us += flush_cache_and_tick_time.as_us();
+
+        //     let sleep_time = measure!(
+        //         {
+        //             let target_time = target_time.unwrap();
+        //             // sleep is not accurate enough to get a predictable time.
+        //             // Kernel can not schedule the thread for a while.
+        //             while Instant::now() < target_time {
+        //                 // TODO: a caller could possibly desire to reset or record while we're spinning here
+        //                 std::hint::spin_loop();
+        //             }
+        //         },
+        //         "poh_sleep",
+        //     )
+        //     .1;
+        //     self.total_sleep_us += sleep_time.as_us();
+        // }
     }
 
     fn report_metrics(&mut self, bank_slot: Slot) {
