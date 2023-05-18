@@ -1,4 +1,6 @@
 #![allow(clippy::integer_arithmetic)]
+
+use solana_runtime::snapshot_utils::SnapshotFrom;
 use {
     assert_matches::assert_matches,
     common::*,
@@ -2184,6 +2186,7 @@ fn create_snapshot_to_hard_fork(
         ],
         None,
         snapshot_config.as_ref(),
+        Some(SnapshotFrom::Archive),
         process_options,
         None,
         None,

@@ -35,7 +35,7 @@ use {
         snapshot_hash::StartingSnapshotHashes,
         snapshot_utils::{
             self, clean_orphaned_account_snapshot_dirs, create_all_accounts_run_and_snapshot_dirs,
-            move_and_async_delete_path_contents,
+            move_and_async_delete_path_contents, SnapshotFrom,
         },
     },
     solana_sdk::{
@@ -84,8 +84,8 @@ pub fn load_bank_forks(
         });
 
     let mut starting_slot = 0; // default start check with genesis
-    let snapshot_config = if arg_matches.is_present("no_snapshot") {
-        None
+    let (snapshot_config, snapshot_boot_from) = if arg_matches.is_present("no_snapshot") {
+        (None, None)
     } else {
         let full_snapshot_archives_dir =
             snapshot_archive_path.unwrap_or_else(|| blockstore.ledger_path().to_path_buf());
@@ -103,12 +103,21 @@ pub fn load_bank_forks(
             starting_slot = std::cmp::max(full_snapshot_slot, incremental_snapshot_slot);
         }
 
-        Some(SnapshotConfig {
-            full_snapshot_archives_dir,
-            incremental_snapshot_archives_dir,
-            bank_snapshots_dir: bank_snapshots_dir.clone(),
-            ..SnapshotConfig::new_load_only()
-        })
+        let snapshot_from = if arg_matches.is_present("boot-from-local-state") {
+            SnapshotFrom::Dir
+        } else {
+            SnapshotFrom::Archive
+        };
+
+        (
+            Some(SnapshotConfig {
+                full_snapshot_archives_dir,
+                incremental_snapshot_archives_dir,
+                bank_snapshots_dir: bank_snapshots_dir.clone(),
+                ..SnapshotConfig::new_load_only()
+            }),
+            Some(snapshot_from),
+        )
     };
 
     match process_options.halt_at_slot {
@@ -233,6 +242,7 @@ pub fn load_bank_forks(
             account_paths,
             None,
             snapshot_config.as_ref(),
+            snapshot_boot_from,
             &process_options,
             None,
             None, // Maybe support this later, though

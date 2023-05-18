@@ -95,6 +95,7 @@ use {
         snapshot_hash::StartingSnapshotHashes,
         snapshot_utils::{
             self, clean_orphaned_account_snapshot_dirs, move_and_async_delete_path_contents,
+            SnapshotFrom,
         },
     },
     solana_sdk::{
@@ -1632,6 +1633,7 @@ fn load_blockstore(
             config.account_paths.clone(),
             config.account_shrink_paths.clone(),
             Some(&config.snapshot_config),
+            Some(SnapshotFrom::Archive),
             &process_options,
             transaction_history_services
                 .cache_block_meta_sender
