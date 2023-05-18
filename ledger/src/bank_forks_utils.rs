@@ -201,7 +201,7 @@ fn bank_forks_from_snapshot(
     account_paths: Vec<PathBuf>,
     shrink_paths: Option<Vec<PathBuf>>,
     snapshot_config: &SnapshotConfig,
-    _snapshot_boot_from: SnapshotFrom,
+    snapshot_boot_from: SnapshotFrom,
     process_options: &ProcessOptions,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: &Arc<AtomicBool>,
@@ -212,6 +212,38 @@ fn bank_forks_from_snapshot(
         process::exit(1);
     }
 
+    match snapshot_boot_from {
+        SnapshotFrom::Archive => bank_forks_from_snapshot_archive(
+            genesis_config,
+            account_paths,
+            shrink_paths,
+            snapshot_config,
+            process_options,
+            accounts_update_notifier,
+            exit,
+        ),
+        SnapshotFrom::Dir => bank_forks_from_snapshot_dir(
+            genesis_config,
+            account_paths,
+            shrink_paths,
+            snapshot_config,
+            process_options,
+            accounts_update_notifier,
+            exit,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bank_forks_from_snapshot_archive(
+    genesis_config: &GenesisConfig,
+    account_paths: Vec<PathBuf>,
+    shrink_paths: Option<Vec<PathBuf>>,
+    snapshot_config: &SnapshotConfig,
+    process_options: &ProcessOptions,
+    accounts_update_notifier: Option<AccountsUpdateNotifier>,
+    exit: &Arc<AtomicBool>,
+) -> (Arc<RwLock<BankForks>>, Option<StartingSnapshotHashes>) {
     // Given that we are going to boot from an archive, the accountvecs held in the snapshot dirs for fast-boot should
     // be released.  They will be released by the account_background_service anyway.  But in the case of the account_paths
     // using memory-mounted file system, they are not released early enough to give space for the new append-vecs from
@@ -264,4 +296,17 @@ fn bank_forks_from_snapshot(
         Arc::new(RwLock::new(BankForks::new(deserialized_bank))),
         Some(starting_snapshot_hashes),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bank_forks_from_snapshot_dir(
+    _genesis_config: &GenesisConfig,
+    _account_paths: Vec<PathBuf>,
+    _shrink_paths: Option<Vec<PathBuf>>,
+    _snapshot_config: &SnapshotConfig,
+    _process_options: &ProcessOptions,
+    _accounts_update_notifier: Option<AccountsUpdateNotifier>,
+    _exit: &Arc<AtomicBool>,
+) -> (Arc<RwLock<BankForks>>, Option<StartingSnapshotHashes>) {
+    unimplemented!("booting from snapshot dir is not supported yet")
 }
