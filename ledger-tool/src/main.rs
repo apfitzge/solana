@@ -1021,6 +1021,11 @@ fn main() {
         .long("no-snapshot")
         .takes_value(false)
         .help("Do not start from a local snapshot if present");
+    let boot_from_local_state_arg = Arg::with_name("boot_from_local_state")
+        .long("boot-from-local-state")
+        .takes_value(false)
+        .conflicts_with("no_snapshot")
+        .help("Enables fast boot to attempt to load account state from disk instead of archive.");
     let accounts_index_bins = Arg::with_name("accounts_index_bins")
         .long("accounts-index-bins")
         .value_name("BINS")
@@ -1268,6 +1273,7 @@ fn main() {
                 .global(true)
                 .help("Use DIR for separate incremental snapshot location"),
         )
+        .arg(boot_from_local_state_arg)
         .arg(
             Arg::with_name("block_verification_method")
                 .long("block-verification-method")
