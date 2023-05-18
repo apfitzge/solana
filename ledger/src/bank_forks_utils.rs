@@ -89,7 +89,7 @@ pub fn load_bank_forks(
     account_paths: Vec<PathBuf>,
     shrink_paths: Option<Vec<PathBuf>>,
     snapshot_config: Option<&SnapshotConfig>,
-    _snapshot_boot_from: Option<SnapshotFrom>,
+    snapshot_boot_from: Option<SnapshotFrom>,
     process_options: &ProcessOptions,
     cache_block_meta_sender: Option<&CacheBlockMetaSender>,
     entry_notification_sender: Option<&EntryNotifierSender>,
@@ -127,11 +127,15 @@ pub fn load_bank_forks(
     };
 
     let (bank_forks, starting_snapshot_hashes) = if snapshot_present {
+        let snapshot_boot_from = snapshot_boot_from
+            .expect("snapshot boot from must be specified if given snapshot config");
+
         bank_forks_from_snapshot(
             genesis_config,
             account_paths,
             shrink_paths,
             snapshot_config.as_ref().unwrap(),
+            snapshot_boot_from,
             process_options,
             accounts_update_notifier,
             exit,
@@ -197,6 +201,7 @@ fn bank_forks_from_snapshot(
     account_paths: Vec<PathBuf>,
     shrink_paths: Option<Vec<PathBuf>>,
     snapshot_config: &SnapshotConfig,
+    _snapshot_boot_from: SnapshotFrom,
     process_options: &ProcessOptions,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: &Arc<AtomicBool>,
