@@ -270,7 +270,7 @@ fn bank_forks_from_snapshot_archive(
             accounts_update_notifier,
             exit,
         )
-        .expect("Load from snapshot failed");
+        .expect("Load from snapshot archive failed");
 
     if let Some(shrink_paths) = shrink_paths {
         deserialized_bank.set_shrink_paths(shrink_paths);
@@ -300,13 +300,34 @@ fn bank_forks_from_snapshot_archive(
 
 #[allow(clippy::too_many_arguments)]
 fn bank_forks_from_snapshot_dir(
-    _genesis_config: &GenesisConfig,
-    _account_paths: Vec<PathBuf>,
-    _shrink_paths: Option<Vec<PathBuf>>,
-    _snapshot_config: &SnapshotConfig,
-    _process_options: &ProcessOptions,
-    _accounts_update_notifier: Option<AccountsUpdateNotifier>,
-    _exit: &Arc<AtomicBool>,
+    genesis_config: &GenesisConfig,
+    account_paths: Vec<PathBuf>,
+    shrink_paths: Option<Vec<PathBuf>>,
+    snapshot_config: &SnapshotConfig,
+    process_options: &ProcessOptions,
+    accounts_update_notifier: Option<AccountsUpdateNotifier>,
+    exit: &Arc<AtomicBool>,
 ) -> (Arc<RwLock<BankForks>>, Option<StartingSnapshotHashes>) {
-    unimplemented!("booting from snapshot dir is not supported yet")
+    let bank = snapshot_utils::bank_from_latest_snapshot_dir(
+        &snapshot_config.bank_snapshots_dir,
+        genesis_config,
+        &process_options.runtime_config,
+        &account_paths,
+        process_options.debug_keys.clone(),
+        None,
+        process_options.account_indexes.clone(),
+        process_options.limit_load_slot_count_from_snapshot,
+        process_options.shrink_ratio,
+        process_options.verify_index,
+        process_options.accounts_db_config.clone(),
+        accounts_update_notifier,
+        exit,
+    )
+    .expect("Load from snapshot directory failed");
+
+    if let Some(shrink_paths) = shrink_paths {
+        bank.set_shrink_paths(shrink_paths);
+    }
+
+    (Arc::new(RwLock::new(BankForks::new(bank))), None)
 }
