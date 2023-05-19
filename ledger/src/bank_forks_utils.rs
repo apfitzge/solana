@@ -108,18 +108,34 @@ pub fn load_bank_forks(
         fs::create_dir_all(&snapshot_config.bank_snapshots_dir)
             .expect("Couldn't create snapshot directory");
 
-        if snapshot_utils::get_highest_full_snapshot_archive_info(
-            &snapshot_config.full_snapshot_archives_dir,
-        )
-        .is_some()
-        {
-            true
+        let snapshot_boot_from = snapshot_boot_from
+            .expect("Snapshot boot from must be specified if given snapshot config");
+        if snapshot_boot_from == SnapshotFrom::Dir {
+            if snapshot_utils::get_highest_bank_snapshot_post(&snapshot_config.bank_snapshots_dir)
+                .is_some()
+            {
+                true
+            } else {
+                warn!(
+                    "No complete snapshot found in directory: {:?}; will load from genesis",
+                    &snapshot_config.bank_snapshots_dir
+                );
+                false
+            }
         } else {
-            warn!(
-                "No snapshot package found in directory: {:?}; will load from genesis",
-                &snapshot_config.full_snapshot_archives_dir
-            );
-            false
+            if snapshot_utils::get_highest_full_snapshot_archive_info(
+                &snapshot_config.full_snapshot_archives_dir,
+            )
+            .is_some()
+            {
+                true
+            } else {
+                warn!(
+                    "No snapshot package found in directory: {:?}; will load from genesis",
+                    &snapshot_config.full_snapshot_archives_dir
+                );
+                false
+            }
         }
     } else {
         info!("Snapshots disabled; will load from genesis");

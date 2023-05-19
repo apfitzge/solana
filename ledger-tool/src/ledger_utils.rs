@@ -75,13 +75,16 @@ pub fn load_bank_forks(
     snapshot_archive_path: Option<PathBuf>,
     incremental_snapshot_archive_path: Option<PathBuf>,
 ) -> Result<(Arc<RwLock<BankForks>>, Option<StartingSnapshotHashes>), BlockstoreProcessorError> {
-    let bank_snapshots_dir = blockstore
-        .ledger_path()
-        .join(if blockstore.is_primary_access() {
-            "snapshot"
-        } else {
-            "snapshot.ledger-tool"
-        });
+    let boot_from_local_state = arg_matches.is_present("boot_from_local_state");
+
+    let bank_snapshots_dir =
+        blockstore
+            .ledger_path()
+            .join(if blockstore.is_primary_access() || boot_from_local_state {
+                "snapshot"
+            } else {
+                "snapshot.ledger-tool"
+            });
 
     let mut starting_slot = 0; // default start check with genesis
     let (snapshot_config, snapshot_boot_from) = if arg_matches.is_present("no_snapshot") {
@@ -103,7 +106,7 @@ pub fn load_bank_forks(
             starting_slot = std::cmp::max(full_snapshot_slot, incremental_snapshot_slot);
         }
 
-        let snapshot_from = if arg_matches.is_present("boot-from-local-state") {
+        let snapshot_from = if arg_matches.is_present("boot_from_local_state") {
             SnapshotFrom::Dir
         } else {
             SnapshotFrom::Archive
@@ -171,7 +174,7 @@ pub fn load_bank_forks(
             }
         }
         account_paths.split(',').map(PathBuf::from).collect()
-    } else if blockstore.is_primary_access() {
+    } else if blockstore.is_primary_access() || boot_from_local_state {
         vec![blockstore.ledger_path().join("accounts")]
     } else {
         let non_primary_accounts_path = blockstore.ledger_path().join("accounts.ledger-tool");
