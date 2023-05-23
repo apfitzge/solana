@@ -473,7 +473,7 @@ impl Consumer {
     fn execute_and_commit_transactions_locked(
         &self,
         bank: &Arc<Bank>,
-        batch: &TransactionBatch,
+        batch: &impl TransactionBatch,
     ) -> ExecuteAndCommitTransactionsOutput {
         let transaction_status_sender_enabled = self.committer.transaction_status_sender_enabled();
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();

@@ -35,7 +35,7 @@ use {
         prioritization_fee_cache::PrioritizationFeeCache,
         rent_debits::RentDebits,
         runtime_config::RuntimeConfig,
-        transaction_batch::TransactionBatch,
+        transaction_batch::{LockedTransactionBatch, TransactionBatch, UnlockedTransactionBatch},
         vote_account::VoteAccountsHashMap,
         vote_sender_types::ReplayVoteSender,
     },
@@ -68,8 +68,8 @@ use {
     thiserror::Error,
 };
 
-struct TransactionBatchWithIndexes<'a, 'b> {
-    pub batch: TransactionBatch<'a, 'b>,
+struct TransactionBatchWithIndexes<B: TransactionBatch> {
+    pub batch: B,
     pub transaction_indexes: Vec<usize>,
 }
 
@@ -99,7 +99,7 @@ fn first_err(results: &[Result<()>]) -> Result<()> {
 
 // Includes transaction signature for unit-testing
 fn get_first_error(
-    batch: &TransactionBatch,
+    batch: &impl TransactionBatch,
     fee_collection_results: Vec<Result<()>>,
 ) -> Option<(Result<()>, Signature)> {
     let mut first_err = None;
@@ -128,8 +128,8 @@ fn get_first_error(
     first_err
 }
 
-fn execute_batch(
-    batch: &TransactionBatchWithIndexes,
+fn execute_batch<B: TransactionBatch>(
+    batch: &TransactionBatchWithIndexes<B>,
     bank: &Arc<Bank>,
     transaction_status_sender: Option<&TransactionStatusSender>,
     replay_vote_sender: Option<&ReplayVoteSender>,
@@ -216,9 +216,9 @@ struct ExecuteBatchesInternalMetrics {
     execute_batches_us: u64,
 }
 
-fn execute_batches_internal(
+fn execute_batches_internal<B: TransactionBatch>(
     bank: &Arc<Bank>,
-    batches: &[TransactionBatchWithIndexes],
+    batches: &[TransactionBatchWithIndexes<B>],
     transaction_status_sender: Option<&TransactionStatusSender>,
     replay_vote_sender: Option<&ReplayVoteSender>,
     log_messages_bytes_limit: Option<usize>,
@@ -289,17 +289,14 @@ fn execute_batches_internal(
 }
 
 fn rebatch_transactions<'a>(
-    lock_results: &'a [Result<()>],
     bank: &'a Arc<Bank>,
     sanitized_txs: &'a [SanitizedTransaction],
     start: usize,
     end: usize,
     transaction_indexes: &'a [usize],
-) -> TransactionBatchWithIndexes<'a, 'a> {
+) -> TransactionBatchWithIndexes<UnlockedTransactionBatch<'a, 'a>> {
     let txs = &sanitized_txs[start..=end];
-    let results = &lock_results[start..=end];
-    let mut tx_batch = TransactionBatch::new(results.to_vec(), bank, Cow::from(txs));
-    tx_batch.set_needs_unlock(false);
+    let tx_batch = UnlockedTransactionBatch::new(bank, Cow::from(txs));
 
     let transaction_indexes = transaction_indexes[start..=end].to_vec();
     TransactionBatchWithIndexes {
@@ -310,7 +307,7 @@ fn rebatch_transactions<'a>(
 
 fn execute_batches(
     bank: &Arc<Bank>,
-    batches: &[TransactionBatchWithIndexes],
+    batches: &[TransactionBatchWithIndexes<LockedTransactionBatch>],
     transaction_status_sender: Option<&TransactionStatusSender>,
     replay_vote_sender: Option<&ReplayVoteSender>,
     timing: &mut BatchExecutionTiming,
@@ -321,16 +318,15 @@ fn execute_batches(
         return Ok(());
     }
 
-    let ((lock_results, sanitized_txs), transaction_indexes): ((Vec<_>, Vec<_>), Vec<_>) = batches
+    let (sanitized_txs, transaction_indexes): (Vec<_>, Vec<_>) = batches
         .iter()
         .flat_map(|batch| {
             batch
                 .batch
-                .lock_results()
-                .iter()
+                .sanitized_transactions()
+                .into_iter()
                 .cloned()
-                .zip(batch.batch.sanitized_transactions().to_vec())
-                .zip(batch.transaction_indexes.to_vec())
+                .zip(batch.transaction_indexes.iter().cloned())
         })
         .unzip();
 
@@ -361,44 +357,50 @@ fn execute_batches(
 
     let target_batch_count = get_thread_count() as u64;
 
-    let mut tx_batches: Vec<TransactionBatchWithIndexes> = vec![];
-    let rebatched_txs = if total_cost > target_batch_count.saturating_mul(minimal_tx_cost) {
-        let target_batch_cost = total_cost / target_batch_count;
-        let mut batch_cost: u64 = 0;
-        let mut slice_start = 0;
-        tx_costs
-            .into_iter()
-            .enumerate()
-            .for_each(|(index, tx_cost)| {
-                let next_index = index + 1;
-                batch_cost = batch_cost.saturating_add(tx_cost.sum());
-                if batch_cost >= target_batch_cost || next_index == sanitized_txs.len() {
-                    let tx_batch = rebatch_transactions(
-                        &lock_results,
-                        bank,
-                        &sanitized_txs,
-                        slice_start,
-                        index,
-                        &transaction_indexes,
-                    );
-                    slice_start = next_index;
-                    tx_batches.push(tx_batch);
-                    batch_cost = 0;
-                }
-            });
-        &tx_batches[..]
-    } else {
-        batches
-    };
+    let mut tx_batches = vec![];
+    let execute_batches_internal_metrics =
+        if total_cost > target_batch_count.saturating_mul(minimal_tx_cost) {
+            let target_batch_cost = total_cost / target_batch_count;
+            let mut batch_cost: u64 = 0;
+            let mut slice_start = 0;
+            tx_costs
+                .into_iter()
+                .enumerate()
+                .for_each(|(index, tx_cost)| {
+                    let next_index = index + 1;
+                    batch_cost = batch_cost.saturating_add(tx_cost.sum());
+                    if batch_cost >= target_batch_cost || next_index == sanitized_txs.len() {
+                        let tx_batch = rebatch_transactions(
+                            bank,
+                            &sanitized_txs,
+                            slice_start,
+                            index,
+                            &transaction_indexes,
+                        );
+                        slice_start = next_index;
+                        tx_batches.push(tx_batch);
+                        batch_cost = 0;
+                    }
+                });
 
-    let execute_batches_internal_metrics = execute_batches_internal(
-        bank,
-        rebatched_txs,
-        transaction_status_sender,
-        replay_vote_sender,
-        log_messages_bytes_limit,
-        prioritization_fee_cache,
-    )?;
+            execute_batches_internal(
+                bank,
+                &tx_batches[..],
+                transaction_status_sender,
+                replay_vote_sender,
+                log_messages_bytes_limit,
+                prioritization_fee_cache,
+            )?
+        } else {
+            execute_batches_internal(
+                bank,
+                batches,
+                transaction_status_sender,
+                replay_vote_sender,
+                log_messages_bytes_limit,
+                prioritization_fee_cache,
+            )?
+        };
 
     timing.accumulate(execute_batches_internal_metrics);
     Ok(())
@@ -4476,30 +4478,24 @@ pub mod tests {
         ];
 
         let batch = bank.prepare_sanitized_batch(&txs);
-        assert!(batch.needs_unlock());
         let transaction_indexes = vec![42, 43, 44];
 
         let batch2 = rebatch_transactions(
-            batch.lock_results(),
             &bank,
             batch.sanitized_transactions(),
             0,
             0,
             &transaction_indexes,
         );
-        assert!(batch.needs_unlock());
-        assert!(!batch2.batch.needs_unlock());
         assert_eq!(batch2.transaction_indexes, vec![42]);
 
         let batch3 = rebatch_transactions(
-            batch.lock_results(),
             &bank,
             batch.sanitized_transactions(),
             1,
             2,
             &transaction_indexes,
         );
-        assert!(!batch3.batch.needs_unlock());
         assert_eq!(batch3.transaction_indexes, vec![43, 44]);
     }
 

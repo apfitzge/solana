@@ -258,6 +258,7 @@ pub struct BankRc {
     pub(crate) bank_id_generator: Arc<AtomicU64>,
 }
 
+use crate::transaction_batch::{LockedTransactionBatch, UnlockedTransactionBatch};
 #[cfg(RUSTC_WITH_SPECIALIZATION)]
 use solana_frozen_abi::abi_example::AbiExample;
 
@@ -3701,22 +3702,20 @@ impl Bank {
     }
 
     /// Prepare a transaction batch from a list of legacy transactions. Used for tests only.
-    pub fn prepare_batch_for_tests(&self, txs: Vec<Transaction>) -> TransactionBatch {
-        let transaction_account_lock_limit = self.get_transaction_account_lock_limit();
+    pub fn prepare_batch_for_tests(&self, txs: Vec<Transaction>) -> LockedTransactionBatch {
         let sanitized_txs = txs
             .into_iter()
             .map(SanitizedTransaction::from_transaction_for_tests)
             .collect::<Vec<_>>();
-        let lock_results = self
-            .rc
-            .accounts
-            .lock_accounts(sanitized_txs.iter(), transaction_account_lock_limit);
-        TransactionBatch::new(lock_results, self, Cow::Owned(sanitized_txs))
+        LockedTransactionBatch::new(self, Cow::Owned(sanitized_txs))
     }
 
     /// Prepare a transaction batch from a list of versioned transactions from
     /// an entry. Used for tests only.
-    pub fn prepare_entry_batch(&self, txs: Vec<VersionedTransaction>) -> Result<TransactionBatch> {
+    pub fn prepare_entry_batch(
+        &self,
+        txs: Vec<VersionedTransaction>,
+    ) -> Result<LockedTransactionBatch> {
         let sanitized_txs = txs
             .into_iter()
             .map(|tx| {
@@ -3730,29 +3729,15 @@ impl Bank {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        let tx_account_lock_limit = self.get_transaction_account_lock_limit();
-        let lock_results = self
-            .rc
-            .accounts
-            .lock_accounts(sanitized_txs.iter(), tx_account_lock_limit);
-        Ok(TransactionBatch::new(
-            lock_results,
-            self,
-            Cow::Owned(sanitized_txs),
-        ))
+        Ok(LockedTransactionBatch::new(self, Cow::Owned(sanitized_txs)))
     }
 
     /// Prepare a locked transaction batch from a list of sanitized transactions.
     pub fn prepare_sanitized_batch<'a, 'b>(
         &'a self,
         txs: &'b [SanitizedTransaction],
-    ) -> TransactionBatch<'a, 'b> {
-        let tx_account_lock_limit = self.get_transaction_account_lock_limit();
-        let lock_results = self
-            .rc
-            .accounts
-            .lock_accounts(txs.iter(), tx_account_lock_limit);
-        TransactionBatch::new(lock_results, self, Cow::Borrowed(txs))
+    ) -> LockedTransactionBatch<'a, 'b> {
+        LockedTransactionBatch::new(self, Cow::Borrowed(txs))
     }
 
     /// Prepare a locked transaction batch from a list of sanitized transactions, and their cost
@@ -3761,30 +3746,20 @@ impl Bank {
         &'a self,
         transactions: &'b [SanitizedTransaction],
         transaction_results: impl Iterator<Item = Result<()>>,
-    ) -> TransactionBatch<'a, 'b> {
-        // this lock_results could be: Ok, AccountInUse, WouldExceedBlockMaxLimit or WouldExceedAccountMaxLimit
-        let tx_account_lock_limit = self.get_transaction_account_lock_limit();
-        let lock_results = self.rc.accounts.lock_accounts_with_results(
-            transactions.iter(),
+    ) -> LockedTransactionBatch<'a, 'b> {
+        LockedTransactionBatch::new_with_results(
+            self,
+            Cow::Borrowed(transactions),
             transaction_results,
-            tx_account_lock_limit,
-        );
-        TransactionBatch::new(lock_results, self, Cow::Borrowed(transactions))
+        )
     }
 
     /// Prepare a transaction batch without locking accounts for transaction simulation.
     pub(crate) fn prepare_simulation_batch(
         &self,
         transaction: SanitizedTransaction,
-    ) -> TransactionBatch<'_, '_> {
-        let tx_account_lock_limit = self.get_transaction_account_lock_limit();
-        let lock_result = transaction
-            .get_account_locks(tx_account_lock_limit)
-            .map(|_| ());
-        let mut batch =
-            TransactionBatch::new(vec![lock_result], self, Cow::Owned(vec![transaction]));
-        batch.set_needs_unlock(false);
-        batch
+    ) -> UnlockedTransactionBatch<'_, '_> {
+        UnlockedTransactionBatch::new(self, Cow::Owned(vec![transaction]))
     }
 
     /// Run transactions against a frozen bank without committing the results
@@ -3890,15 +3865,6 @@ impl Bank {
             }
         }
         account_overrides
-    }
-
-    pub fn unlock_accounts(&self, batch: &mut TransactionBatch) {
-        if batch.needs_unlock() {
-            batch.set_needs_unlock(false);
-            self.rc
-                .accounts
-                .unlock_accounts(batch.sanitized_transactions().iter(), batch.lock_results())
-        }
     }
 
     pub fn remove_unrooted_slots(&self, slots: &[(Slot, BankId)]) {
@@ -4042,7 +4008,7 @@ impl Bank {
         self.check_status_cache(sanitized_txs, age_results, error_counters)
     }
 
-    pub fn collect_balances(&self, batch: &TransactionBatch) -> TransactionBalances {
+    pub fn collect_balances(&self, batch: &impl TransactionBatch) -> TransactionBalances {
         let mut balances: TransactionBalances = vec![];
         for transaction in batch.sanitized_transactions() {
             let mut transaction_balances: Vec<u64> = vec![];
@@ -4430,7 +4396,7 @@ impl Bank {
     #[allow(clippy::type_complexity)]
     pub fn load_and_execute_transactions(
         &self,
-        batch: &TransactionBatch,
+        batch: &impl TransactionBatch,
         max_age: usize,
         enable_cpi_recording: bool,
         enable_log_recording: bool,
@@ -5875,7 +5841,7 @@ impl Bank {
     #[must_use]
     pub fn load_execute_and_commit_transactions(
         &self,
-        batch: &TransactionBatch,
+        batch: &impl TransactionBatch,
         max_age: usize,
         collect_balances: bool,
         enable_cpi_recording: bool,
@@ -6026,7 +5992,7 @@ impl Bank {
     }
 
     #[must_use]
-    fn process_transaction_batch(&self, batch: &TransactionBatch) -> Vec<Result<()>> {
+    fn process_transaction_batch(&self, batch: &impl TransactionBatch) -> Vec<Result<()>> {
         self.load_execute_and_commit_transactions(
             batch,
             MAX_PROCESSING_AGE,

@@ -62,7 +62,7 @@ impl Committer {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_transactions(
         &self,
-        batch: &TransactionBatch,
+        batch: &impl TransactionBatch,
         loaded_transactions: &mut [TransactionLoadResult],
         execution_results: Vec<TransactionExecutionResult>,
         starting_transaction_index: Option<usize>,
@@ -136,7 +136,7 @@ impl Committer {
         &self,
         tx_results: TransactionResults,
         bank: &Arc<Bank>,
-        batch: &TransactionBatch,
+        batch: &impl TransactionBatch,
         pre_balance_info: &mut PreBalanceInfo,
         starting_transaction_index: Option<usize>,
     ) {
