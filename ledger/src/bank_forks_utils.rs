@@ -122,20 +122,18 @@ pub fn load_bank_forks(
                 );
                 false
             }
+        } else if snapshot_utils::get_highest_full_snapshot_archive_info(
+            &snapshot_config.full_snapshot_archives_dir,
+        )
+        .is_some()
+        {
+            true
         } else {
-            if snapshot_utils::get_highest_full_snapshot_archive_info(
-                &snapshot_config.full_snapshot_archives_dir,
-            )
-            .is_some()
-            {
-                true
-            } else {
-                warn!(
-                    "No snapshot package found in directory: {:?}; will load from genesis",
-                    &snapshot_config.full_snapshot_archives_dir
-                );
-                false
-            }
+            warn!(
+                "No snapshot package found in directory: {:?}; will load from genesis",
+                &snapshot_config.full_snapshot_archives_dir
+            );
+            false
         }
     } else {
         info!("Snapshots disabled; will load from genesis");
