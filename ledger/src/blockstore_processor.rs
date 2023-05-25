@@ -314,7 +314,7 @@ fn rebatch_transactions<'a>(
 
 fn execute_batches(
     bank: &Arc<Bank>,
-    batches: &[TransactionBatchWithIndexes],
+    batches: Vec<TransactionBatchWithIndexes>,
     transaction_status_sender: Option<&TransactionStatusSender>,
     replay_vote_sender: Option<&ReplayVoteSender>,
     timing: &mut BatchExecutionTiming,
@@ -390,9 +390,9 @@ fn execute_batches(
                     batch_cost = 0;
                 }
             });
-        &tx_batches[..]
+        &tx_batches
     } else {
-        batches
+        &batches
     };
 
     let execute_batches_internal_metrics = execute_batches_internal(
@@ -494,7 +494,7 @@ fn process_entries(
                     let executing_batches = core::mem::take(&mut batches);
                     execute_batches(
                         bank,
-                        &executing_batches,
+                        executing_batches,
                         transaction_status_sender,
                         replay_vote_sender,
                         batch_timing,
@@ -557,7 +557,7 @@ fn process_entries(
                         let executing_batches = core::mem::take(&mut batches);
                         execute_batches(
                             bank,
-                            &executing_batches,
+                            executing_batches,
                             transaction_status_sender,
                             replay_vote_sender,
                             batch_timing,
@@ -571,7 +571,7 @@ fn process_entries(
     }
     execute_batches(
         bank,
-        &batches,
+        batches,
         transaction_status_sender,
         replay_vote_sender,
         batch_timing,
