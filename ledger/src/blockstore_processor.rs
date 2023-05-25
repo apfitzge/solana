@@ -222,7 +222,7 @@ struct ExecuteBatchesInternalMetrics {
 
 fn execute_batches_internal(
     bank: &Arc<Bank>,
-    batches: &mut [TransactionBatchWithIndexes],
+    batches: Vec<TransactionBatchWithIndexes>,
     transaction_status_sender: Option<&TransactionStatusSender>,
     replay_vote_sender: Option<&ReplayVoteSender>,
     log_messages_bytes_limit: Option<usize>,
@@ -233,6 +233,7 @@ fn execute_batches_internal(
         Mutex::new(HashMap::new());
 
     let mut execute_batches_elapsed = Measure::start("execute_batches_elapsed");
+    let total_batches_len = batches.len() as u64;
     let results: Vec<Result<()>> = PAR_THREAD_POOL.install(|| {
         batches
             .into_par_iter()
@@ -243,7 +244,7 @@ fn execute_batches_internal(
                 let (result, execute_batches_time): (Result<()>, Measure) = measure!(
                     {
                         execute_batch(
-                            transaction_batch,
+                            &transaction_batch,
                             bank,
                             transaction_status_sender,
                             replay_vote_sender,
@@ -254,6 +255,7 @@ fn execute_batches_internal(
                     },
                     "execute_batch",
                 );
+                drop(transaction_batch);
 
                 let thread_index = PAR_THREAD_POOL.current_thread_index().unwrap();
                 execution_timings_per_thread
@@ -287,7 +289,7 @@ fn execute_batches_internal(
 
     Ok(ExecuteBatchesInternalMetrics {
         execution_timings_per_thread: execution_timings_per_thread.into_inner().unwrap(),
-        total_batches_len: batches.len() as u64,
+        total_batches_len,
         execute_batches_us: execute_batches_elapsed.as_us(),
     })
 }
@@ -366,7 +368,7 @@ fn execute_batches(
     let target_batch_count = get_thread_count() as u64;
 
     let mut tx_batches: Vec<TransactionBatchWithIndexes> = vec![];
-    let mut rebatched_txs = if total_cost > target_batch_count.saturating_mul(minimal_tx_cost) {
+    let rebatched_txs = if total_cost > target_batch_count.saturating_mul(minimal_tx_cost) {
         let target_batch_cost = total_cost / target_batch_count;
         let mut batch_cost: u64 = 0;
         let mut slice_start = 0;
@@ -397,7 +399,7 @@ fn execute_batches(
 
     let execute_batches_internal_metrics = execute_batches_internal(
         bank,
-        &mut rebatched_txs,
+        rebatched_txs,
         transaction_status_sender,
         replay_vote_sender,
         log_messages_bytes_limit,
