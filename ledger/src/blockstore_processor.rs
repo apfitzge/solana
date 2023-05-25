@@ -390,14 +390,14 @@ fn execute_batches(
                     batch_cost = 0;
                 }
             });
-        &tx_batches
+        tx_batches
     } else {
-        &batches
+        batches
     };
 
     let execute_batches_internal_metrics = execute_batches_internal(
         bank,
-        rebatched_txs,
+        &rebatched_txs,
         transaction_status_sender,
         replay_vote_sender,
         log_messages_bytes_limit,
