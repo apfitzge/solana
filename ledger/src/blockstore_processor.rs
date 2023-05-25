@@ -222,7 +222,7 @@ struct ExecuteBatchesInternalMetrics {
 
 fn execute_batches_internal(
     bank: &Arc<Bank>,
-    batches: &[TransactionBatchWithIndexes],
+    batches: &mut [TransactionBatchWithIndexes],
     transaction_status_sender: Option<&TransactionStatusSender>,
     replay_vote_sender: Option<&ReplayVoteSender>,
     log_messages_bytes_limit: Option<usize>,
@@ -366,7 +366,7 @@ fn execute_batches(
     let target_batch_count = get_thread_count() as u64;
 
     let mut tx_batches: Vec<TransactionBatchWithIndexes> = vec![];
-    let rebatched_txs = if total_cost > target_batch_count.saturating_mul(minimal_tx_cost) {
+    let mut rebatched_txs = if total_cost > target_batch_count.saturating_mul(minimal_tx_cost) {
         let target_batch_cost = total_cost / target_batch_count;
         let mut batch_cost: u64 = 0;
         let mut slice_start = 0;
@@ -397,7 +397,7 @@ fn execute_batches(
 
     let execute_batches_internal_metrics = execute_batches_internal(
         bank,
-        &rebatched_txs,
+        &mut rebatched_txs,
         transaction_status_sender,
         replay_vote_sender,
         log_messages_bytes_limit,
