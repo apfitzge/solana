@@ -491,16 +491,16 @@ fn process_entries(
                 if bank.is_block_boundary(bank.tick_height() + tick_hashes.len() as u64) {
                     // If it's a tick that will cause a new blockhash to be created,
                     // execute the group and register the tick
+                    let executing_batches = core::mem::take(&mut batches);
                     execute_batches(
                         bank,
-                        &batches,
+                        &executing_batches,
                         transaction_status_sender,
                         replay_vote_sender,
                         batch_timing,
                         log_messages_bytes_limit,
                         prioritization_fee_cache,
                     )?;
-                    batches.clear();
                     for hash in &tick_hashes {
                         bank.register_tick(hash);
                     }
@@ -554,16 +554,16 @@ fn process_entries(
                     } else {
                         // else we have an entry that conflicts with a prior entry
                         // execute the current queue and try to process this entry again
+                        let executing_batches = core::mem::take(&mut batches);
                         execute_batches(
                             bank,
-                            &batches,
+                            &executing_batches,
                             transaction_status_sender,
                             replay_vote_sender,
                             batch_timing,
                             log_messages_bytes_limit,
                             prioritization_fee_cache,
                         )?;
-                        batches.clear();
                     }
                 }
             }
