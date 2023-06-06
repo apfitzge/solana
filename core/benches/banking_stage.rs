@@ -1,6 +1,12 @@
 #![allow(clippy::integer_arithmetic)]
 #![feature(test)]
 
+use {
+    bincode::serialize_into,
+    itertools::interleave,
+    solana_sdk::{pubkey::Pubkey, system_instruction::SystemInstruction},
+};
+
 extern crate test;
 
 use {
@@ -61,7 +67,7 @@ fn check_txs(receiver: &Arc<Receiver<WorkingBankEntry>>, ref_tx_count: usize) {
     let mut total = 0;
     let now = Instant::now();
     loop {
-        if let Ok((_bank, (entry, _tick_height))) = receiver.recv_timeout(Duration::new(1, 0)) {
+        if let Ok((_bank, (entry, _tick_height))) = receiver.recv_timeout(Duration::from_secs(1)) {
             total += entry.transactions.len();
         }
         if total >= ref_tx_count {
@@ -382,6 +388,188 @@ fn bench_banking_stage_multi_accounts_with_voting(bencher: &mut Bencher) {
 #[bench]
 fn bench_banking_stage_multi_programs_with_voting(bencher: &mut Bencher) {
     bench_banking(bencher, TransactionType::ProgramsAndVotes);
+}
+
+fn bench_banking_invalid_fee_payer(bencher: &mut Bencher) {
+    solana_logger::setup();
+    let num_threads = BankingStage::num_threads() as usize;
+
+    const CHUNKS: usize = 8;
+    const PACKETS_PER_BATCH: usize = 192;
+    let txes = PACKETS_PER_BATCH * num_threads * CHUNKS;
+    let mint_total = 1_000_000_000_000;
+    let GenesisConfigInfo {
+        mut genesis_config,
+        mint_keypair,
+        ..
+    } = create_genesis_config(mint_total);
+
+    // Set a high ticks_per_slot so we don't run out of ticks
+    // during the benchmark
+    genesis_config.ticks_per_slot = 10_000;
+
+    let banking_tracer = BankingTracer::new_disabled();
+    let (non_vote_sender, non_vote_receiver) = banking_tracer.create_channel_non_vote();
+    let (_tpu_vote_sender, tpu_vote_receiver) = banking_tracer.create_channel_tpu_vote();
+    let (_gossip_vote_sender, gossip_vote_receiver) = banking_tracer.create_channel_gossip_vote();
+
+    let mut bank = Bank::new_for_benches(&genesis_config);
+    // Allow arbitrary transaction processing time for the purposes of this bench
+    bank.ns_per_slot = u128::MAX;
+    let bank_forks = Arc::new(RwLock::new(BankForks::new(bank)));
+    let bank = bank_forks.read().unwrap().get(0).unwrap();
+
+    // set cost tracker limits to MAX so it will not filter out TXs
+    bank.write_cost_tracker()
+        .unwrap()
+        .set_limits(std::u64::MAX, std::u64::MAX, std::u64::MAX);
+
+    debug!("threads: {} txs: {}", num_threads, txes);
+
+    let good_transaction = make_accounts_txs(1, &mint_keypair, genesis_config.hash())
+        .pop()
+        .unwrap();
+    let funded_key = good_transaction.message.account_keys[0];
+    let unfunded_key = Pubkey::new_unique();
+
+    // Fund all the accounts
+    {
+        let fund = system_transaction::transfer(
+            &mint_keypair,
+            &funded_key,
+            mint_total,
+            genesis_config.hash(),
+        );
+        bank.process_transaction(&fund).unwrap();
+    }
+
+    let good_transactions: Vec<_> = (0..txes)
+        .into_par_iter()
+        .map(|i| {
+            let mut tx = good_transaction.clone();
+            let sig: Vec<_> = (0..64).map(|_| thread_rng().gen::<u8>()).collect();
+            tx.signatures = vec![Signature::new(&sig[0..64])];
+
+            let ix = SystemInstruction::Transfer {
+                lamports: i as u64 + 1,
+            };
+            serialize_into(&mut tx.message.instructions[0].data[..], &ix).unwrap();
+            tx
+        })
+        .collect();
+
+    //sanity check, make sure all the transactions can execute sequentially
+    good_transactions.iter().for_each(|tx| {
+        let res = bank.process_transaction(tx);
+        assert!(res.is_ok(), "sanity test transactions, {:?}", res);
+    });
+    bank.clear_signatures();
+
+    // mix in some unfunded transactions.
+    // These will all fail, but will grab the lock on the `to` key from the good transaction
+    let bad_transactions: Vec<_> = (0..txes)
+        .into_par_iter()
+        .map(|i| {
+            let mut tx = good_transaction.clone();
+            let sig: Vec<_> = (0..64).map(|_| thread_rng().gen::<u8>()).collect();
+            tx.message.account_keys[0] = unfunded_key;
+            tx.signatures = vec![Signature::new(&sig[0..64])];
+            let ix = SystemInstruction::Transfer {
+                lamports: i as u64 + 1,
+            };
+            serialize_into(&mut tx.message.instructions[0].data[..], &ix).unwrap();
+            tx
+        })
+        .collect();
+
+    // mix good/bad transactions together
+    let transactions: Vec<_> =
+        interleave(good_transactions.into_iter(), bad_transactions.into_iter()).collect();
+    // let transactions = good_transactions;
+
+    let verified: Vec<_> = to_packet_batches(&transactions, PACKETS_PER_BATCH);
+
+    let ledger_path = get_tmp_ledger_path!();
+    {
+        let blockstore = Arc::new(
+            Blockstore::open(&ledger_path).expect("Expected to be able to open database ledger"),
+        );
+        let (exit, poh_recorder, poh_service, signal_receiver) =
+            create_test_recorder(&bank, blockstore, None, None);
+        let cluster_info = {
+            let keypair = Arc::new(Keypair::new());
+            let node = Node::new_localhost_with_pubkey(&keypair.pubkey());
+            ClusterInfo::new(node.info, keypair, SocketAddrSpace::Unspecified)
+        };
+        let cluster_info = Arc::new(cluster_info);
+        let (s, _r) = unbounded();
+        let _banking_stage = BankingStage::new(
+            &cluster_info,
+            &poh_recorder,
+            non_vote_receiver,
+            tpu_vote_receiver,
+            gossip_vote_receiver,
+            None,
+            s,
+            None,
+            Arc::new(ConnectionCache::new("connection_cache_test")),
+            bank_forks,
+            &Arc::new(PrioritizationFeeCache::new(0u64)),
+        );
+
+        assert_eq!(transactions.len() % txes, 0);
+        let chunk_len = verified.len() / CHUNKS;
+        let good_txs_chunk_len = txes / CHUNKS;
+        let mut start = 0;
+
+        // This is so that the signal_receiver does not go out of scope after the closure.
+        // If it is dropped before poh_service, then poh_service will error when
+        // calling send() on the channel.
+        let signal_receiver = Arc::new(signal_receiver);
+        let signal_receiver2 = signal_receiver.clone();
+        bencher.iter(move || {
+            let now = Instant::now();
+            let mut sent = 0;
+            for v in verified[start..start + chunk_len].chunks(chunk_len / num_threads) {
+                debug!(
+                    "sending... {}..{} {} v.len: {}",
+                    start,
+                    start + chunk_len,
+                    timestamp(),
+                    v.len(),
+                );
+                for xv in v {
+                    sent += xv.len();
+                }
+                non_vote_sender
+                    .send(BankingPacketBatch::new((v.to_vec(), None)))
+                    .unwrap();
+            }
+
+            check_txs(&signal_receiver2, good_txs_chunk_len);
+
+            // This signature clear may not actually clear the signatures
+            // in this chunk, but since we rotate between CHUNKS then
+            // we should clear them by the time we come around again to re-use that chunk.
+            bank.clear_signatures();
+            trace!(
+                "time: {} checked: {} sent: {}",
+                duration_as_us(&now.elapsed()),
+                txes / CHUNKS,
+                sent,
+            );
+            start += chunk_len;
+            start %= verified.len();
+        });
+        exit.store(true, Ordering::Relaxed);
+        poh_service.join().unwrap();
+    }
+    let _unused = Blockstore::destroy(&ledger_path);
+}
+
+#[bench]
+fn bench_banking_stage_invalid_fee_payer(bencher: &mut Bencher) {
+    bench_banking_invalid_fee_payer(bencher);
 }
 
 fn simulate_process_entries(
