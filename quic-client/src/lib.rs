@@ -208,7 +208,15 @@ impl ConnectionManager for QuicConnectionManager {
     }
 
     fn new_connection_config(&self) -> QuicConfig {
-        self.connection_config.clone()
+        let config = self.connection_config.clone();
+
+        QuicConfig {
+            client_certificate: config.client_certificate,
+            maybe_staked_nodes: config.maybe_staked_nodes.clone(),
+            maybe_client_pubkey: config.maybe_client_pubkey,
+            client_endpoint: config.client_endpoint,
+            ..QuicConfig::new().unwrap(),
+        }
     }
 }
 
