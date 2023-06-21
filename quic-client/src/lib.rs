@@ -212,9 +212,7 @@ impl ConnectionManager for QuicConnectionManager {
 
         QuicConfig {
             client_certificate: config.client_certificate,
-            maybe_staked_nodes: config.maybe_staked_nodes.clone(),
-            maybe_client_pubkey: config.maybe_client_pubkey,
-            ..QuicConfig::new().unwrap(),
+            ..QuicConfig::new().unwrap()
         }
     }
 }
