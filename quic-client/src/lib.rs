@@ -216,7 +216,7 @@ impl ConnectionManager for QuicConnectionManager {
         } = self.connection_config.clone();
 
         QuicConfig {
-            // client_certificate: cloned_client_certificate,
+            client_certificate: cloned_client_certificate,
             // maybe_staked_nodes: cloned_maybe_staked_nodes,
             // maybe_client_pubkey: cloned_maybe_client_pubkey,
             // client_endpoint: cloned_client_endpoint,
