@@ -1,5 +1,7 @@
 #![allow(clippy::integer_arithmetic)]
 
+use log::error;
+
 pub mod nonblocking;
 pub mod quic_client;
 
@@ -132,7 +134,9 @@ impl QuicConfig {
                         },
                     )
                 });
-        compute_max_allowed_uni_streams(client_type, stake, total_stake)
+        let max_parallel_streams = compute_max_allowed_uni_streams(client_type, stake, total_stake);
+        error!("max_parallel_streams: {max_parallel_streams}");
+        max_parallel_streams
     }
 
     pub fn update_client_certificate(
