@@ -76,6 +76,7 @@ pub struct Config {
     pub bind_address: IpAddr,
     pub client_node_id: Option<Keypair>,
     pub load_accounts_from_address_lookup_table: Option<(Pubkey, usize)>,
+    pub num_lookup_tables: usize,
 }
 
 impl Eq for Config {}
@@ -112,6 +113,7 @@ impl Default for Config {
             bind_address: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             client_node_id: None,
             load_accounts_from_address_lookup_table: None,
+            num_lookup_tables: 1,
         }
     }
 }
@@ -402,6 +404,16 @@ pub fn build_args<'a>(version: &'_ str) -> App<'a, '_> {
                      2nd parameter is the number of accounts to be loaded by the SBF program from ATL.",
                 ),
         )
+        .arg(
+            Arg::with_name("num_lookup_tables")
+            .long("num-lookup-tables")
+            .requires("load_accounts_from_address_lookup_table")
+            .value_name("NUM")
+            .takes_value(true)
+            .validator(|s| is_within_range(s, 1..))
+            .default_value("1")
+            .help("number of lookup tables to randomly select from")
+        )
 }
 
 /// Parses a clap `ArgMatches` structure into a `Config`
@@ -589,6 +601,12 @@ pub fn parse_args(matches: &ArgMatches) -> Result<Config, &'static str> {
             args.load_accounts_from_address_lookup_table =
                 Some((sbf_program_pubkey, parsed_number_of_accounts));
         }
+    }
+
+    if let Some(num_lookup_tables) = matches.value_of("num_lookup_tables") {
+        args.num_lookup_tables = num_lookup_tables
+            .parse()
+            .map_err(|_| "Can't parse num-lookup-tables")?;
     }
 
     Ok(args)

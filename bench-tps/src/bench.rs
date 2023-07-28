@@ -1,6 +1,8 @@
+use itertools::Itertools;
+
 use {
     crate::{
-        address_table_lookup::create_address_lookup_table_account,
+        address_table_lookup::create_address_lookup_table_accounts,
         bench_tps_client::*,
         cli::{Config, InstructionPaddingConfig},
         perf_utils::{sample_txs, SampleStats},
@@ -126,7 +128,8 @@ struct TransactionChunkGenerator<'a, 'b, T: ?Sized> {
     reclaim_lamports_back_to_source_account: bool,
     use_randomized_compute_unit_price: bool,
     instruction_padding_config: Option<InstructionPaddingConfig>,
-    lookup_table_address: Option<(Pubkey, Pubkey)>,
+    program_id: Option<Pubkey>,
+    lookup_tables: Vec<AddressLookupTableAccount>,
 }
 
 impl<'a, 'b, T> TransactionChunkGenerator<'a, 'b, T>
@@ -141,7 +144,8 @@ where
         use_randomized_compute_unit_price: bool,
         instruction_padding_config: Option<InstructionPaddingConfig>,
         num_conflict_groups: Option<usize>,
-        lookup_table_address: Option<(Pubkey, Pubkey)>,
+        program_id: Option<Pubkey>,
+        lookup_tables: Vec<AddressLookupTableAccount>,
     ) -> Self {
         let account_chunks = if let Some(num_conflict_groups) = num_conflict_groups {
             KeypairChunks::new_with_conflict_groups(gen_keypairs, chunk_size, num_conflict_groups)
@@ -159,7 +163,8 @@ where
             reclaim_lamports_back_to_source_account: false,
             use_randomized_compute_unit_price,
             instruction_padding_config,
-            lookup_table_address,
+            program_id,
+            lookup_tables,
         }
     }
 
@@ -172,34 +177,6 @@ where
             tx_count, self.reclaim_lamports_back_to_source_account, blockhash
         );
         let signing_start = Instant::now();
-
-        let address_lookup_table_account =
-            self.lookup_table_address
-                .map(|(lookup_table_address, sbf_program_id)| {
-                    let lookup_table_account = self
-                        .client
-                        .get_account_with_commitment(
-                            &lookup_table_address,
-                            CommitmentConfig::processed(),
-                        )
-                        .unwrap();
-                    info!("==== {:?}", lookup_table_account);
-                    let lookup_table =
-                        AddressLookupTable::deserialize(&lookup_table_account.data).unwrap();
-                    info!("==== {:?}", lookup_table);
-                    (
-                        AddressLookupTableAccount {
-                            key: lookup_table_address,
-                            addresses: lookup_table.addresses.to_vec(),
-                        },
-                        sbf_program_id,
-                    )
-                });
-        info!(
-            "==== address_lookup_table_account {:?}",
-            address_lookup_table_account
-        );
-
         let source_chunk = &self.account_chunks.source[self.chunk_index];
         let dest_chunk = &self.account_chunks.dest[self.chunk_index];
         let transactions = if let Some(nonce_chunks) = &self.nonce_chunks {
@@ -223,7 +200,8 @@ where
                 blockhash.unwrap(),
                 &self.instruction_padding_config,
                 self.use_randomized_compute_unit_price,
-                &address_lookup_table_account,
+                &self.program_id,
+                &self.lookup_tables,
             )
         };
 
@@ -419,6 +397,7 @@ where
         instruction_padding_config,
         num_conflict_groups,
         load_accounts_from_address_lookup_table,
+        num_lookup_tables,
         ..
     } = config;
 
@@ -426,13 +405,32 @@ where
     //     then extend it with spepcified number of account.
     // All bench transfer transactions will include a `sbf_program_id` instruction to load
     //     specified number of accounts from Lookup Table account as writable accounts.
-    let lookup_table_address =
-        load_accounts_from_address_lookup_table.map(|(sbf_program_id, number_of_accounts)| {
-            let lookup_table_account =
-                create_address_lookup_table_account(client.clone(), &id, number_of_accounts)
-                    .unwrap();
-            (lookup_table_account, sbf_program_id)
-        });
+    let (program_id, lookup_tables) = load_accounts_from_address_lookup_table
+        .map(|(program_id, number_of_lookup_tables_per_account)| {
+            let lookup_table_accounts = create_address_lookup_table_accounts(
+                &client,
+                &id,
+                number_of_lookup_tables_per_account,
+                num_lookup_tables,
+            )
+            .unwrap();
+            (Some(program_id), lookup_table_accounts)
+        })
+        .unwrap_or((None, vec![]));
+
+    let lookup_tables = lookup_tables
+        .into_iter()
+        .map(|lookup_table_address| {
+            let account = client
+                .get_account_with_commitment(&lookup_table_address, CommitmentConfig::processed())
+                .unwrap();
+            let lookup_table = AddressLookupTable::deserialize(&account.data).unwrap();
+            AddressLookupTableAccount {
+                key: lookup_table_address,
+                addresses: lookup_table.addresses.to_vec(),
+            }
+        })
+        .collect_vec();
 
     assert!(gen_keypairs.len() >= 2 * tx_count);
     let chunk_generator = TransactionChunkGenerator::new(
@@ -443,7 +441,8 @@ where
         use_randomized_compute_unit_price,
         instruction_padding_config,
         num_conflict_groups,
-        lookup_table_address,
+        program_id,
+        lookup_tables,
     );
 
     let first_tx_count = loop {
@@ -570,7 +569,8 @@ fn generate_system_txs(
     blockhash: &Hash,
     instruction_padding_config: &Option<InstructionPaddingConfig>,
     use_randomized_compute_unit_price: bool,
-    address_lookup_table_account: &Option<(AddressLookupTableAccount, Pubkey)>,
+    program_id: &Option<Pubkey>,
+    lookup_tables: &[AddressLookupTableAccount],
 ) -> Vec<TimestampedTransaction> {
     let pairs: Vec<_> = if !reclaim {
         source.iter().zip(dest.iter()).collect()
@@ -588,25 +588,39 @@ fn generate_system_txs(
                     .saturating_mul(COMPUTE_UNIT_PRICE_MULTIPLIER)
             })
             .collect();
-        let pairs_with_compute_unit_prices: Vec<_> =
-            pairs.iter().zip(compute_unit_prices.iter()).collect();
-
-        pairs_with_compute_unit_prices
-            .par_iter()
-            .map(|((from, to), compute_unit_price)| {
-                (
-                    transfer_with_compute_unit_price_and_padding(
-                        from,
-                        &to.pubkey(),
-                        1,
-                        *blockhash,
-                        instruction_padding_config,
-                        Some(**compute_unit_price),
-                        address_lookup_table_account,
-                    ),
-                    Some(timestamp()),
-                )
+        let lookup_table_range = Uniform::from(0..lookup_tables.len());
+        let address_lookup_table_accounts: Vec<_> = (0..pairs.len())
+            .map(|_| {
+                program_id
+                    .is_some()
+                    .then(|| &lookup_tables[lookup_table_range.sample(&mut rng)])
             })
+            .collect();
+        let paris_with_compute_units_and_lookup_tables: Vec<_> = pairs
+            .iter()
+            .zip(compute_unit_prices.iter())
+            .zip(address_lookup_table_accounts.into_iter())
+            .collect();
+
+        paris_with_compute_units_and_lookup_tables
+            .par_iter()
+            .map(
+                |(((from, to), compute_unit_price), address_lookup_table_account)| {
+                    (
+                        transfer_with_compute_unit_price_and_padding(
+                            from,
+                            &to.pubkey(),
+                            1,
+                            *blockhash,
+                            instruction_padding_config,
+                            Some(**compute_unit_price),
+                            program_id,
+                            *address_lookup_table_account,
+                        ),
+                        Some(timestamp()),
+                    )
+                },
+            )
             .collect()
     } else {
         pairs
@@ -620,7 +634,8 @@ fn generate_system_txs(
                         *blockhash,
                         instruction_padding_config,
                         None,
-                        address_lookup_table_account,
+                        &None,
+                        None,
                     ),
                     Some(timestamp()),
                 )
@@ -636,7 +651,8 @@ fn transfer_with_compute_unit_price_and_padding(
     recent_blockhash: Hash,
     instruction_padding_config: &Option<InstructionPaddingConfig>,
     compute_unit_price: Option<u64>,
-    address_lookup_table_account: &Option<(AddressLookupTableAccount, Pubkey)>,
+    program_id: &Option<Pubkey>,
+    address_lookup_table_account: Option<&AddressLookupTableAccount>,
 ) -> VersionedTransaction {
     let from_pubkey = from_keypair.pubkey();
     let transfer_instruction = system_instruction::transfer(&from_pubkey, to, lamports);
@@ -664,16 +680,14 @@ fn transfer_with_compute_unit_price_and_padding(
         ),
     ]);
 
-    let versioned_message = if let Some((address_lookup_table_account, sbf_program_id)) =
-        address_lookup_table_account
-    {
-        let address_lookup_table_account_clone = address_lookup_table_account.clone();
-        let address_lookup_table_accounts = vec![address_lookup_table_account_clone];
+    let versioned_message = if let Some(sbf_program_id) = program_id {
+        let address_lookup_table_account = address_lookup_table_account.unwrap();
+        let address_lookup_table_accounts = &[address_lookup_table_account.clone()];
 
         let account_metas: Vec<_> = address_lookup_table_account
             .addresses
             .iter()
-            .map(|pubkey| AccountMeta::new(*pubkey, false))
+            .map(|pubkey| AccountMeta::new_readonly(*pubkey, false))
             .collect();
         instructions.extend_from_slice(&[Instruction::new_with_bincode(
             *sbf_program_id,
@@ -685,7 +699,7 @@ fn transfer_with_compute_unit_price_and_padding(
             v0::Message::try_compile(
                 &from_pubkey, //payer
                 &instructions,
-                &address_lookup_table_accounts,
+                address_lookup_table_accounts,
                 recent_blockhash,
             )
             .unwrap(),
@@ -699,8 +713,6 @@ fn transfer_with_compute_unit_price_and_padding(
     };
     let versioned_transaction =
         VersionedTransaction::try_new(versioned_message, &[from_keypair]).unwrap();
-
-    info!("==== versioned_transaction {:?}", versioned_transaction);
 
     versioned_transaction
 }

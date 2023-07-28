@@ -4741,18 +4741,19 @@ impl Bank {
 
     /// Get the max number of accounts that a transaction may lock in this block
     pub fn get_transaction_account_lock_limit(&self) -> usize {
-        if let Some(transaction_account_lock_limit) =
-            self.runtime_config.transaction_account_lock_limit
-        {
-            transaction_account_lock_limit
-        } else if self
-            .feature_set
-            .is_active(&feature_set::increase_tx_account_lock_limit::id())
-        {
-            MAX_TX_ACCOUNT_LOCKS
-        } else {
-            64
-        }
+        // if let Some(transaction_account_lock_limit) =
+        //     self.runtime_config.transaction_account_lock_limit
+        // {
+        //     transaction_account_lock_limit
+        // } else if self
+        //     .feature_set
+        //     .is_active(&feature_set::increase_tx_account_lock_limit::id())
+        // {
+        //     MAX_TX_ACCOUNT_LOCKS
+        // } else {
+        //     64
+        // }
+        256
     }
 
     /// Prepare a transaction batch from a list of legacy transactions. Used for tests only.

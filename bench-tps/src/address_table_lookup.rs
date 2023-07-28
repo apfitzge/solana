@@ -1,3 +1,5 @@
+use itertools::Itertools;
+
 use {
     crate::bench_tps_client::*,
     log::*,
@@ -19,33 +21,48 @@ use {
 // Number of pubkeys to be included in single extend_lookup_table transaction that not exceeds MTU
 const NUMBER_OF_ADDRESSES_PER_EXTEND: usize = 16;
 
-pub fn create_address_lookup_table_account<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
-    client: Arc<T>,
+pub fn create_address_lookup_table_accounts<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    client: &Arc<T>,
     funding_key: &Keypair,
     num_addresses: usize,
-) -> Result<Pubkey> {
-    let (transaction, lookup_table_address) = build_create_lookup_table_tx(
-        funding_key,
-        client.get_slot().unwrap_or(0),
-        client.get_latest_blockhash().unwrap(),
-    );
-    send_and_confirm_transaction(client.clone(), transaction, &lookup_table_address);
+    num_tables: usize,
+) -> Result<Vec<Pubkey>> {
+    let lookup_table_addresses = (0..num_tables)
+        .map(|_| {
+            let (transaction, lookup_table_address) = build_create_lookup_table_tx(
+                funding_key,
+                client.get_slot().unwrap_or(0),
+                client.get_latest_blockhash().unwrap(),
+            );
+
+            let tx_sig = client.send_transaction(transaction).unwrap();
+            debug!("address_table_lookup sent transaction, sig {:?}", tx_sig);
+            lookup_table_address
+        })
+        .collect_vec();
+
+    confirm_lookup_table_accounts(client, &lookup_table_addresses);
 
     let mut i: usize = 0;
     while i < num_addresses {
         let extend_num_addresses = NUMBER_OF_ADDRESSES_PER_EXTEND.min(num_addresses - i);
         i += extend_num_addresses;
 
-        let transaction = build_extend_lookup_table_tx(
-            &lookup_table_address,
-            funding_key,
-            extend_num_addresses,
-            client.get_latest_blockhash().unwrap(),
-        );
-        send_and_confirm_transaction(client.clone(), transaction, &lookup_table_address);
+        for lookup_table_address in &lookup_table_addresses {
+            let transaction = build_extend_lookup_table_tx(
+                lookup_table_address,
+                funding_key,
+                extend_num_addresses,
+                client.get_latest_blockhash().unwrap(),
+            );
+            let tx_sig = client.send_transaction(transaction).unwrap();
+            debug!("address_table_lookup sent transaction, sig {:?}", tx_sig);
+        }
+
+        confirm_lookup_table_accounts(client, &lookup_table_addresses);
     }
 
-    Ok(lookup_table_address)
+    Ok(lookup_table_addresses)
 }
 
 fn build_create_lookup_table_tx(
@@ -95,21 +112,19 @@ fn build_extend_lookup_table_tx(
     )
 }
 
-fn send_and_confirm_transaction<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
-    client: Arc<T>,
-    transaction: Transaction,
-    lookup_table_address: &Pubkey,
+fn confirm_lookup_table_accounts<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    client: &Arc<T>,
+    lookup_table_addresses: &[Pubkey],
 ) {
-    let tx_sig = client.send_transaction(transaction).unwrap();
-    debug!("address_table_lookup sent transaction, sig {:?}", tx_sig);
-
     // Sleep a few slots to allow transactions to process
     sleep(Duration::from_secs(1));
 
-    // confirm tx
-    let lookup_table_account = client
-        .get_account_with_commitment(lookup_table_address, CommitmentConfig::processed())
-        .unwrap();
-    let lookup_table = AddressLookupTable::deserialize(&lookup_table_account.data).unwrap();
-    debug!("lookup table: {:?}", lookup_table);
+    for lookup_table_address in lookup_table_addresses {
+        // confirm tx
+        let lookup_table_account = client
+            .get_account_with_commitment(lookup_table_address, CommitmentConfig::processed())
+            .unwrap();
+        let lookup_table = AddressLookupTable::deserialize(&lookup_table_account.data).unwrap();
+        debug!("lookup table: {:?}", lookup_table);
+    }
 }

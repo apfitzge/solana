@@ -51,7 +51,7 @@ fetch_program memo  3.0.0 MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr BPFLoader2
 fetch_program associated-token-account 1.1.2 ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL BPFLoader2111111111111111111111111111111111
 fetch_program feature-proposal 1.0.0 Feat1YXHhH6t1juaWF74WLcfv4XoNocjXA6sPWHNgAse BPFLoader2111111111111111111111111111111111
 
-echo "${genesis_args[@]}" > spl-genesis-args.sh
+echo "--bpf-program FbXmsPdGqmSPrtbPCuvX16SEWqA3w6Ee16wu6jucFZuG BPFLoader2111111111111111111111111111111111 noop.so ${genesis_args[@]}" > spl-genesis-args.sh
 
 echo
 echo "Available SPL programs:"
