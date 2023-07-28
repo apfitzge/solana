@@ -145,4 +145,13 @@ where
     fn get_slot(&self) -> Result<u64> {
         self.rpc_client().get_slot().map_err(|err| err.into())
     }
+
+    fn transaction_confirmation(
+        &self,
+        signature: &Signature,
+    ) -> Result<Option<solana_sdk::transaction::Result<()>>> {
+        self.rpc_client()
+            .get_signature_status_with_commitment(signature, CommitmentConfig::processed())
+            .map_err(|err| err.into())
+    }
 }

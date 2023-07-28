@@ -122,4 +122,16 @@ impl BenchTpsClient for RpcClient {
     fn get_slot(&self) -> Result<u64> {
         RpcClient::get_slot(self).map_err(|err| err.into())
     }
+
+    fn transaction_confirmation(
+        &self,
+        signature: &Signature,
+    ) -> Result<Option<solana_sdk::transaction::Result<()>>> {
+        RpcClient::get_signature_status_with_commitment(
+            self,
+            signature,
+            CommitmentConfig::processed(),
+        )
+        .map_err(|err| err.into())
+    }
 }

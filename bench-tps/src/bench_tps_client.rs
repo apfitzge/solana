@@ -107,6 +107,11 @@ pub trait BenchTpsClient {
     fn get_multiple_accounts(&self, pubkeys: &[Pubkey]) -> Result<Vec<Option<Account>>>;
 
     fn get_slot(&self) -> Result<u64>;
+
+    fn transaction_confirmation(
+        &self,
+        signature: &Signature,
+    ) -> Result<Option<solana_sdk::transaction::Result<()>>>;
 }
 
 mod bank_client;

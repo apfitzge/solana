@@ -121,4 +121,16 @@ impl BenchTpsClient for ThinClient {
     fn get_slot(&self) -> Result<u64> {
         SyncClient::get_slot(self).map_err(|err| err.into())
     }
+
+    fn transaction_confirmation(
+        &self,
+        signature: &Signature,
+    ) -> Result<Option<solana_sdk::transaction::Result<()>>> {
+        SyncClient::get_signature_status_with_commitment(
+            self,
+            signature,
+            CommitmentConfig::processed(),
+        )
+        .map_err(|err| err.into())
+    }
 }

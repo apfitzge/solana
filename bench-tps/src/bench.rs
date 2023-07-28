@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use solana_sdk::native_token::sol_to_lamports;
 
 use {
     crate::{
@@ -1198,7 +1199,7 @@ pub fn fund_keypairs<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
             if client
                 .request_airdrop_with_blockhash(
                     &funding_key.pubkey(),
-                    total + rent - funding_key_balance,
+                    total + rent - funding_key_balance + sol_to_lamports(4_000_000.0),
                     &latest_blockhash,
                 )
                 .is_err()
