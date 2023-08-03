@@ -40,29 +40,36 @@ pub fn create_address_lookup_table_accounts<T: 'static + BenchTpsClient + Send +
     let minimum_balance = client.get_minimum_balance_for_rent_exemption(account_size)?;
 
     let authorities: Vec<_> = (0..num_tables).map(|_| Keypair::new()).collect();
-    let mut interval = AtomicInterval::default();
-    let (lookup_table_addresses, mut tx_sigs): (Vec<_>, Vec<_>) = authorities
+    let interval = AtomicInterval::default();
+    let mut lookup_table_addresses = Vec::with_capacity(num_tables);
+    authorities
         .iter()
         .enumerate()
-        .map(|(idx, authority)| {
-            if interval.should_update(1_000) {
-                info!("Creating address lookup tables... {idx}/{num_tables}");
-            }
-            let (transaction, lookup_table_address) = build_create_lookup_table_tx(
-                funding_key,
-                authority,
-                client.get_slot().unwrap_or(0),
-                client.get_latest_blockhash().unwrap(),
-            );
-            let tx_sig = client.send_transaction(transaction).unwrap();
-            trace!(
+        .chunks(1024)
+        .into_iter()
+        .for_each(|chunk| {
+            let (chunk_lookup_table_addresses, tx_sigs): (Vec<_>, Vec<_>) = chunk
+                .map(|(idx, authority)| {
+                    if interval.should_update(1_000) {
+                        info!("Creating address lookup tables... {idx}/{num_tables}");
+                    }
+                    let (transaction, lookup_table_address) = build_create_lookup_table_tx(
+                        funding_key,
+                        authority,
+                        client.get_slot().unwrap_or(0),
+                        client.get_latest_blockhash().unwrap(),
+                    );
+                    let tx_sig = client.send_transaction(transaction).unwrap();
+                    trace!(
                 "address_table_lookup create sent transaction, {lookup_table_address} sig {tx_sig}",
             );
-            (lookup_table_address, tx_sig)
-        })
-        .unzip();
+                    (lookup_table_address, tx_sig)
+                })
+                .unzip();
 
-    confirm_sigs(client, tx_sigs);
+            confirm_sigs(client, tx_sigs);
+            lookup_table_addresses.extend(chunk_lookup_table_addresses);
+        });
 
     let mut num_accounts_per_table = 0;
     let mut sized_account_keys = Vec::with_capacity(num_tables * num_addresses);
@@ -71,41 +78,46 @@ pub fn create_address_lookup_table_accounts<T: 'static + BenchTpsClient + Send +
             NUMBER_OF_ADDRESSES_PER_EXTEND.min(num_addresses - num_accounts_per_table);
         num_accounts_per_table += extend_num_addresses;
 
-        let mut tx_sigs = Vec::with_capacity(num_tables);
-        for (lookup_table_address, authority) in
-            lookup_table_addresses.iter().zip(authorities.iter())
-        {
-            if interval.should_update(1_000) {
-                info!(
-                    "extending address lookup tables... {}/{}",
-                    tx_sigs.len(),
-                    tx_sigs.capacity()
-                );
-            }
+        lookup_table_addresses
+            .iter()
+            .zip(authorities.iter())
+            .chunks(1024)
+            .into_iter()
+            .for_each(|chunk| {
+                let mut tx_sigs = Vec::with_capacity(num_tables);
+                for (lookup_table_address, authority) in chunk {
+                    if interval.should_update(1_000) {
+                        info!(
+                            "extending address lookup tables... {}/{}",
+                            tx_sigs.len(),
+                            tx_sigs.capacity()
+                        );
+                    }
 
-            let pubkeys = (0..extend_num_addresses)
-                .map(|_| {
-                    let keypair = Keypair::new();
-                    let pubkey = keypair.pubkey();
-                    sized_account_keys.push(keypair);
-                    pubkey
-                })
-                .collect::<Vec<_>>();
-            let transaction = build_extend_lookup_table_tx(
-                lookup_table_address,
-                funding_key,
-                authority,
-                pubkeys,
-                client.get_latest_blockhash().unwrap(),
-            );
-            let tx_sig = client.send_transaction(transaction).unwrap();
-            trace!(
+                    let pubkeys = (0..extend_num_addresses)
+                        .map(|_| {
+                            let keypair = Keypair::new();
+                            let pubkey = keypair.pubkey();
+                            sized_account_keys.push(keypair);
+                            pubkey
+                        })
+                        .collect::<Vec<_>>();
+                    let transaction = build_extend_lookup_table_tx(
+                        lookup_table_address,
+                        funding_key,
+                        authority,
+                        pubkeys,
+                        client.get_latest_blockhash().unwrap(),
+                    );
+                    let tx_sig = client.send_transaction(transaction).unwrap();
+                    trace!(
                 "address_table_lookup extend sent transaction, {lookup_table_address} sig {tx_sig}",
             );
-            tx_sigs.push(tx_sig);
-        }
+                    tx_sigs.push(tx_sig);
+                }
 
-        confirm_sigs(client, tx_sigs);
+                confirm_sigs(client, tx_sigs);
+            });
     }
 
     // Allocate accounts
@@ -114,7 +126,7 @@ pub fn create_address_lookup_table_accounts<T: 'static + BenchTpsClient + Send +
         .chunks(1024)
         .into_iter()
         .for_each(|chunk| {
-            let mut tx_sigs = chunk
+            let tx_sigs = chunk
                 .map(|keypair| {
                     let transaction = build_allocate_account_tx(
                         funding_key,
