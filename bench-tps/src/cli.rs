@@ -77,6 +77,7 @@ pub struct Config {
     pub client_node_id: Option<Keypair>,
     pub load_accounts_from_address_lookup_table: Option<(Pubkey, usize)>,
     pub num_lookup_tables: usize,
+    pub account_size: usize,
 }
 
 impl Eq for Config {}
@@ -114,6 +115,7 @@ impl Default for Config {
             client_node_id: None,
             load_accounts_from_address_lookup_table: None,
             num_lookup_tables: 1,
+            account_size: 0,
         }
     }
 }
@@ -414,6 +416,15 @@ pub fn build_args<'a>(version: &'_ str) -> App<'a, '_> {
             .default_value("1")
             .help("number of lookup tables to randomly select from")
         )
+        .arg(
+            Arg::with_name("account_size")
+            .long("account-size")
+            .requires("load_accounts_from_address_lookup_table")
+            .value_name("BYTES")
+            .takes_value(true)
+            .default_value("0")
+            .help("lookup table account size in bytes")
+        )
 }
 
 /// Parses a clap `ArgMatches` structure into a `Config`
@@ -607,6 +618,12 @@ pub fn parse_args(matches: &ArgMatches) -> Result<Config, &'static str> {
         args.num_lookup_tables = num_lookup_tables
             .parse()
             .map_err(|_| "Can't parse num-lookup-tables")?;
+    }
+
+    if let Some(account_size) = matches.value_of("account_size") {
+        args.account_size = account_size
+            .parse()
+            .map_err(|_| "Can't parse account-size")?;
     }
 
     Ok(args)

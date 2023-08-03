@@ -1,6 +1,3 @@
-use itertools::Itertools;
-use solana_sdk::native_token::sol_to_lamports;
-
 use {
     crate::{
         address_table_lookup::create_address_lookup_table_accounts,
@@ -9,6 +6,7 @@ use {
         perf_utils::{sample_txs, SampleStats},
         send_batch::*,
     },
+    itertools::Itertools,
     log::*,
     rand::distributions::{Distribution, Uniform},
     rayon::prelude::*,
@@ -24,7 +22,7 @@ use {
         hash::Hash,
         instruction::{AccountMeta, Instruction},
         message::{v0, Message, VersionedMessage},
-        native_token::Sol,
+        native_token::{sol_to_lamports, Sol},
         pubkey::Pubkey,
         signature::{Keypair, Signer},
         system_instruction,
@@ -399,6 +397,7 @@ where
         num_conflict_groups,
         load_accounts_from_address_lookup_table,
         num_lookup_tables,
+        account_size,
         ..
     } = config;
 
@@ -412,7 +411,9 @@ where
                 &client,
                 &id,
                 number_of_lookup_tables_per_account,
+                account_size,
                 num_lookup_tables,
+                &program_id,
             )
             .unwrap();
             (Some(program_id), lookup_table_accounts)
