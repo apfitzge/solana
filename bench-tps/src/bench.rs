@@ -129,6 +129,7 @@ struct TransactionChunkGenerator<'a, 'b, T: ?Sized> {
     instruction_padding_config: Option<InstructionPaddingConfig>,
     program_id: Option<Pubkey>,
     lookup_tables: Vec<AddressLookupTableAccount>,
+    requested_cost: TransactionRequestedCost,
 }
 
 impl<'a, 'b, T> TransactionChunkGenerator<'a, 'b, T>
@@ -145,6 +146,7 @@ where
         num_conflict_groups: Option<usize>,
         program_id: Option<Pubkey>,
         lookup_tables: Vec<AddressLookupTableAccount>,
+        requested_cost: TransactionRequestedCost,
     ) -> Self {
         let account_chunks = if let Some(num_conflict_groups) = num_conflict_groups {
             KeypairChunks::new_with_conflict_groups(gen_keypairs, chunk_size, num_conflict_groups)
@@ -164,6 +166,7 @@ where
             instruction_padding_config,
             program_id,
             lookup_tables,
+            requested_cost,
         }
     }
 
@@ -201,6 +204,7 @@ where
                 self.use_randomized_compute_unit_price,
                 &self.program_id,
                 &self.lookup_tables,
+                &self.requested_cost,
             )
         };
 
@@ -434,6 +438,13 @@ where
         })
         .collect_vec();
 
+    let requested_cost = TransactionRequestedCost::calculate(
+        load_accounts_from_address_lookup_table
+            .map(|(_, num)| num as u64)
+            .unwrap_or(0),
+        account_size as u64,
+    );
+
     assert!(gen_keypairs.len() >= 2 * tx_count);
     let chunk_generator = TransactionChunkGenerator::new(
         client.clone(),
@@ -445,6 +456,7 @@ where
         num_conflict_groups,
         program_id,
         lookup_tables,
+        requested_cost,
     );
 
     let first_tx_count = loop {
@@ -573,6 +585,7 @@ fn generate_system_txs(
     use_randomized_compute_unit_price: bool,
     program_id: &Option<Pubkey>,
     lookup_tables: &[AddressLookupTableAccount],
+    requested_cost: &TransactionRequestedCost,
 ) -> Vec<TimestampedTransaction> {
     let pairs: Vec<_> = if !reclaim {
         source.iter().zip(dest.iter()).collect()
@@ -618,6 +631,7 @@ fn generate_system_txs(
                             Some(**compute_unit_price),
                             program_id,
                             *address_lookup_table_account,
+                            requested_cost,
                         ),
                         Some(timestamp()),
                     )
@@ -638,11 +652,38 @@ fn generate_system_txs(
                         None,
                         &None,
                         None,
+                        requested_cost,
                     ),
                     Some(timestamp()),
                 )
             })
             .collect()
+    }
+}
+
+struct TransactionRequestedCost {
+    account_data_size: u32,
+    compute_units: u32,
+}
+
+impl TransactionRequestedCost {
+    fn calculate(num_loaded_accounts: u64, account_size: u64) -> Self {
+        let account_data_size = TRANSFER_TRANSACTION_LOADED_ACCOUNTS_DATA_SIZE as u64
+            + num_loaded_accounts * account_size
+            + 2 * 128; // 2 normal sizes accounts
+
+        const ACCOUNT_DATA_COST_PAGE_SIZE: u64 = 32_u64.saturating_mul(1024);
+        const DEFAULT_HEAP_COST: u64 = 8;
+        let data_compute_units = account_data_size
+            .saturating_add(ACCOUNT_DATA_COST_PAGE_SIZE.saturating_sub(1))
+            .saturating_div(ACCOUNT_DATA_COST_PAGE_SIZE)
+            .saturating_mul(DEFAULT_HEAP_COST);
+        let compute_units = data_compute_units + TRANSFER_TRANSACTION_COMPUTE_UNIT as u64;
+
+        Self {
+            account_data_size: account_data_size as u32,
+            compute_units: compute_units as u32,
+        }
     }
 }
 
@@ -655,6 +696,7 @@ fn transfer_with_compute_unit_price_and_padding(
     compute_unit_price: Option<u64>,
     program_id: &Option<Pubkey>,
     address_lookup_table_account: Option<&AddressLookupTableAccount>,
+    requested_cost: &TransactionRequestedCost,
 ) -> VersionedTransaction {
     let from_pubkey = from_keypair.pubkey();
     let transfer_instruction = system_instruction::transfer(&from_pubkey, to, lamports);
@@ -672,13 +714,14 @@ fn transfer_with_compute_unit_price_and_padding(
     let mut instructions = vec![instruction];
     if let Some(compute_unit_price) = compute_unit_price {
         instructions.extend_from_slice(&[
-            ComputeBudgetInstruction::set_compute_unit_limit(TRANSFER_TRANSACTION_COMPUTE_UNIT),
+            ComputeBudgetInstruction::set_compute_unit_limit(requested_cost.compute_units),
             ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
         ])
     }
+
     instructions.extend_from_slice(&[
         ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(
-            TRANSFER_TRANSACTION_LOADED_ACCOUNTS_DATA_SIZE,
+            requested_cost.account_data_size,
         ),
     ]);
 
