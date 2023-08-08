@@ -8,6 +8,7 @@ use {
 #[derive(Default, Debug)]
 pub struct LeaderExecuteAndCommitTimings {
     pub collect_balances_us: u64,
+    pub load_us: u64,
     pub load_execute_us: u64,
     pub freeze_lock_us: u64,
     pub record_us: u64,
@@ -20,6 +21,7 @@ pub struct LeaderExecuteAndCommitTimings {
 impl LeaderExecuteAndCommitTimings {
     pub fn accumulate(&mut self, other: &LeaderExecuteAndCommitTimings) {
         saturating_add_assign!(self.collect_balances_us, other.collect_balances_us);
+        saturating_add_assign!(self.load_us, other.load_us);
         saturating_add_assign!(self.load_execute_us, other.load_execute_us);
         saturating_add_assign!(self.freeze_lock_us, other.freeze_lock_us);
         saturating_add_assign!(self.record_us, other.record_us);
@@ -36,6 +38,7 @@ impl LeaderExecuteAndCommitTimings {
             ("id", id as i64, i64),
             ("slot", slot as i64, i64),
             ("collect_balances_us", self.collect_balances_us as i64, i64),
+            ("load_us", self.load_us as i64, i64),
             ("load_execute_us", self.load_execute_us as i64, i64),
             ("freeze_lock_us", self.freeze_lock_us as i64, i64),
             ("record_us", self.record_us as i64, i64),

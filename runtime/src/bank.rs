@@ -1935,10 +1935,9 @@ impl Bank {
 
     /// Process reward distribution for the block if it is inside reward interval.
     fn distribute_partitioned_epoch_rewards(&mut self) {
-        let EpochRewardStatus::Active(status) = &self.epoch_reward_status
-            else {
-                return;
-            };
+        let EpochRewardStatus::Active(status) = &self.epoch_reward_status else {
+            return;
+        };
 
         let height = self.block_height();
         let start_block_height = status.start_block_height;
@@ -5659,7 +5658,7 @@ impl Bank {
             .unwrap()
             .sort_and_unload(Percentage::from(SHRINK_LOADED_PROGRAMS_TO_PERCENTAGE));
 
-        debug!(
+        error!(
             "check: {}us load: {}us execute: {}us txs_len={}",
             check_time.as_us(),
             load_time.as_us(),

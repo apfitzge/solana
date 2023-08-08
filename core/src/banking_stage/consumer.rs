@@ -444,6 +444,7 @@ impl Consumer {
             txs,
             pre_results
         ));
+        error!("cost_model_us: {cost_model_us}");
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -456,6 +457,8 @@ impl Consumer {
             })
         ));
 
+        error!("lock_us: {lock_us}");
+
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
         // and WouldExceedMaxAccountDataCostLimit
@@ -464,6 +467,7 @@ impl Consumer {
 
         // Once the accounts are new transactions can enter the pipeline to process them
         let (_, unlock_us) = measure_us!(drop(batch));
+        error!("unlock_us: {unlock_us}");
 
         let ExecuteAndCommitTransactionsOutput {
             ref mut retryable_transaction_indexes,
@@ -471,6 +475,8 @@ impl Consumer {
             ref commit_transactions_result,
             ..
         } = execute_and_commit_transactions_output;
+
+        error!("execute_and_commit_timings: {execute_and_commit_timings:?}");
 
         // once feature `apply_cost_tracker_during_replay` is activated, leader shall no longer
         // adjust block with executed cost (a behavior more inline with bankless leader), it

@@ -119,12 +119,39 @@ pub struct AppendVecStoredAccountMeta<'append_vec> {
 
 impl<'append_vec> AppendVecStoredAccountMeta<'append_vec> {
     pub fn clone_account(&self) -> AccountSharedData {
+        use solana_measure::measure_us;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let lock = LOCK.lock().unwrap();
+
+        let (mut data, alloc_time_us) = measure_us!(vec![0; self.data.len()]);
+        let (_, copy_time_us) = measure_us!({
+            const CHUNK_SIZE: usize = 1024; // 1024 bytes at a time
+
+            let mut start = 0;
+            while start < self.data.len() {
+                let end = std::cmp::min(start + CHUNK_SIZE, self.data.len());
+                let src = &self.data[start..end];
+                let dst = &mut data[start..end];
+                dst.copy_from_slice(src);
+                start += CHUNK_SIZE;
+            }
+        });
+
+        drop(lock);
+
+        error!(
+            "clone_account - alloc: {} copy: {} len: {}",
+            alloc_time_us,
+            copy_time_us,
+            data.len(),
+        );
+
         AccountSharedData::from(Account {
             lamports: self.account_meta.lamports,
             owner: self.account_meta.owner,
             executable: self.account_meta.executable,
             rent_epoch: self.account_meta.rent_epoch,
-            data: self.data.to_vec(),
+            data,
         })
     }
 

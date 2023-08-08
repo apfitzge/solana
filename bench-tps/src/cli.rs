@@ -396,6 +396,7 @@ pub fn build_args<'a>(version: &'_ str) -> App<'a, '_> {
                 .takes_value(true)
                 .number_of_values(2)
                 .multiple(true)
+                .required(false)
                 .help(
                     "Specify a SBF program to load number of accounts from ATL in bench-tps Transfer transaction; \
                      When thhis argument is used, bench-tps creates a address-lookup account with NUMBER_OF_ACCOUNTS_TO_LOAD\
@@ -409,20 +410,22 @@ pub fn build_args<'a>(version: &'_ str) -> App<'a, '_> {
         .arg(
             Arg::with_name("num_lookup_tables")
             .long("num-lookup-tables")
-            .requires("load_accounts_from_address_lookup_table")
+            // .requires("load_accounts_from_address_lookup_table")
             .value_name("NUM")
             .takes_value(true)
             .validator(|s| is_within_range(s, 1..))
             .default_value("1")
+            .required(false)
             .help("number of lookup tables to randomly select from")
         )
         .arg(
             Arg::with_name("account_size")
             .long("account-size")
-            .requires("load_accounts_from_address_lookup_table")
+            // .requires("load_accounts_from_address_lookup_table")
             .value_name("BYTES")
             .takes_value(true)
             .default_value("0")
+            .required(false)
             .help("lookup table account size in bytes")
         )
 }
