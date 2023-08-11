@@ -9,6 +9,7 @@ use {
     crossbeam_channel::RecvTimeoutError,
     solana_perf::packet::PacketBatch,
     solana_runtime::bank_forks::BankForks,
+    solana_sdk::TRACE_PUBKEY,
     std::{
         sync::{Arc, RwLock},
         time::{Duration, Instant},
@@ -164,7 +165,20 @@ impl PacketDeserializer {
             packet_clone
                 .meta_mut()
                 .set_round_compute_unit_price(round_compute_unit_price_enabled);
-            ImmutableDeserializedPacket::new(packet_clone).ok()
+            let packet = ImmutableDeserializedPacket::new(packet_clone).ok();
+            if let Some(packet) = &packet {
+                if TRACE_PUBKEY
+                    == packet
+                        .transaction()
+                        .get_message()
+                        .message
+                        .static_account_keys()[0]
+                {
+                    let signature = packet.transaction().get_signatures()[0];
+                    error!("{signature}: TRACE_PUBKEY deserialize_packets");
+                }
+            }
+            packet
         })
     }
 }
