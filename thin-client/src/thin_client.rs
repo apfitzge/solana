@@ -29,6 +29,7 @@ use {
         timing::duration_as_ms,
         transaction::{self, Transaction, VersionedTransaction},
         transport::Result as TransportResult,
+        TRACE_PUBKEY,
     },
     std::{
         io,
@@ -634,6 +635,13 @@ where
         &self,
         batch: Vec<VersionedTransaction>,
     ) -> TransportResult<()> {
+        for t in &batch {
+            if TRACE_PUBKEY == t.message.static_account_keys()[0] {
+                let signature = t.signatures[0];
+                error!("{signature}: TRACE_PUBKEY sent")
+            }
+        }
+
         let conn = self.connection_cache.get_connection(self.tpu_addr());
         let buffers = batch
             .into_par_iter()

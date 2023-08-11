@@ -323,15 +323,7 @@ pub fn check_for_tracer_packet(packet: &mut Packet) -> bool {
             true
         }
         Some(pubkey) if pubkey == solana_sdk::TRACE_PUBKEY.as_ref() => {
-            let offsets = get_packet_offsets(packet, 0, false);
-            let signature = Signature::new(
-                packet
-                    .data(
-                        offsets.sig_start as usize..(offsets.sig_start + offsets.sig_len) as usize,
-                    )
-                    .unwrap(),
-            );
-            error!("{signature}: TRACE_PUBKEY check_for_tracer_packet");
+            error!("TRACE_PUBKEY check_for_tracer_packet");
 
             packet.meta_mut().set_tracer(true);
             true

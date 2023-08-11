@@ -628,6 +628,14 @@ async fn packet_batch_sender(
                 || (!packet_batch.is_empty() && elapsed >= coalesce)
             {
                 let len = packet_batch.len();
+
+                for packet in &packet_batch {
+                    if packet.is_trace_packet() {
+                        error!("TRACE_PUBKEY quic send batch");
+                        break;
+                    }
+                }
+
                 if let Err(e) = packet_sender.send(packet_batch) {
                     stats
                         .total_packet_batch_send_err

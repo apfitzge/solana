@@ -201,10 +201,6 @@ pub trait AsyncClient {
         transactions: Vec<VersionedTransaction>,
     ) -> Result<()> {
         for t in transactions {
-            if TRACE_PUBKEY == t.message.static_account_keys()[0] {
-                let signature = t.signatures[0];
-                error!("{signature}: TRACE sent")
-            }
             self.async_send_versioned_transaction(t)?;
         }
         Ok(())

@@ -160,6 +160,7 @@ impl FetchStage {
             tpu_sockets
                 .into_iter()
                 .map(|socket| {
+                    panic!("don't do this.");
                     streamer::receiver(
                         socket,
                         exit.clone(),

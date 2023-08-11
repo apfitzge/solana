@@ -5,6 +5,7 @@ use {
     bitflags::bitflags,
     serde::{Deserialize, Serialize},
     serde_with::{serde_as, Bytes},
+    solana_program::pubkey::Pubkey,
     std::{
         fmt, io,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -157,6 +158,15 @@ impl Packet {
             .with_fixint_encoding()
             .reject_trailing_bytes()
             .deserialize(bytes)
+    }
+
+    pub fn is_trace_packet(&self) -> bool {
+        let first_pubkey_start: usize = 69;
+        let Some(first_pubkey_end) = first_pubkey_start.checked_add(core::mem::size_of::<Pubkey>())
+        else {
+            return false;
+        };
+        matches!(self.data(first_pubkey_start..first_pubkey_end), Some(pubkey) if pubkey == crate::TRACE_PUBKEY.as_ref())
     }
 }
 
