@@ -126,6 +126,16 @@ impl SigVerifier for TransactionSigVerifier {
         packet_batches: Vec<PacketBatch>,
     ) -> Result<(), SigVerifyServiceError<Self::SendType>> {
         let tracer_packet_stats_to_send = std::mem::take(&mut self.tracer_packet_stats);
+
+        'outer: for batch in packet_batches.iter() {
+            for packet in batch.iter() {
+                if packet.meta().is_tracer_packet() {
+                    error!("TRACE_PUBKEY SV::send_packets");
+                    break 'outer;
+                }
+            }
+        }
+
         self.packet_sender.send(BankingPacketBatch::new((
             packet_batches,
             Some(tracer_packet_stats_to_send),
