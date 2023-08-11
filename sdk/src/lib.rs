@@ -186,3 +186,6 @@ mod tests {
         assert_eq!(i, u64::MAX);
     }
 }
+
+pub const TRACE_PUBKEY: pubkey::Pubkey =
+    solana_program::pubkey!("Do1uTFyeuSp2VjQCfvv2sxhhwSLTPt2xcZ6E9ma5Vesu");
