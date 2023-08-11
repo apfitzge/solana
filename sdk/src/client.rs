@@ -9,22 +9,26 @@
 
 #![cfg(feature = "full")]
 
-use crate::{
-    account::Account,
-    clock::Slot,
-    commitment_config::CommitmentConfig,
-    epoch_info::EpochInfo,
-    fee_calculator::{FeeCalculator, FeeRateGovernor},
-    hash::Hash,
-    instruction::Instruction,
-    message::Message,
-    pubkey::Pubkey,
-    signature::{Keypair, Signature},
-    signer::Signer,
-    signers::Signers,
-    system_instruction,
-    transaction::{self, Transaction, VersionedTransaction},
-    transport::Result,
+use {
+    crate::{
+        account::Account,
+        clock::Slot,
+        commitment_config::CommitmentConfig,
+        epoch_info::EpochInfo,
+        fee_calculator::{FeeCalculator, FeeRateGovernor},
+        hash::Hash,
+        instruction::Instruction,
+        message::Message,
+        pubkey::Pubkey,
+        signature::{Keypair, Signature},
+        signer::Signer,
+        signers::Signers,
+        system_instruction,
+        transaction::{self, Transaction, VersionedTransaction},
+        transport::Result,
+        TRACE_PUBKEY,
+    },
+    log::error,
 };
 
 pub trait Client: SyncClient + AsyncClient {
@@ -197,6 +201,10 @@ pub trait AsyncClient {
         transactions: Vec<VersionedTransaction>,
     ) -> Result<()> {
         for t in transactions {
+            if TRACE_PUBKEY == t.message.static_account_keys()[0] {
+                let signature = t.signatures[0];
+                error!("{signature}: TRACE sent")
+            }
             self.async_send_versioned_transaction(t)?;
         }
         Ok(())
