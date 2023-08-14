@@ -68,6 +68,9 @@ struct PacketChunk {
     // and thus the end of the slice in the Packet data array
     // into which the bytes will be copied
     pub end_of_chunk: usize,
+
+    // timestamp of when the chunk was received
+    pub received: Instant,
 }
 
 // A struct to accumulate the bytes making up
@@ -674,12 +677,22 @@ async fn packet_batch_sender(
                 let i = packet_batch.len() - 1;
                 *packet_batch[i].meta_mut() = packet_accumulator.meta;
                 let num_chunks = packet_accumulator.chunks.len();
-                for chunk in packet_accumulator.chunks {
+                for chunk in &packet_accumulator.chunks {
                     packet_batch[i].buffer_mut()[chunk.offset..chunk.end_of_chunk]
                         .copy_from_slice(&chunk.bytes);
                 }
 
                 total_bytes += packet_batch[i].meta().size;
+
+                if packet_batch[i].is_trace_packet() {
+                    let timestamps: Vec<_> = packet_accumulator
+                        .chunks
+                        .iter()
+                        .map(|x| x.received)
+                        .collect();
+                    let now = std::time::Instant::now();
+                    error!("TRACE_PUBKEY quic packet_accumulated - now={now:?} chunks_received: [{timestamps:?}]");
+                }
 
                 stats
                     .total_chunks_processed_by_batcher
@@ -839,6 +852,7 @@ async fn handle_chunk(
                         bytes: chunk.bytes,
                         offset: offset as usize,
                         end_of_chunk,
+                        received: std::time::Instant::now(),
                     });
 
                     accum.meta.size = std::cmp::max(accum.meta.size, end_of_chunk);
@@ -1413,6 +1427,7 @@ pub mod test {
                     bytes,
                     offset,
                     end_of_chunk: size,
+                    received: std::time::Instant::now(),
                 }],
             };
             ptk_sender.send(packet_accum).await.unwrap();

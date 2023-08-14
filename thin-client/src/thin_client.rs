@@ -624,10 +624,24 @@ where
         &self,
         transaction: VersionedTransaction,
     ) -> TransportResult<Signature> {
+        let mut message = None;
+
+        if TRACE_PUBKEY == transaction.message.static_account_keys()[0] {
+            let signature = transaction.signatures[0];
+            let inner = format!("{signature}: TRACE_PUBKEY sent");
+            error!("before send {inner}");
+            message = Some(inner);
+        }
+
         let conn = self.connection_cache.get_connection(self.tpu_addr());
         let wire_transaction =
             bincode::serialize(&transaction).expect("serialize Transaction in send_batch");
         conn.send_data(&wire_transaction)?;
+
+        if let Some(message) = message {
+            error!("after send {message}");
+        }
+
         Ok(transaction.signatures[0])
     }
 
@@ -635,19 +649,31 @@ where
         &self,
         batch: Vec<VersionedTransaction>,
     ) -> TransportResult<()> {
-        for t in &batch {
-            if TRACE_PUBKEY == t.message.static_account_keys()[0] {
-                let signature = t.signatures[0];
-                error!("{signature}: TRACE_PUBKEY sent")
-            }
-        }
+        // let mut message = None;
+        // for t in &batch {
+        //     if TRACE_PUBKEY == t.message.static_account_keys()[0] {
+        //         let signature = t.signatures[0];
+        //         let inner = format!("{signature}: TRACE_PUBKEY sent");
+        //         error!("before send {inner}");
+        //         message = Some(inner);
+        //         break;
+        //     }
+        // }
 
-        let conn = self.connection_cache.get_connection(self.tpu_addr());
-        let buffers = batch
-            .into_par_iter()
-            .map(|tx| bincode::serialize(&tx).expect("serialize Transaction in send_batch"))
-            .collect::<Vec<_>>();
-        conn.send_data_batch(&buffers)?;
+        // let conn = self.connection_cache.get_connection(self.tpu_addr());
+        // let buffers = batch
+        //     .into_par_iter()
+        //     .map(|tx| bincode::serialize(&tx).expect("serialize Transaction in send_batch"))
+        //     .collect::<Vec<_>>();
+        // conn.send_data_batch(&buffers)?;
+
+        // if let Some(message) = message {
+        //     error!("after send {message}");
+        // }
+        // Ok(())
+        for tx in batch {
+            self.async_send_versioned_transaction(tx)?;
+        }
         Ok(())
     }
 }
