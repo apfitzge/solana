@@ -15,7 +15,10 @@ use {
         unprocessed_packet_batches::*,
         unprocessed_transaction_storage::{ThreadType, UnprocessedTransactionStorage},
     },
-    crate::{banking_trace::BankingPacketReceiver, tracer_packet_stats::TracerPacketStats},
+    crate::{
+        banking_trace::BankingPacketReceiver, invalid_fee_payer_filter::InvalidFeePayerFilter,
+        tracer_packet_stats::TracerPacketStats,
+    },
     crossbeam_channel::RecvTimeoutError,
     histogram::Histogram,
     solana_client::connection_cache::ConnectionCache,
@@ -318,6 +321,7 @@ impl BankingStage {
         connection_cache: Arc<ConnectionCache>,
         bank_forks: Arc<RwLock<BankForks>>,
         prioritization_fee_cache: &Arc<PrioritizationFeeCache>,
+        invalid_fee_payer_filter: Arc<InvalidFeePayerFilter>,
     ) -> Self {
         Self::new_num_threads(
             cluster_info,
@@ -332,6 +336,7 @@ impl BankingStage {
             connection_cache,
             bank_forks,
             prioritization_fee_cache,
+            invalid_fee_payer_filter,
         )
     }
 
@@ -349,6 +354,7 @@ impl BankingStage {
         connection_cache: Arc<ConnectionCache>,
         bank_forks: Arc<RwLock<BankForks>>,
         prioritization_fee_cache: &Arc<PrioritizationFeeCache>,
+        invalid_fee_payer_filter: Arc<InvalidFeePayerFilter>,
     ) -> Self {
         assert!(num_threads >= MIN_TOTAL_THREADS);
         // Single thread to generate entries from many banks.
@@ -412,6 +418,7 @@ impl BankingStage {
                 let mut packet_receiver =
                     PacketReceiver::new(id, packet_receiver, bank_forks.clone());
                 let poh_recorder = poh_recorder.clone();
+                let invalid_fee_payer_filter = invalid_fee_payer_filter.clone();
 
                 let committer = Committer::new(
                     transaction_status_sender.clone(),
@@ -427,6 +434,7 @@ impl BankingStage {
                     data_budget.clone(),
                 );
                 let consumer = Consumer::new(
+                    invalid_fee_payer_filter,
                     committer,
                     poh_recorder.read().unwrap().new_recorder(),
                     QosService::new(id),
@@ -680,6 +688,7 @@ mod tests {
                 Arc::new(ConnectionCache::new("connection_cache_test")),
                 bank_forks,
                 &Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             drop(non_vote_sender);
             drop(tpu_vote_sender);
@@ -736,6 +745,7 @@ mod tests {
                 Arc::new(ConnectionCache::new("connection_cache_test")),
                 bank_forks,
                 &Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
             trace!("sending bank");
             drop(non_vote_sender);
@@ -817,6 +827,7 @@ mod tests {
                 Arc::new(ConnectionCache::new("connection_cache_test")),
                 bank_forks,
                 &Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
 
             // fund another account so we can send 2 good transactions in a single batch.
@@ -979,6 +990,7 @@ mod tests {
                     Arc::new(ConnectionCache::new("connection_cache_test")),
                     bank_forks,
                     &Arc::new(PrioritizationFeeCache::new(0u64)),
+                    Arc::default(),
                 );
 
                 // wait for banking_stage to eat the packets
@@ -1173,6 +1185,7 @@ mod tests {
                 Arc::new(ConnectionCache::new("connection_cache_test")),
                 bank_forks,
                 &Arc::new(PrioritizationFeeCache::new(0u64)),
+                Arc::default(),
             );
 
             let keypairs = (0..100).map(|_| Keypair::new()).collect_vec();

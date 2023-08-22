@@ -11,6 +11,7 @@ use {
             GossipVerifiedVoteHashSender, VerifiedVoteSender, VoteTracker,
         },
         fetch_stage::FetchStage,
+        invalid_fee_payer_filter::InvalidFeePayerFilter,
         sigverify::TransactionSigVerifier,
         sigverify_stage::SigVerifyStage,
         staked_nodes_updater_service::StakedNodesUpdaterService,
@@ -190,6 +191,8 @@ impl Tpu {
         )
         .unwrap();
 
+        let invalid_fee_payer_filter = Arc::new(InvalidFeePayerFilter::default());
+
         let sigverify_stage = {
             let verifier = TransactionSigVerifier::new(non_vote_sender);
             SigVerifyStage::new(packet_receiver, verifier, "tpu-verifier")
@@ -232,6 +235,7 @@ impl Tpu {
             connection_cache.clone(),
             bank_forks.clone(),
             prioritization_fee_cache,
+            invalid_fee_payer_filter,
         );
 
         let (entry_receiver, tpu_entry_notifier) =
