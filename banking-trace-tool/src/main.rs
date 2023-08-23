@@ -54,7 +54,10 @@ enum TraceToolMode {
         priority_sort: bool,
         /// Filter already-processed tx signatures from logging. This requires using RPC client.
         #[arg(short, long)]
-        filter_already_processed: bool,
+        check_history: bool,
+        /// Filter transactions using any of these keys.
+        #[arg(short, long)]
+        filter_keys: Vec<Pubkey>,
         /// Start of slot range (inclusive).
         start: Slot,
         /// End of slot range (inclusive).
@@ -114,13 +117,15 @@ fn main() {
             start,
             end,
             priority_sort,
-            filter_already_processed,
+            check_history,
+            filter_keys,
         } => do_log_slot_range(
             &event_file_paths,
             start,
             end,
             priority_sort,
-            filter_already_processed,
+            check_history,
+            filter_keys,
         ),
         TraceToolMode::SaveBlockHistory { slot } => {
             save_history_before(slot);

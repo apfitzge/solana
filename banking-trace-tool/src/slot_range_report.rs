@@ -1,12 +1,15 @@
 use {
-    crate::{block_history::load_history, process::process_event_files},
+    crate::{
+        block_history::{load_history, FilterKind},
+        process::process_event_files,
+    },
     chrono::{DateTime, Utc},
     solana_core::{
         banking_stage::immutable_deserialized_packet::ImmutableDeserializedPacket,
         banking_trace::{BankingPacketBatch, ChannelLabel, TimedTracedEvent, TracedEvent},
     },
-    solana_sdk::clock::Slot,
-    std::{path::PathBuf, time::SystemTime},
+    solana_sdk::{clock::Slot, pubkey::Pubkey},
+    std::{collections::HashSet, path::PathBuf, time::SystemTime},
 };
 
 pub fn do_log_slot_range(
@@ -14,11 +17,12 @@ pub fn do_log_slot_range(
     start: Slot,
     end: Slot,
     priority_sort: bool,
-    filter_already_processed: bool,
+    check_history: bool,
+    filter_keys: Vec<Pubkey>,
 ) -> std::io::Result<()> {
     let mut collector = SlotRangeCollector::new(start, end);
     process_event_files(event_file_paths, &mut |event| collector.handle_event(event))?;
-    collector.report(priority_sort, filter_already_processed);
+    collector.report(priority_sort, check_history, filter_keys);
     Ok(())
 }
 
@@ -49,8 +53,9 @@ impl SlotRangeCollector {
         }
     }
 
-    fn report(self, priority_sort: bool, filter_already_processed: bool) {
-        let history_checker = if filter_already_processed {
+    fn report(self, priority_sort: bool, check_history: bool, filter_keys: Vec<Pubkey>) {
+        let filter_keys = filter_keys.into_iter().collect::<HashSet<_>>();
+        let history_checker = if check_history {
             assert!(
                 self.packets.len() == 1,
                 "only support history filtering for single slot"
@@ -64,7 +69,9 @@ impl SlotRangeCollector {
         for (slot, slot_timestamp, mut packets) in self.packets.into_iter() {
             println!("{slot} ({slot_timestamp}): [");
 
-            if filter_already_processed {
+            if check_history {
+                let mut blockhash_missing_count = 0;
+                let mut already_processed_count = 0;
                 if let Some(history_checker) = history_checker.as_ref() {
                     packets.retain(|x| {
                         let recent_blockhash = format!(
@@ -72,12 +79,47 @@ impl SlotRangeCollector {
                             x.1.transaction().get_message().message.recent_blockhash()
                         );
                         let sig = x.1.transaction().get_signatures()[0];
-                        !history_checker.should_filter(&recent_blockhash, &sig)
+                        match history_checker.should_filter(&recent_blockhash, &sig) {
+                            Some(FilterKind::MissingBlockhash) => {
+                                blockhash_missing_count += 1;
+                                false
+                            }
+                            Some(FilterKind::AlreadyProcessed) => {
+                                already_processed_count += 1;
+                                false
+                            }
+                            None => true,
+                        }
                     });
+
+                    println!(
+                        "Retained: {}, Filtered: {} missing blockhash, {} already processed",
+                        packets.len(),
+                        blockhash_missing_count,
+                        already_processed_count
+                    );
                 } else {
                     panic!("required");
                 }
             }
+
+            let mut filtered_key_count = 0;
+            packets.retain(|p| {
+                let message = &p.1.transaction().get_message().message;
+                let account_keys = message.static_account_keys();
+                if account_keys.iter().any(|k| filter_keys.contains(k)) {
+                    filtered_key_count += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+
+            println!(
+                "Retained: {} Filtered: {} packets with filter keys",
+                packets.len(),
+                filtered_key_count
+            );
 
             if priority_sort {
                 packets.sort_by(|a, b| b.1.priority().cmp(&a.1.priority()));

@@ -20,12 +20,23 @@ pub struct HistoryChecker {
     actual_signatures: HashMap<Signature, usize>, // signature to index in block
 }
 
+pub enum FilterKind {
+    MissingBlockhash,
+    AlreadyProcessed,
+}
+
 impl HistoryChecker {
-    /// Returns `true` if a transaction does not meet historical requirements:
+    /// Returns `Some(FilterKind)` if a transaction does not meet historical requirements:
     /// 1. blockhash does not appear recently
     /// 2. transaction signature already appears in a block
-    pub fn should_filter(&self, recent_blockhash: &String, sig: &Signature) -> bool {
-        !self.blockhashes.contains(recent_blockhash) || self.signatures.contains(sig)
+    pub fn should_filter(&self, recent_blockhash: &String, sig: &Signature) -> Option<FilterKind> {
+        if !self.blockhashes.contains(recent_blockhash) {
+            Some(FilterKind::MissingBlockhash)
+        } else if self.signatures.contains(sig) {
+            Some(FilterKind::AlreadyProcessed)
+        } else {
+            None
+        }
     }
 
     /// Check if the slot actually contained a signature.
