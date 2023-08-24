@@ -127,6 +127,12 @@ impl SlotRangeCollector {
 
             for (timestamp, packet) in packets {
                 let ip = packet.original_packet().meta().addr;
+                let forwarded = packet
+                    .original_packet()
+                    .meta()
+                    .forwarded()
+                    .then_some('*')
+                    .unwrap_or(' ');
                 // TODO: verbosity
                 let priority = packet.priority();
                 let compute_units = packet.compute_unit_limit();
@@ -158,7 +164,7 @@ impl SlotRangeCollector {
                     .map(|(_, k)| *k)
                     .collect();
 
-                println!("  [{timestamp}] {included}{signature}: ({ip}, {priority}, {compute_units}) - [{write_keys:?}] [{read_keys:?}],");
+                println!("  [{timestamp}] {included}{signature}: ({forwarded}{ip}, {priority}, {compute_units}) - [{write_keys:?}] [{read_keys:?}],");
 
                 // println!("  {:?},", packet);
             }
