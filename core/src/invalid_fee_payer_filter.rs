@@ -4,38 +4,66 @@
 //!
 
 use {
-    dashmap::DashSet,
+    solana_bloom::bloom::{AtomicBloom, Bloom},
     solana_sdk::{pubkey::Pubkey, timing::AtomicInterval},
     std::sync::atomic::{AtomicUsize, Ordering},
 };
 
-#[derive(Default)]
 pub struct InvalidFeePayerFilter {
-    recent_invalid_fee_payers: DashSet<Pubkey>,
+    filter_index: AtomicUsize,
+    filters: [AtomicBloom<Pubkey>; 2],
+
     stats: InvalidFeePayerFilterStats,
 }
 
-impl InvalidFeePayerFilter {
-    /// Reset the filter if enough time has passed since last reset.
-    pub fn reset_on_interval(&self) {
-        if self.stats.try_report() {
-            self.recent_invalid_fee_payers.clear();
+impl Default for InvalidFeePayerFilter {
+    fn default() -> Self {
+        const NUM_INVALID_FEE_PAYERS: usize = 4096;
+        const FALSE_POSITIVE_RATE: f64 = 0.000001;
+        const MAX_BITS: usize = 16 * 1024 * 8;
+
+        let bloom0 = Bloom::random(NUM_INVALID_FEE_PAYERS, FALSE_POSITIVE_RATE, MAX_BITS);
+        let bloom1 = Bloom::random(NUM_INVALID_FEE_PAYERS, FALSE_POSITIVE_RATE, MAX_BITS);
+
+        Self {
+            filter_index: AtomicUsize::new(0),
+            filters: [bloom0.into(), bloom1.into()],
+            stats: InvalidFeePayerFilterStats::default(),
         }
     }
+}
 
+impl InvalidFeePayerFilter {
     /// Add a pubkey to the filter.
-    pub fn add(&self, pubkey: Pubkey) {
+    pub fn add(&self, pubkey: &Pubkey) {
         self.stats.num_added.fetch_add(1, Ordering::Relaxed);
-        self.recent_invalid_fee_payers.insert(pubkey);
+        let filter_index = self.filter_index.load(Ordering::Acquire);
+        self.filters[filter_index].add(pubkey);
     }
 
     /// Check if a pubkey is in the filter.
     pub fn should_reject(&self, pubkey: &Pubkey) -> bool {
-        let should_reject = self.recent_invalid_fee_payers.contains(pubkey);
+        let filter_index = self.filter_index.load(Ordering::Acquire);
+        let should_reject = self.filters[filter_index].contains(pubkey);
         if should_reject {
             self.stats.num_rejects.fetch_add(1, Ordering::Relaxed);
         }
         should_reject
+    }
+
+    /// Reset the filter if enough time has passed since last reset.
+    pub fn reset_on_interval(&self) {
+        if self.stats.try_report() {
+            self.reset();
+        }
+    }
+
+    /// Atomically toggle `filter_index` between 0 and 1, and clear the filter at the old index.
+    /// This will not block any other threads, however could clear bits for an in-progress
+    /// `should_reject` or `add`.
+    fn reset(&self) {
+        let old_filter_index = self.filter_index.fetch_xor(1, Ordering::AcqRel);
+        self.filters[old_filter_index].clear();
     }
 }
 
@@ -78,11 +106,11 @@ mod tests {
         let pubkey2 = Pubkey::new_unique();
         assert!(!invalid_fee_payer_filter.should_reject(&pubkey1));
         assert!(!invalid_fee_payer_filter.should_reject(&pubkey2));
-        invalid_fee_payer_filter.add(pubkey1);
+        invalid_fee_payer_filter.add(&pubkey1);
         assert!(invalid_fee_payer_filter.should_reject(&pubkey1));
         assert!(!invalid_fee_payer_filter.should_reject(&pubkey2));
 
-        invalid_fee_payer_filter.reset_on_interval();
+        invalid_fee_payer_filter.reset();
         assert!(!invalid_fee_payer_filter.should_reject(&pubkey1));
         assert!(!invalid_fee_payer_filter.should_reject(&pubkey2));
     }

@@ -664,7 +664,7 @@ impl Consumer {
                     TransactionError::AccountNotFound
                     | TransactionError::InsufficientFundsForFee
                     | TransactionError::InvalidAccountForFee => {
-                        self.invalid_fee_payer_filter.add(*tx.message().fee_payer());
+                        self.invalid_fee_payer_filter.add(tx.message().fee_payer());
                     }
                     _ => {}
                 }
