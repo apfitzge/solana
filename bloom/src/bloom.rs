@@ -194,7 +194,7 @@ impl<T: BloomHashIndex> AtomicBloom<T> {
         })
     }
 
-    pub fn clear_for_tests(&mut self) {
+    pub fn clear(&self) {
         self.bits.iter().for_each(|bit| {
             bit.store(0u64, Ordering::Relaxed);
         });
