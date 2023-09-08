@@ -7,6 +7,7 @@ mod transaction;
 mod transaction_id_generator;
 mod transaction_packet_container;
 mod transaction_priority_id;
+mod prio_graph_scheduler;
 
 #[allow(dead_code)]
 pub(crate) mod central_scheduler_banking_stage;
