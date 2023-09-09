@@ -21,6 +21,10 @@ impl prio_graph::Transaction<TransactionPriorityId, Pubkey> for SanitizedTransac
         self.id
     }
 
+    fn reward(&self) -> u64 {
+        self.id.priority
+    }
+
     fn check_resource_keys<F: FnMut(&Pubkey, AccessKind)>(&self, mut checker: F) {
         self.transaction
             .message()

@@ -51,9 +51,15 @@ impl PrioGraphScheduler {
             .take_top_n(MAX_TRANSACTIONS_PER_SCHEDULING_PASS)
             .collect_vec();
 
+        // Priority modification for transactions at top-of-book.
+        fn top_level_prioritization(priority_id: TransactionPriorityId, next_level_rewards: u64) -> u64 {
+            priority_id.priority + (next_level_rewards / 4)
+        }
+
         let mut graph = PrioGraph::new(
             container.transaction_lookup_map(),
             ids.iter().rev().copied(),
+            top_level_prioritization,
         );
 
         // Send batches of 1 transactions for all schedulable transactions at top-of-book.
