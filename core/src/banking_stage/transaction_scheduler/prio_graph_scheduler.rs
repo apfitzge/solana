@@ -17,7 +17,7 @@ use {
     },
     crossbeam_channel::{Receiver, Sender},
     itertools::{izip, Itertools},
-    prio_graph::{GraphNode, PrioGraph, Selection, Transaction},
+    prio_graph::{GraphNode, PrioGraph, Selection},
     solana_sdk::pubkey::Pubkey,
 };
 
@@ -31,15 +31,13 @@ pub(crate) struct PrioGraphScheduler {
 
 impl PrioGraphScheduler {
     pub(crate) fn new(
-        account_locks: ThreadAwareAccountLocks<Pubkey>,
-        batch_id_generator: BatchIdGenerator,
         consume_work_senders: Vec<Sender<ConsumeWork>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
     ) -> Self {
         Self {
             in_flight_tracker: InFlightTracker::new(consume_work_senders.len()),
-            account_locks,
-            batch_id_generator,
+            account_locks: ThreadAwareAccountLocks::new(consume_work_senders.len()),
+            batch_id_generator: BatchIdGenerator::default(),
             consume_work_senders,
             finished_consume_work_receiver,
         }
@@ -64,7 +62,7 @@ impl PrioGraphScheduler {
         let mut num_scheduled = 0;
         while !graph.is_empty() {
             graph.iterate(
-                &mut |id: TransactionPriorityId, node: &GraphNode<TransactionPriorityId>| {
+                &mut |id: TransactionPriorityId, _node: &GraphNode<TransactionPriorityId>| {
                     let transaction = container.get_transaction(&id);
                     let account_locks = transaction.transaction.get_account_locks_unchecked();
                     if let Some(thread_id) = self.account_locks.try_lock_accounts(

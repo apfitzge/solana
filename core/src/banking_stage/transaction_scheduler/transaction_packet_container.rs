@@ -133,12 +133,6 @@ impl TransactionPacketContainer {
         transaction: SanitizedTransaction,
         max_age_slot: Slot,
     ) {
-        let priority = self
-            .id_to_packet
-            .get(&priority_id)
-            .unwrap()
-            .immutable_section()
-            .priority();
         if self.push_id_into_queue(priority_id) {
             self.id_to_transaction_ttl.insert(
                 priority_id,

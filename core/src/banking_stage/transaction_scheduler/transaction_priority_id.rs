@@ -1,6 +1,5 @@
 use {
     crate::banking_stage::scheduler_messages::TransactionId,
-    prio_graph::PriorityId,
     std::fmt::{Display, Formatter},
 };
 

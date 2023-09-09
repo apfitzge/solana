@@ -1,4 +1,4 @@
-use super::transaction_priority_id::TransactionPriorityId;
+use super::{transaction_priority_id::TransactionPriorityId, prio_graph_scheduler::PrioGraphScheduler};
 use {
     super::{
         // multi_iterator_consume_scheduler::MultiIteratorConsumeScheduler,
@@ -12,7 +12,6 @@ use {
         scheduler_messages::{ConsumeWork, FinishedConsumeWork, FinishedForwardWork, ForwardWork},
     },
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError},
-    itertools::izip,
     solana_runtime::bank_forks::BankForks,
     solana_sdk::{
         clock::MAX_PROCESSING_AGE, slot_history::Slot, transaction::SanitizedTransaction,
@@ -46,12 +45,10 @@ pub struct CentralSchedulerBankingStage {
     container: TransactionPacketContainer,
 
     /// Scheduler for consuming transactions
-    // consume_scheduler: MultiIteratorConsumeScheduler,
+    consume_scheduler: PrioGraphScheduler,
     /// Scheduler for forwarding transactions
     forward_scheduler: MultiIteratorForwardScheduler,
 
-    /// Receives finished consume work from consume worker(s)
-    finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
     /// Receives finished forward work from forward worker(s)
     finished_forward_work_receiver: Receiver<FinishedForwardWork>,
 }
@@ -93,9 +90,8 @@ impl CentralSchedulerBankingStage {
             packet_deserializer,
             transaction_id_generator: TransactionIdGenerator::default(),
             container: TransactionPacketContainer::with_capacity(700_000),
-            // consume_scheduler: MultiIteratorConsumeScheduler::new(consume_work_senders),
+            consume_scheduler: PrioGraphScheduler::new(consume_work_senders, finished_consume_work_receiver),
             forward_scheduler: MultiIteratorForwardScheduler::new(forward_work_sender),
-            finished_consume_work_receiver,
             finished_forward_work_receiver,
         }
     }
@@ -110,8 +106,8 @@ impl CentralSchedulerBankingStage {
                 let decision = self.decision_maker.make_consume_or_forward_decision();
                 match decision {
                     BufferedPacketsDecision::Consume(_) => {
-                        // let num_scheduled = self.consume_scheduler.schedule(&mut self.container)?;
-                        // scheduler_metrics.consumed_packet_count += num_scheduled;
+                        let num_scheduled = self.consume_scheduler.schedule(&mut self.container)?;
+                        scheduler_metrics.consumed_packet_count += num_scheduled;
                     }
                     BufferedPacketsDecision::Forward => {
                         let num_scheduled = self.schedule_forward(false)?;
@@ -224,51 +220,40 @@ impl CentralSchedulerBankingStage {
     }
 
     fn receive_and_process_finished_consume_work(&mut self) -> Result<(), SchedulerError> {
-        loop {
-            match self.finished_consume_work_receiver.try_recv() {
-                Ok(finished_consume_work) => {
-                    self.process_finished_consume_work(finished_consume_work)
-                }
-                Err(TryRecvError::Empty) => return Ok(()),
-                Err(TryRecvError::Disconnected) => {
-                    return Err(SchedulerError::DisconnectedReceiveChannel(
-                        "finished consume work receiver",
-                    ));
-                }
-            }
-        }
+        self.consume_scheduler.receive_and_process_finished_work(&mut self.container);
+        Ok(())
     }
 
-    fn process_finished_consume_work(
-        &mut self,
-        FinishedConsumeWork {
-            work:
-                ConsumeWork {
-                    batch_id,
-                    ids,
-                    transactions,
-                    max_age_slots,
-                },
-            retryable_indexes,
-        }: FinishedConsumeWork,
-    ) {
-        // self.consume_scheduler
-        //     .complete_batch(batch_id, &transactions);
+    // fn process_finished_consume_work(
+    //     &mut self,
+    //     FinishedConsumeWork {
+    //         work:
+    //             ConsumeWork {
+    //                 batch_id,
+    //                 ids,
+    //                 transactions,
+    //                 max_age_slots,
+    //             },
+    //         retryable_indexes,
+    //     }: FinishedConsumeWork,
+    // ) {
+    //     // self.consume_scheduler
+    //     //     .complete_batch(batch_id, &transactions);
 
-        let mut retryable_id_iter = retryable_indexes.into_iter().peekable();
-        for (index, (id, transaction, max_age_slot)) in
-            izip!(ids, transactions, max_age_slots).enumerate()
-        {
-            match retryable_id_iter.peek() {
-                Some(retryable_index) if index == *retryable_index => {
-                    self.container
-                        .retry_transaction(id, transaction, max_age_slot);
-                    retryable_id_iter.next(); // advance the iterator
-                }
-                _ => {}
-            }
-        }
-    }
+    //     let mut retryable_id_iter = retryable_indexes.into_iter().peekable();
+    //     for (index, (id, transaction, max_age_slot)) in
+    //         izip!(ids, transactions, max_age_slots).enumerate()
+    //     {
+    //         match retryable_id_iter.peek() {
+    //             Some(retryable_index) if index == *retryable_index => {
+    //                 self.container
+    //                     .retry_transaction(id, transaction, max_age_slot);
+    //                 retryable_id_iter.next(); // advance the iterator
+    //             }
+    //             _ => {}
+    //         }
+    //     }
+    // }
 
     fn receive_and_process_finished_forward_work(&mut self) -> Result<(), SchedulerError> {
         loop {
