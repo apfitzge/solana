@@ -53,6 +53,11 @@ impl TransactionPacketContainer {
         }
     }
 
+    /// Returns reference to the transaction lookup map.
+    pub(crate) fn transaction_lookup_map(&self) -> &HashMap<TransactionPriorityId, SanitizedTransactionTTL> {
+        &self.id_to_transaction_ttl
+    }
+
     /// Returns true if the queue is empty.
     pub(crate) fn is_empty(&self) -> bool {
         self.priority_queue.is_empty()
