@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use super::{
     prio_graph_scheduler::PrioGraphScheduler, transaction_priority_id::TransactionPriorityId,
 };
@@ -111,8 +113,12 @@ impl CentralSchedulerBankingStage {
                 let decision = self.decision_maker.make_consume_or_forward_decision();
                 match decision {
                     BufferedPacketsDecision::Consume(_) => {
-                        let num_scheduled = self.consume_scheduler.schedule(&mut self.container)?;
-                        scheduler_metrics.consumed_packet_count += num_scheduled;
+                        let now = Instant::now();
+                        while now.elapsed() < Duration::from_millis(100) {
+                            let num_scheduled = self.consume_scheduler.schedule(&mut self.container)?;
+                            scheduler_metrics.consumed_packet_count += num_scheduled;
+                            if self.container.is_empty() { break; }
+                        }
                     }
                     BufferedPacketsDecision::Forward => {
                         let num_scheduled = self.schedule_forward(false)?;
