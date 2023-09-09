@@ -3899,7 +3899,7 @@ dependencies = [
 [[package]]
 name = "prio-graph"
 version = "0.1.0"
-source = "git+https://github.com/apfitzge/prio-graph.git?rev=f0272b3df3e7eab3d500d3b07ba36b2e0b74b87c#f0272b3df3e7eab3d500d3b07ba36b2e0b74b87c"
+source = "git+https://github.com/apfitzge/prio-graph.git?rev=0ac4910820953a82f26fcb8370d5c67b2ebd6113#0ac4910820953a82f26fcb8370d5c67b2ebd6113"
 
 [[package]]
 name = "proc-macro-crate"

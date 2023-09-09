@@ -1,4 +1,4 @@
-use prio_graph::SelectKind;
+use std::collections::HashSet;
 
 use {
     super::{
@@ -19,7 +19,7 @@ use {
     },
     crossbeam_channel::{Receiver, Sender},
     itertools::{izip, Itertools},
-    prio_graph::{GraphNode, PrioGraph, Selection},
+    prio_graph::{GraphNode, PrioGraph, SelectKind, Selection},
     solana_sdk::pubkey::Pubkey,
 };
 
@@ -74,10 +74,12 @@ impl PrioGraphScheduler {
         // This let's use gain additional efficiency by batching transactions:
         //  - fewer messages
         //  - fewer locks taken during execution
-        const MAX_TRANSACTIONS_PER_BATCH: usize = 1;
-        const MAX_BATCHES_IN_FLIGHT: usize = 4;
+        const MAX_TRANSACTIONS_PER_BATCH: usize = 64;
+        const MAX_BATCHES_IN_FLIGHT: usize = 100;
         let mut num_scheduled = 0;
         let mut batch_account_locks = ReadWriteAccountSet::default();
+        let mut waiting_on_forked_nodes_count = 0;
+        let mut join_set = HashSet::new();
         while !graph.is_empty() {
             // pre-allocate batches for each thread
             let mut available_threads = available_threads;
@@ -146,11 +148,27 @@ impl PrioGraphScheduler {
                                 available_threads.remove(thread_id);
                             }
 
+                            // If we previously detected a join and it is now schedule,
+                            // we can remove it from the join set.
+                            join_set.remove(&id);
+
                             Selection {
-                                selected: if node.edges.len() > 1 {SelectKind::SelectedBlock} else { SelectKind::SelectedNoBlock},
+                                selected: if node.edges.len() > 1 {
+                                    // TODO: we probably actually don't want to block entirely,
+                                    // but allow the heaviest fork to continue, while
+                                    // blocking other forks.
+                                    waiting_on_forked_nodes_count += 1;
+
+                                    SelectKind::SelectedBlock
+                                } else {
+                                    SelectKind::SelectedNoBlock
+                                },
                                 continue_iterating: !available_threads.is_empty(),
                             }
                         } else {
+                            // This is a join on the graph or at least our threads, so we should try to
+                            // receive finished work that would unblock this, during the scheduling loop.
+                            join_set.insert(id);
                             Selection {
                                 selected: SelectKind::Unselected,
                                 continue_iterating: true,
@@ -175,8 +193,15 @@ impl PrioGraphScheduler {
                 }
             }
 
-            // Receive signals for unblocking transactions during iteration.
-            self.receive_and_process_finished_work(container, |id| graph.remove_transaction(&id));
+            // Only receive during scheduling if we are blocking on something.
+            if !join_set.is_empty() || waiting_on_forked_nodes_count > 0 {
+                // Receive signals for unblocking transactions during iteration.
+                self.receive_and_process_finished_work(container, |id| {
+                    if graph.remove_transaction(&id) {
+                        waiting_on_forked_nodes_count -= 1;
+                    }
+                });
+            }
         }
         Ok(num_scheduled)
     }
