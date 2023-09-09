@@ -1,4 +1,6 @@
-use super::{transaction_priority_id::TransactionPriorityId, prio_graph_scheduler::PrioGraphScheduler};
+use super::{
+    prio_graph_scheduler::PrioGraphScheduler, transaction_priority_id::TransactionPriorityId,
+};
 use {
     super::{
         // multi_iterator_consume_scheduler::MultiIteratorConsumeScheduler,
@@ -90,7 +92,10 @@ impl CentralSchedulerBankingStage {
             packet_deserializer,
             transaction_id_generator: TransactionIdGenerator::default(),
             container: TransactionPacketContainer::with_capacity(700_000),
-            consume_scheduler: PrioGraphScheduler::new(consume_work_senders, finished_consume_work_receiver),
+            consume_scheduler: PrioGraphScheduler::new(
+                consume_work_senders,
+                finished_consume_work_receiver,
+            ),
             forward_scheduler: MultiIteratorForwardScheduler::new(forward_work_sender),
             finished_forward_work_receiver,
         }
@@ -220,7 +225,8 @@ impl CentralSchedulerBankingStage {
     }
 
     fn receive_and_process_finished_consume_work(&mut self) -> Result<(), SchedulerError> {
-        self.consume_scheduler.receive_and_process_finished_work(&mut self.container);
+        self.consume_scheduler
+            .receive_and_process_finished_work(&mut self.container);
         Ok(())
     }
 
