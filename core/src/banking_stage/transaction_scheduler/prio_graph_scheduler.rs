@@ -1,3 +1,5 @@
+use prio_graph::SelectKind;
+
 use {
     super::{
         batch_id_generator::BatchIdGenerator,
@@ -102,7 +104,7 @@ impl PrioGraphScheduler {
                     .collect();
 
                 graph.iterate(
-                    &mut |id: TransactionPriorityId, _node: &GraphNode<TransactionPriorityId>| {
+                    &mut |id: TransactionPriorityId, node: &GraphNode<TransactionPriorityId>| {
                         let transaction = container.get_transaction(&id);
 
                         // Check that there are no conflicts within current batch
@@ -110,7 +112,7 @@ impl PrioGraphScheduler {
                             transaction.transaction.message(),
                         ) {
                             return Selection {
-                                selected: false,
+                                selected: SelectKind::Unselected,
                                 continue_iterating: true,
                             };
                         }
@@ -145,12 +147,12 @@ impl PrioGraphScheduler {
                             }
 
                             Selection {
-                                selected: true,
+                                selected: if node.edges.len() > 1 {SelectKind::SelectedBlock} else { SelectKind::SelectedNoBlock},
                                 continue_iterating: !available_threads.is_empty(),
                             }
                         } else {
                             Selection {
-                                selected: false,
+                                selected: SelectKind::Unselected,
                                 continue_iterating: true,
                             }
                         }
@@ -174,7 +176,7 @@ impl PrioGraphScheduler {
             }
 
             // Receive signals for unblocking transactions during iteration.
-            self.receive_and_process_finished_work(container);
+            self.receive_and_process_finished_work(container, |id| graph.remove_transaction(&id));
         }
         Ok(num_scheduled)
     }
@@ -182,6 +184,7 @@ impl PrioGraphScheduler {
     pub(crate) fn receive_and_process_finished_work(
         &mut self,
         container: &mut TransactionPacketContainer,
+        mut on_finished_id: impl FnMut(TransactionPriorityId),
     ) {
         // Receive signals for unblocking transactions
         while let Ok(FinishedConsumeWork {
@@ -203,6 +206,7 @@ impl PrioGraphScheduler {
             for (index, (id, transaction, max_age_slot)) in
                 izip!(ids, transactions, max_age_slots).enumerate()
             {
+                on_finished_id(id);
                 let account_locks = transaction.get_account_locks_unchecked();
                 self.account_locks.unlock_accounts(
                     account_locks.writable.into_iter(),

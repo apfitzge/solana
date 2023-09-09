@@ -226,7 +226,7 @@ impl CentralSchedulerBankingStage {
 
     fn receive_and_process_finished_consume_work(&mut self) -> Result<(), SchedulerError> {
         self.consume_scheduler
-            .receive_and_process_finished_work(&mut self.container);
+            .receive_and_process_finished_work(&mut self.container, |_| {});
         Ok(())
     }
 
