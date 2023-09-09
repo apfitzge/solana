@@ -74,6 +74,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 trees = { workspace = true }
+prio-graph = { workspace = true }
 
 [dev-dependencies]
 fs_extra = { workspace = true }
@@ -89,7 +90,7 @@ solana-stake-program = { workspace = true }
 static_assertions = { workspace = true }
 systemstat = { workspace = true }
 test-case = { workspace = true }
-prio-graph = { workspace = true }
+
 
 [target."cfg(unix)".dependencies]
 sysctl = { workspace = true }

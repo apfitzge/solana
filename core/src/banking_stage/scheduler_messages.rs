@@ -1,7 +1,13 @@
 use {
-    super::immutable_deserialized_packet::ImmutableDeserializedPacket,
+    super::{
+        immutable_deserialized_packet::ImmutableDeserializedPacket,
+        transaction_scheduler::transaction_priority_id::TransactionPriorityId,
+    },
     solana_sdk::{clock::Slot, transaction::SanitizedTransaction},
-    std::sync::Arc,
+    std::{
+        fmt::{Display, Formatter},
+        sync::Arc,
+    },
 };
 
 /// A unique identifier for a transaction batch.
@@ -24,11 +30,17 @@ impl TransactionId {
     }
 }
 
+impl Display for TransactionId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Message: [Scheduler -> Worker]
 /// Transactions to be consumed (i.e. executed, recorded, and committed)
 pub struct ConsumeWork {
     pub batch_id: TransactionBatchId,
-    pub ids: Vec<TransactionId>,
+    pub ids: Vec<TransactionPriorityId>,
     pub transactions: Vec<SanitizedTransaction>,
     /// Sentinal value of 0 ON return to indicate the transaction expired
     pub max_age_slots: Vec<Slot>,
@@ -37,7 +49,7 @@ pub struct ConsumeWork {
 /// Message: [Scheduler -> Worker]
 /// Transactions to be forwarded to the next leader(s)
 pub struct ForwardWork {
-    pub ids: Vec<TransactionId>,
+    pub ids: Vec<TransactionPriorityId>,
     pub packets: Vec<Arc<ImmutableDeserializedPacket>>,
 }
 

@@ -77,7 +77,7 @@ impl MultiIteratorForwardScheduler {
 
         let mut num_scheduled = 0;
         while let Some((ids, payload)) = scanner.iterate() {
-            let ids = ids.iter().map(|id| id.id);
+            let ids = ids.iter().map(|id| *id);
             let forwardable_packets = payload.forward_batch.get_forwardable_packets();
             num_scheduled += ids.len();
 
@@ -101,7 +101,7 @@ impl MultiIteratorForwardScheduler {
 
         if !hold {
             for id in ids {
-                container.remove_by_id(&id.id);
+                container.remove_by_id(&id);
             }
         }
 
@@ -136,8 +136,8 @@ impl<'a> ActiveMultiIteratorForwardScheduler<'a> {
         id: &TransactionPriorityId,
         container: &mut TransactionPacketContainer,
     ) -> ProcessingDecision {
-        let transaction_ttl = container.get_transaction(&id.id);
-        let packet = container.get_packet(&id.id).expect("packet must exist");
+        let transaction_ttl = container.get_transaction(&id);
+        let packet = container.get_packet(&id).expect("packet must exist");
         self.make_scheduling_decision(&transaction_ttl.transaction, packet)
     }
 
