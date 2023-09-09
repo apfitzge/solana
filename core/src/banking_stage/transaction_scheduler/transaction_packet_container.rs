@@ -54,7 +54,9 @@ impl TransactionPacketContainer {
     }
 
     /// Returns reference to the transaction lookup map.
-    pub(crate) fn transaction_lookup_map(&self) -> &HashMap<TransactionPriorityId, SanitizedTransactionTTL> {
+    pub(crate) fn transaction_lookup_map(
+        &self,
+    ) -> &HashMap<TransactionPriorityId, SanitizedTransactionTTL> {
         &self.id_to_transaction_ttl
     }
 
