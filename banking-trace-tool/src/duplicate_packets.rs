@@ -58,11 +58,6 @@ impl DuplicatePacketScanner {
             return;
         }
 
-        let mut total_packets = 0;
-        let mut duplicate_packets = 0;
-        let mut total_forwarded_packets = 0;
-        let mut forwarded_before_unforwarded = 0;
-        let mut unforwarded_before_forwarded = 0;
         for packet in banking_packet_batch
             .0
             .iter()
@@ -73,16 +68,16 @@ impl DuplicatePacketScanner {
             let sig = packet.transaction().get_signatures()[0];
             let forwarded = packet.original_packet().meta().forwarded();
 
-            total_packets += 1;
+            self.total_packets += 1;
             if forwarded {
-                total_forwarded_packets += 1;
+                self.total_forwarded_packets += 1;
             }
 
             if let Some(last_seen) = self.last_seen.insert(sig, SigEntry { time, forwarded }) {
-                duplicate_packets += 1;
+                self.duplicate_packets += 1;
                 match (last_seen.forwarded, forwarded) {
-                    (false, true) => unforwarded_before_forwarded += 1,
-                    (true, false) => forwarded_before_unforwarded += 1,
+                    (false, true) => self.unforwarded_before_forwarded += 1,
+                    (true, false) => self.forwarded_before_unforwarded += 1,
                     _ => {}
                 }
 
@@ -95,12 +90,6 @@ impl DuplicatePacketScanner {
                 self.time_since_last_ms_accumulator +=
                     u64::try_from(time_ms.checked_sub(last_time_ms).unwrap()).unwrap();
             }
-
-            self.total_packets += total_packets;
-            self.duplicate_packets += duplicate_packets;
-            self.total_forwarded_packets += total_forwarded_packets;
-            self.forwarded_before_unforwarded += forwarded_before_unforwarded;
-            self.unforwarded_before_forwarded += unforwarded_before_forwarded;
         }
     }
 
