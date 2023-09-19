@@ -31,6 +31,7 @@ struct DuplicatePacketScanner {
 struct SigEntry {
     time: SystemTime,
     forwarded: bool,
+    count: usize,
 }
 
 impl DuplicatePacketScanner {
@@ -71,7 +72,7 @@ impl DuplicatePacketScanner {
                 self.total_forwarded_packets += 1;
             }
 
-            if let Some(last_seen) = self.last_seen.insert(sig, SigEntry { time, forwarded }) {
+            let count = if let Some(last_seen) = self.last_seen.remove(&sig) {
                 self.duplicate_packets += 1;
                 if forwarded {
                     self.duplicate_forwarded_packets += 1;
@@ -88,7 +89,19 @@ impl DuplicatePacketScanner {
                 let _ = self
                     .time_since_last_seen_hist
                     .increment(u64::try_from(time_diff_ms).unwrap());
-            }
+                last_seen.count + 1
+            } else {
+                0
+            };
+
+            self.last_seen.insert(
+                sig,
+                SigEntry {
+                    time,
+                    forwarded,
+                    count,
+                },
+            );
         }
     }
 
@@ -98,7 +111,7 @@ impl DuplicatePacketScanner {
             self.duplicate_packets, self.total_packets
         );
         println!(
-            "Forwarded packes: {}/{}",
+            "Forwarded packets: {}/{}",
             self.total_forwarded_packets, self.total_packets
         );
         println!(
@@ -114,6 +127,14 @@ impl DuplicatePacketScanner {
             self.unforwarded_before_forwarded
         );
         pretty_print_histogram("ms between duplicates", &self.time_since_last_seen_hist);
+
+        let mut duplicate_count_histogram = Histogram::new();
+        for entry in self.last_seen.values() {
+            duplicate_count_histogram
+                .increment(entry.count as u64)
+                .unwrap();
+        }
+        pretty_print_histogram("duplicate count", &duplicate_count_histogram);
     }
 }
 
