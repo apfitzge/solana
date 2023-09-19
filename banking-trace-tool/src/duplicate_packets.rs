@@ -1,15 +1,12 @@
 use {
     crate::process::process_event_files,
+    histogram::Histogram,
     solana_core::{
         banking_stage::immutable_deserialized_packet::ImmutableDeserializedPacket,
         banking_trace::{BankingPacketBatch, ChannelLabel, TimedTracedEvent, TracedEvent},
     },
     solana_sdk::signature::Signature,
-    std::{
-        collections::HashMap,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    },
+    std::{collections::HashMap, path::PathBuf, time::SystemTime},
 };
 
 pub fn do_count_duplicate_packets(event_file_paths: &[PathBuf]) -> std::io::Result<()> {
@@ -25,9 +22,10 @@ struct DuplicatePacketScanner {
     duplicate_packets: usize,
     total_packets: usize,
     total_forwarded_packets: usize,
+    duplicate_forwarded_packets: usize,
     forwarded_before_unforwarded: usize,
     unforwarded_before_forwarded: usize,
-    time_since_last_ms_accumulator: u64,
+    time_since_last_seen_hist: Histogram,
 }
 
 struct SigEntry {
@@ -75,20 +73,21 @@ impl DuplicatePacketScanner {
 
             if let Some(last_seen) = self.last_seen.insert(sig, SigEntry { time, forwarded }) {
                 self.duplicate_packets += 1;
+                if forwarded {
+                    self.duplicate_forwarded_packets += 1;
+                }
+
                 match (last_seen.forwarded, forwarded) {
                     (false, true) => self.unforwarded_before_forwarded += 1,
                     (true, false) => self.forwarded_before_unforwarded += 1,
                     _ => {}
                 }
 
-                let time_ms = time.duration_since(UNIX_EPOCH).unwrap().as_millis();
-                let last_time_ms = last_seen
-                    .time
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis();
-                self.time_since_last_ms_accumulator +=
-                    u64::try_from(time_ms.checked_sub(last_time_ms).unwrap()).unwrap();
+                let time_diff = time.duration_since(last_seen.time).unwrap();
+                let time_diff_ms = time_diff.as_millis();
+                let _ = self
+                    .time_since_last_seen_hist
+                    .increment(u64::try_from(time_diff_ms).unwrap());
             }
         }
     }
@@ -103,6 +102,10 @@ impl DuplicatePacketScanner {
             self.total_forwarded_packets, self.total_packets
         );
         println!(
+            "Duplicate forwarded packets: {}/{}",
+            self.duplicate_forwarded_packets, self.total_forwarded_packets
+        );
+        println!(
             "Forwarded before unforwarded: {}",
             self.forwarded_before_unforwarded
         );
@@ -110,9 +113,20 @@ impl DuplicatePacketScanner {
             "Unforwarded before forwarded: {}",
             self.unforwarded_before_forwarded
         );
-        println!(
-            "Average time between duplicates: {}ms",
-            self.time_since_last_ms_accumulator / self.duplicate_packets as u64
+        pretty_print_histogram("ms between duplicates", &self.time_since_last_seen_hist);
+    }
+}
+
+fn pretty_print_histogram(name: &str, histogram: &Histogram) {
+    print!("{name}: [");
+
+    const PERCENTILES: &[f64] = &[5.0, 10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0, 99.9];
+    for percentile in PERCENTILES.iter().copied() {
+        print!(
+            "{}: {}, ",
+            percentile,
+            histogram.percentile(percentile).unwrap()
         );
     }
+    println!("]");
 }
