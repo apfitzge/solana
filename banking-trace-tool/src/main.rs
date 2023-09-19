@@ -3,6 +3,7 @@ use {
     block_history::save_history_before,
     clap::{Args, Parser, Subcommand},
     count_metrics::do_count_metrics,
+    duplicate_packets::do_count_duplicate_packets,
     leader_priority_heatmap::do_leader_priority_heatmap,
     log::{do_logging, LoggingKind},
     setup::get_event_file_paths,
@@ -16,6 +17,7 @@ use {
 mod account_scan;
 mod block_history;
 mod count_metrics;
+mod duplicate_packets;
 mod leader_priority_heatmap;
 mod leader_slots_tracker;
 mod log;
@@ -86,6 +88,8 @@ enum TraceToolMode {
         /// The account to scan for.
         pubkey: Pubkey,
     },
+    /// Count duplicate packets
+    DuplicatePackets,
 }
 
 #[derive(Args, Copy, Clone, Debug, PartialEq)]
@@ -139,6 +143,7 @@ fn main() {
             pubkey,
             check_included,
         } => do_account_scan(&event_file_paths, pubkey, check_included),
+        TraceToolMode::DuplicatePackets => do_count_duplicate_packets(&event_file_paths),
     };
 
     if let Err(err) = result {
