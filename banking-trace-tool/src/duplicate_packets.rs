@@ -21,10 +21,18 @@ pub fn do_count_duplicate_packets(event_file_paths: &[PathBuf]) -> std::io::Resu
 
 #[derive(Default)]
 struct DuplicatePacketScanner {
-    signatures: HashMap<Signature, SystemTime>,
-    duplicate_count: usize,
-    total_count: usize,
+    last_seen: HashMap<Signature, SigEntry>,
+    duplicate_packets: usize,
+    total_packets: usize,
+    total_forwarded_packets: usize,
+    forwarded_before_unforwarded: usize,
+    unforwarded_before_forwarded: usize,
     time_since_last_ms_accumulator: u64,
+}
+
+struct SigEntry {
+    time: SystemTime,
+    forwarded: bool,
 }
 
 impl DuplicatePacketScanner {
@@ -51,39 +59,71 @@ impl DuplicatePacketScanner {
         }
 
         let mut total_packets = 0;
-        let num_unique_packets = banking_packet_batch
+        let mut duplicate_packets = 0;
+        let mut total_forwarded_packets = 0;
+        let mut forwarded_before_unforwarded = 0;
+        let mut unforwarded_before_forwarded = 0;
+        for packet in banking_packet_batch
             .0
             .iter()
             .flatten()
             .cloned()
             .filter_map(|p| ImmutableDeserializedPacket::new(p).ok())
-            .filter(|p| {
-                total_packets += 1;
-                let sig = p.transaction().get_signatures()[0];
-                if let Some(last_time) = self.signatures.insert(sig, time) {
-                    let time_ms = time.duration_since(UNIX_EPOCH).unwrap().as_millis();
-                    let last_time_ms = last_time.duration_since(UNIX_EPOCH).unwrap().as_millis();
-                    self.time_since_last_ms_accumulator +=
-                        u64::try_from(time_ms.checked_sub(last_time_ms).unwrap()).unwrap();
-                    false
-                } else {
-                    true
-                }
-            })
-            .count();
+        {
+            let sig = packet.transaction().get_signatures()[0];
+            let forwarded = packet.original_packet().meta().forwarded();
 
-        self.duplicate_count += total_packets - num_unique_packets;
-        self.total_count += total_packets;
+            total_packets += 1;
+            if forwarded {
+                total_forwarded_packets += 1;
+            }
+
+            if let Some(last_seen) = self.last_seen.insert(sig, SigEntry { time, forwarded }) {
+                duplicate_packets += 1;
+                match (last_seen.forwarded, forwarded) {
+                    (false, true) => unforwarded_before_forwarded += 1,
+                    (true, false) => forwarded_before_unforwarded += 1,
+                    _ => {}
+                }
+
+                let time_ms = time.duration_since(UNIX_EPOCH).unwrap().as_millis();
+                let last_time_ms = last_seen
+                    .time
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                self.time_since_last_ms_accumulator +=
+                    u64::try_from(time_ms.checked_sub(last_time_ms).unwrap()).unwrap();
+            }
+
+            self.total_packets += total_packets;
+            self.duplicate_packets += duplicate_packets;
+            self.total_forwarded_packets += total_forwarded_packets;
+            self.forwarded_before_unforwarded += forwarded_before_unforwarded;
+            self.unforwarded_before_forwarded += unforwarded_before_forwarded;
+        }
     }
 
     fn report(&self) {
         println!(
             "Duplicate packets: {}/{}",
-            self.duplicate_count, self.total_count
+            self.duplicate_packets, self.total_packets
+        );
+        println!(
+            "Forwarded packes: {}/{}",
+            self.total_forwarded_packets, self.total_packets
+        );
+        println!(
+            "Forwarded before unforwarded: {}",
+            self.forwarded_before_unforwarded
+        );
+        println!(
+            "Unforwarded before forwarded: {}",
+            self.unforwarded_before_forwarded
         );
         println!(
             "Average time between duplicates: {}ms",
-            self.time_since_last_ms_accumulator / self.duplicate_count as u64
+            self.time_since_last_ms_accumulator / self.duplicate_packets as u64
         );
     }
 }
