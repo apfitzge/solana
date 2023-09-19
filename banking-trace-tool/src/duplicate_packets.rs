@@ -6,7 +6,7 @@ use {
         banking_trace::{BankingPacketBatch, ChannelLabel, TimedTracedEvent, TracedEvent},
     },
     solana_sdk::signature::Signature,
-    std::{collections::HashMap, path::PathBuf, time::SystemTime},
+    std::{collections::HashMap, net::IpAddr, path::PathBuf, time::SystemTime},
 };
 
 pub fn do_count_duplicate_packets(event_file_paths: &[PathBuf]) -> std::io::Result<()> {
@@ -26,6 +26,7 @@ struct DuplicatePacketScanner {
     forwarded_before_unforwarded: usize,
     unforwarded_before_forwarded: usize,
     time_since_last_seen_hist: Histogram,
+    excessively_late_packets: HashMap<IpAddr, usize>,
 }
 
 struct SigEntry {
@@ -89,6 +90,15 @@ impl DuplicatePacketScanner {
                 let _ = self
                     .time_since_last_seen_hist
                     .increment(u64::try_from(time_diff_ms).unwrap());
+
+                // Packet hasn't been seen for 30s
+                if time_diff_ms > 30_000 {
+                    *self
+                        .excessively_late_packets
+                        .entry(packet.original_packet().meta().addr)
+                        .or_default() += 1;
+                }
+
                 last_seen.count + 1
             } else {
                 0
@@ -138,6 +148,14 @@ impl DuplicatePacketScanner {
             }
         }
         pretty_print_histogram("duplicate count", &duplicate_count_histogram);
+
+        println!("Excessively late packets:");
+        let mut total = 0;
+        for (addr, count) in &self.excessively_late_packets {
+            total += count;
+            println!("  {addr}: {count}");
+        }
+        println!("Total excessively late packets: {total}");
     }
 }
 
