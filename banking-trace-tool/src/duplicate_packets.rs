@@ -130,9 +130,12 @@ impl DuplicatePacketScanner {
 
         let mut duplicate_count_histogram = Histogram::new();
         for entry in self.last_seen.values() {
-            duplicate_count_histogram
-                .increment(entry.count as u64)
-                .unwrap();
+            let duplicate_count = entry.count as u64;
+            if duplicate_count > 0 {
+                duplicate_count_histogram
+                    .increment(duplicate_count)
+                    .unwrap();
+            }
         }
         pretty_print_histogram("duplicate count", &duplicate_count_histogram);
     }
