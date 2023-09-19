@@ -26,7 +26,7 @@ struct DuplicatePacketScanner {
     forwarded_before_unforwarded: usize,
     unforwarded_before_forwarded: usize,
     time_since_last_seen_hist: Histogram,
-    excessively_late_packets: HashMap<IpAddr, usize>,
+    excessively_late_packets: HashMap<IpAddr, (usize, usize)>,
 }
 
 struct SigEntry {
@@ -93,10 +93,16 @@ impl DuplicatePacketScanner {
 
                 // Packet hasn't been seen for 30s
                 if time_diff_ms > 30_000 {
-                    *self
+                    let (forwarded_count, non_forwarded_count) = self
                         .excessively_late_packets
                         .entry(packet.original_packet().meta().addr)
-                        .or_default() += 1;
+                        .or_default();
+
+                    if forwarded {
+                        *forwarded_count += 1;
+                    } else {
+                        *non_forwarded_count += 1;
+                    }
                 }
 
                 last_seen.count + 1
@@ -151,9 +157,9 @@ impl DuplicatePacketScanner {
 
         println!("Excessively late packets:");
         let mut total = 0;
-        for (addr, count) in &self.excessively_late_packets {
-            total += count;
-            println!("  {addr}: {count}");
+        for (addr, (forwaded_count, nonforwarded_count)) in &self.excessively_late_packets {
+            total += forwaded_count + nonforwarded_count;
+            println!("  {addr}: forwarded={forwaded_count} non_forwarded={nonforwarded_count}");
         }
         println!("Total excessively late packets: {total}");
     }
