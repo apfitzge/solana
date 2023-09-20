@@ -67,7 +67,6 @@ impl DuplicatePacketScanner {
         {
             let sig = packet.transaction().get_signatures()[0];
             let forwarded = packet.original_packet().meta().forwarded();
-
             self.total_packets += 1;
             if forwarded {
                 self.total_forwarded_packets += 1;
