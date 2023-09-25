@@ -27,13 +27,15 @@ struct DuplicatePacketScanner {
     duplicate_forwarded_packets: usize,
     forwarded_before_unforwarded: usize,
     unforwarded_before_forwarded: usize,
+    unforwarded_unforwarded: usize,
+    forwarded_forwarded: usize,
     time_since_last_seen_hist: Histogram,
     excessively_late_packets: HashMap<IpAddr, (usize, usize)>,
 }
 
 struct SigEntry {
     time: SystemTime,
-    forwarded: bool,
+    first_received_forwarded: bool,
     count: usize,
 }
 
@@ -74,55 +76,59 @@ impl DuplicatePacketScanner {
                 self.total_forwarded_packets += 1;
             }
 
-            let count = if let Some(last_seen) = self.last_seen.remove(&sig) {
-                self.duplicate_packets += 1;
-                if forwarded {
-                    self.duplicate_forwarded_packets += 1;
-                }
-
-                match (last_seen.forwarded, forwarded) {
-                    (false, true) => self.unforwarded_before_forwarded += 1,
-                    (true, false) => self.forwarded_before_unforwarded += 1,
-                    _ => {}
-                }
-
-                let time_diff = time.duration_since(last_seen.time).unwrap();
-                let time_diff_ms = time_diff.as_millis();
-                let _ = self
-                    .time_since_last_seen_hist
-                    .increment(u64::try_from(time_diff_ms).unwrap());
-
-                // Packet hasn't been seen for 30s
-                if time_diff_ms > 30_000 {
-                    let (forwarded_count, non_forwarded_count) = self
-                        .excessively_late_packets
-                        .entry(packet.original_packet().meta().addr)
-                        .or_default();
-
+            match self.last_seen.entry(sig) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    self.duplicate_packets += 1;
                     if forwarded {
-                        *forwarded_count += 1;
-                    } else {
-                        *non_forwarded_count += 1;
+                        self.duplicate_forwarded_packets += 1;
                     }
-                }
 
-                last_seen.count + 1
-            } else {
-                if !forwarded {
-                    self.total_unforwarded_packets_first += 1;
-                }
-                self.total_unique_packets += 1;
-                0
-            };
+                    match (entry.get().first_received_forwarded, forwarded) {
+                        (false, false) => self.unforwarded_unforwarded += 1,
+                        (false, true) => self.unforwarded_before_forwarded += 1,
+                        (true, false) => self.forwarded_before_unforwarded += 1,
+                        (true, true) => self.forwarded_forwarded += 1,
+                    }
 
-            self.last_seen.insert(
-                sig,
-                SigEntry {
-                    time,
-                    forwarded,
-                    count,
-                },
-            );
+                    let time_diff = time.duration_since(entry.get().time).unwrap();
+                    let time_diff_ms = time_diff.as_millis();
+                    let _ = self
+                        .time_since_last_seen_hist
+                        .increment(u64::try_from(time_diff_ms).unwrap());
+
+                    // Packet hasn't been seen for 30s
+                    if time_diff_ms > 30_000 {
+                        let (forwarded_count, non_forwarded_count) = self
+                            .excessively_late_packets
+                            .entry(packet.original_packet().meta().addr)
+                            .or_default();
+
+                        if forwarded {
+                            *forwarded_count += 1;
+                        } else {
+                            *non_forwarded_count += 1;
+                        }
+                    }
+
+                    // Update count and time.
+                    // Do not update the forwarded flag, as it is only set once, as we want to
+                    // track the original forwarded status.
+                    entry.get_mut().count += 1;
+                    entry.get_mut().time = time;
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    if !forwarded {
+                        self.total_unforwarded_packets_first += 1;
+                    }
+                    self.total_unique_packets += 1;
+
+                    entry.insert(SigEntry {
+                        time,
+                        first_received_forwarded: forwarded,
+                        count: 0,
+                    });
+                }
+            }
         }
     }
 
@@ -150,6 +156,14 @@ impl DuplicatePacketScanner {
         println!(
             "Unforwarded before forwarded: {}",
             self.unforwarded_before_forwarded
+        );
+        println!(
+            "Unforwarded-Unforwarded duplicates: {}",
+            self.unforwarded_unforwarded
+        );
+        println!(
+            "Forwarded-Forwarded duplicates: {}",
+            self.forwarded_forwarded
         );
         pretty_print_histogram("ms between duplicates", &self.time_since_last_seen_hist);
 
