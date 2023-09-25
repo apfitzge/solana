@@ -21,7 +21,9 @@ struct DuplicatePacketScanner {
     last_seen: HashMap<Signature, SigEntry>,
     duplicate_packets: usize,
     total_packets: usize,
+    total_unique_packets: usize,
     total_forwarded_packets: usize,
+    total_unforwarded_packets_first: usize,
     duplicate_forwarded_packets: usize,
     forwarded_before_unforwarded: usize,
     unforwarded_before_forwarded: usize,
@@ -106,6 +108,10 @@ impl DuplicatePacketScanner {
 
                 last_seen.count + 1
             } else {
+                if !forwarded {
+                    self.total_unforwarded_packets_first += 1;
+                }
+                self.total_unique_packets += 1;
                 0
             };
 
@@ -124,6 +130,10 @@ impl DuplicatePacketScanner {
         println!(
             "Duplicate packets: {}/{}",
             self.duplicate_packets, self.total_packets
+        );
+        println!(
+            "Unforwarded packets first: {}/{}",
+            self.total_unforwarded_packets_first, self.total_unique_packets
         );
         println!(
             "Forwarded packets: {}/{}",
