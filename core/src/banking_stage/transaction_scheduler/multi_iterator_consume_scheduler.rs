@@ -57,11 +57,10 @@ impl MultiIteratorConsumeScheduler {
             in_flight_tracker: &mut self.in_flight_tracker,
             account_locks: &mut self.account_locks,
             batch_account_locks: ReadWriteAccountSet::default(),
+            pass_priority_order_guard: ReadWriteAccountSet::default(),
             batches: Batches::new(num_threads),
             schedulable_threads,
             unschedulable_transactions: Vec::new(),
-            batch_priorty_order_guard: ReadWriteAccountSet::default(),
-            pass_priority_order_guard: ReadWriteAccountSet::default(),
         };
 
         const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 100_000;
@@ -79,8 +78,6 @@ impl MultiIteratorConsumeScheduler {
 
         let mut num_scheduled = 0;
         while let Some((_ids, payload)) = scanner.iterate() {
-            payload.batch_priorty_order_guard.clear();
-
             for thread_id in 0..num_threads {
                 if !payload.batches.transactions.is_empty() {
                     let (ids, transactions, max_age_slots, total_cus) =
@@ -151,12 +148,10 @@ struct ActiveMultiIteratorConsumeScheduler<'a> {
     account_locks: &'a mut ThreadAwareAccountLocks,
 
     batch_account_locks: ReadWriteAccountSet,
+    pass_priority_order_guard: ReadWriteAccountSet,
     batches: Batches,
     schedulable_threads: ThreadSet,
     unschedulable_transactions: Vec<TransactionPriorityId>,
-
-    batch_priorty_order_guard: ReadWriteAccountSet,
-    pass_priority_order_guard: ReadWriteAccountSet,
 }
 
 struct Batches {
@@ -234,19 +229,11 @@ impl<'a> ActiveMultiIteratorConsumeScheduler<'a> {
                 self.add_transaction_to_batch(id, transaction_ttl, cu_limit, thread_id);
                 ProcessingDecision::Now
             }
-            ConsumeSchedulingDecision::Later => {
-                self.batch_priorty_order_guard
-                    .add_sanitized_message_account_locks(
-                        transaction_state.transaction_ttl().transaction.message(),
-                    );
-                ProcessingDecision::Later
-            }
+            ConsumeSchedulingDecision::Later => ProcessingDecision::Later,
             ConsumeSchedulingDecision::NextPass => {
                 self.unschedulable_transactions.push(*id);
                 self.pass_priority_order_guard
-                    .add_sanitized_message_account_locks(
-                        transaction_state.transaction_ttl().transaction.message(),
-                    );
+                    .take_locks(transaction_state.transaction_ttl().transaction.message());
                 ProcessingDecision::Never
             }
         }
@@ -258,29 +245,15 @@ impl<'a> ActiveMultiIteratorConsumeScheduler<'a> {
     ) -> ConsumeSchedulingDecision {
         let message = transaction.message();
 
-        // Check if this transaction conflicts with any transactions in the current batch.
-        if !self
-            .batch_account_locks
-            .check_sanitized_message_account_locks(message)
-        {
-            return ConsumeSchedulingDecision::Later;
-        }
-
-        // Check if this transaction takes locks that conflict with any transactions
-        // which were passed over due to above check.
-        if !self
-            .batch_priorty_order_guard
-            .check_sanitized_message_account_locks(message)
-        {
+        // Check if this transaction conflicts with any transactions in the current batch,
+        // or transactions that were passed on this iteration.
+        if !self.batch_account_locks.take_locks(message) {
             return ConsumeSchedulingDecision::Later;
         }
 
         // Check if this transaction takes locks that conflict with any transactions
         // that were unschedulable due to below check.
-        if !self
-            .pass_priority_order_guard
-            .check_sanitized_message_account_locks(message)
-        {
+        if !self.pass_priority_order_guard.check_locks(message) {
             return ConsumeSchedulingDecision::NextPass;
         }
 
@@ -313,8 +286,6 @@ impl<'a> ActiveMultiIteratorConsumeScheduler<'a> {
         cu_limit: u64,
         thread_id: ThreadId,
     ) {
-        self.batch_account_locks
-            .add_sanitized_message_account_locks(transaction.message());
         self.batches.transactions[thread_id].push(transaction);
         self.batches.ids[thread_id].push(id.id);
         self.batches.max_age_slots[thread_id].push(max_age_slot);

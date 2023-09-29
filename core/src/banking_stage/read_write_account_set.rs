@@ -29,6 +29,22 @@ impl ReadWriteAccountSet {
             })
     }
 
+    /// Check all account locks.
+    /// Returns true if all account locks were available and false otherwise.
+    pub fn check_locks(&mut self, message: &SanitizedMessage) -> bool {
+        message
+            .account_keys()
+            .iter()
+            .enumerate()
+            .all(|(index, pubkey)| {
+                if message.is_writable(index) {
+                    self.can_write(pubkey)
+                } else {
+                    self.can_read(pubkey)
+                }
+            })
+    }
+
     /// Clears the read and write sets
     pub fn clear(&mut self) {
         self.read_set.clear();
