@@ -52,6 +52,11 @@ impl TransactionStateContainer {
         self.priority_queue.is_empty()
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.priority_queue.clear();
+        self.id_to_transaction_state.clear();
+    }
+
     /// Returns the remaining capacity of the queue
     pub(crate) fn remaining_queue_capacity(&self) -> usize {
         self.priority_queue.capacity() - self.priority_queue.len()

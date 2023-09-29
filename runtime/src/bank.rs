@@ -4296,6 +4296,10 @@ impl Bank {
         TransactionBatch::new(lock_results, self, Cow::Borrowed(transactions))
     }
 
+    pub fn read_blockhash_queue(&self) -> RwLockReadGuard<'_, BlockhashQueue> {
+        self.blockhash_queue.read().unwrap()
+    }
+
     /// Prepare a transaction batch from a single transaction without locking accounts
     pub(crate) fn prepare_unlocked_batch_from_single_tx<'a>(
         &'a self,

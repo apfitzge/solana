@@ -1,4 +1,5 @@
 mod batch_id_generator;
+mod central_scheduler_banking_stage;
 #[allow(dead_code)]
 mod in_flight_tracker;
 #[allow(dead_code)]
