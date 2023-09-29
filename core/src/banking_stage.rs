@@ -16,10 +16,15 @@ use {
         unprocessed_transaction_storage::{ThreadType, UnprocessedTransactionStorage},
     },
     crate::{
-        banking_trace::BankingPacketReceiver, tracer_packet_stats::TracerPacketStats,
+        banking_stage::{
+            consume_worker::ConsumeWorker, packet_deserializer::PacketDeserializer,
+            transaction_scheduler::central_scheduler_banking_stage::CentralSchedulerBankingStage,
+        },
+        banking_trace::BankingPacketReceiver,
+        tracer_packet_stats::TracerPacketStats,
         validator::BlockProductionMethod,
     },
-    crossbeam_channel::RecvTimeoutError,
+    crossbeam_channel::{unbounded, RecvTimeoutError},
     histogram::Histogram,
     solana_client::connection_cache::ConnectionCache,
     solana_gossip::cluster_info::ClusterInfo,
@@ -378,6 +383,22 @@ impl BankingStage {
                     prioritization_fee_cache,
                 )
             }
+            BlockProductionMethod::CentralSchedulerMultiIterator => {
+                Self::new_central_scheduler_multi_iterator(
+                    cluster_info,
+                    poh_recorder,
+                    non_vote_receiver,
+                    tpu_vote_receiver,
+                    gossip_vote_receiver,
+                    num_threads,
+                    transaction_status_sender,
+                    replay_vote_sender,
+                    log_messages_bytes_limit,
+                    connection_cache,
+                    bank_forks,
+                    prioritization_fee_cache,
+                )
+            }
         }
     }
 
@@ -471,6 +492,151 @@ impl BankingStage {
                     .unwrap()
             })
             .collect();
+        Self { bank_thread_hdls }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_central_scheduler_multi_iterator(
+        cluster_info: &Arc<ClusterInfo>,
+        poh_recorder: &Arc<RwLock<PohRecorder>>,
+        non_vote_receiver: BankingPacketReceiver,
+        tpu_vote_receiver: BankingPacketReceiver,
+        gossip_vote_receiver: BankingPacketReceiver,
+        num_threads: u32,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        replay_vote_sender: ReplayVoteSender,
+        log_messages_bytes_limit: Option<usize>,
+        connection_cache: Arc<ConnectionCache>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        prioritization_fee_cache: &Arc<PrioritizationFeeCache>,
+    ) -> Self {
+        assert!(num_threads >= MIN_TOTAL_THREADS);
+        // Single thread to generate entries from many banks.
+        // This thread talks to poh_service and broadcasts the entries once they have been recorded.
+        // Once an entry has been recorded, its blockhash is registered with the bank.
+        let data_budget = Arc::new(DataBudget::default());
+        // Keeps track of extraneous vote transactions for the vote threads
+        let latest_unprocessed_votes = Arc::new(LatestUnprocessedVotes::new());
+        // Add vote threads as normal.
+        let mut bank_thread_hdls: Vec<JoinHandle<()>> = (0..2)
+            .map(|id| {
+                let (packet_receiver, unprocessed_transaction_storage) = match id {
+                    0 => (
+                        gossip_vote_receiver.clone(),
+                        UnprocessedTransactionStorage::new_vote_storage(
+                            latest_unprocessed_votes.clone(),
+                            VoteSource::Gossip,
+                        ),
+                    ),
+                    1 => (
+                        tpu_vote_receiver.clone(),
+                        UnprocessedTransactionStorage::new_vote_storage(
+                            latest_unprocessed_votes.clone(),
+                            VoteSource::Tpu,
+                        ),
+                    ),
+                    _ => unreachable!(),
+                };
+
+                let mut packet_receiver =
+                    PacketReceiver::new(id, packet_receiver, bank_forks.clone());
+                let poh_recorder = poh_recorder.clone();
+
+                let committer = Committer::new(
+                    transaction_status_sender.clone(),
+                    replay_vote_sender.clone(),
+                    prioritization_fee_cache.clone(),
+                );
+                let decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
+                let forwarder = Forwarder::new(
+                    poh_recorder.clone(),
+                    bank_forks.clone(),
+                    cluster_info.clone(),
+                    connection_cache.clone(),
+                    data_budget.clone(),
+                );
+                let consumer = Consumer::new(
+                    committer,
+                    poh_recorder.read().unwrap().new_recorder(),
+                    QosService::new(id),
+                    log_messages_bytes_limit,
+                );
+
+                Builder::new()
+                    .name(format!("solBanknStgTx{id:02}"))
+                    .spawn(move || {
+                        Self::process_loop(
+                            &mut packet_receiver,
+                            &decision_maker,
+                            &forwarder,
+                            &consumer,
+                            id,
+                            unprocessed_transaction_storage,
+                        );
+                    })
+                    .unwrap()
+            })
+            .collect();
+
+        // Spawn transaction scheduler
+        let num_workers = num_threads - NUM_VOTE_PROCESSING_THREADS;
+        let (consume_work_senders, consume_work_receivers): (Vec<_>, Vec<_>) =
+            (0..num_workers).map(|_| unbounded()).unzip();
+        let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
+
+        bank_thread_hdls.push({
+            let scheduler = CentralSchedulerBankingStage::new(
+                DecisionMaker::new(cluster_info.id(), poh_recorder.clone()),
+                bank_forks.clone(),
+                consume_work_senders,
+                finished_consume_work_receiver,
+                PacketDeserializer::new(non_vote_receiver, bank_forks.clone()),
+            );
+
+            Builder::new()
+                .name("solTxScheduler".to_string())
+                .spawn(|| {
+                    if let Err(err) = scheduler.run() {
+                        warn!("Transaction scheduler exited with: {err:?}");
+                    }
+                })
+                .unwrap()
+        });
+
+        for (index, consume_work_receiver) in consume_work_receivers.into_iter().enumerate() {
+            let id = index + NUM_VOTE_PROCESSING_THREADS as usize;
+
+            let committer = Committer::new(
+                transaction_status_sender.clone(),
+                replay_vote_sender.clone(),
+                prioritization_fee_cache.clone(),
+            );
+            let consumer = Consumer::new(
+                committer,
+                poh_recorder.read().unwrap().new_recorder(),
+                QosService::new(id as u32),
+                log_messages_bytes_limit,
+            );
+
+            let consume_worker = ConsumeWorker::new(
+                consume_work_receiver,
+                consumer,
+                finished_consume_work_sender.clone(),
+                poh_recorder.read().unwrap().new_leader_bank_notifier(),
+            );
+
+            bank_thread_hdls.push(
+                Builder::new()
+                    .name(format!("solTxCoWorker{id}"))
+                    .spawn(move || {
+                        if let Err(err) = consume_worker.run() {
+                            warn!("Transaction consume worker exited with: {err:?}");
+                        }
+                    })
+                    .unwrap(),
+            );
+        }
+
         Self { bank_thread_hdls }
     }
 

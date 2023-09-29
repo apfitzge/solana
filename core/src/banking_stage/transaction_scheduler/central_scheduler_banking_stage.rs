@@ -20,7 +20,6 @@ use {
         sync::{Arc, RwLock},
         time::Duration,
     },
-    thiserror::Error,
 };
 
 pub struct CentralSchedulerBankingStage {
@@ -281,9 +280,9 @@ mod tests {
     // such that our tests can be more easily set up and run.
     struct TestFrame {
         bank: Arc<Bank>,
-        ledger_path: TempDir,
-        entry_receiver: Receiver<WorkingBankEntry>,
-        record_receiver: Receiver<Record>,
+        _ledger_path: TempDir,
+        _entry_receiver: Receiver<WorkingBankEntry>,
+        _record_receiver: Receiver<Record>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         banking_packet_sender: Sender<Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>>,
 
@@ -324,9 +323,9 @@ mod tests {
 
         let test_frame = TestFrame {
             bank,
-            ledger_path,
-            entry_receiver,
-            record_receiver,
+            _ledger_path: ledger_path,
+            _entry_receiver: entry_receiver,
+            _record_receiver: record_receiver,
             poh_recorder,
             banking_packet_sender,
             consume_work_receivers,
