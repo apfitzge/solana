@@ -88,6 +88,10 @@ impl ImmutableDeserializedPacket {
         self.is_simple_vote
     }
 
+    pub fn transaction_priority_details(&self) -> &TransactionPriorityDetails {
+        &self.priority_details
+    }
+
     pub fn priority(&self) -> u64 {
         self.priority_details.priority
     }
