@@ -133,6 +133,7 @@ fn filter_processed_packets<'a, F>(
 pub struct ConsumeScannerPayload<'a> {
     pub reached_end_of_slot: bool,
     pub account_locks: ReadWriteAccountSet,
+    pub batch_priority_guard: ReadWriteAccountSet,
     pub sanitized_transactions: Vec<SanitizedTransaction>,
     pub slot_metrics_tracker: &'a mut LeaderSlotMetricsTracker,
     pub message_hash_to_transaction: &'a mut HashMap<Hash, DeserializedPacket>,
@@ -210,6 +211,7 @@ where
     let payload = ConsumeScannerPayload {
         reached_end_of_slot: false,
         account_locks: ReadWriteAccountSet::default(),
+        batch_priority_guard: ReadWriteAccountSet::default(),
         sanitized_transactions: Vec::with_capacity(UNPROCESSED_BUFFER_STEP_SIZE),
         slot_metrics_tracker,
         message_hash_to_transaction,
