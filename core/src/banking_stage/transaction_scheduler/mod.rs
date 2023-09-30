@@ -5,6 +5,8 @@ mod in_flight_tracker;
 #[allow(dead_code)]
 mod multi_iterator_consume_scheduler;
 mod scheduler_error;
+#[allow(dead_code)]
+mod simple_scheduler;
 mod thread_aware_account_locks;
 #[allow(dead_code)]
 mod transaction_id_generator;
