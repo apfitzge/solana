@@ -1,7 +1,8 @@
 use {
     super::{
         multi_iterator_consume_scheduler::MultiIteratorConsumeScheduler,
-        scheduler_error::SchedulerError, transaction_id_generator::TransactionIdGenerator,
+        scheduler_error::SchedulerError, simple_scheduler::SimpleScheduler,
+        transaction_id_generator::TransactionIdGenerator,
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
@@ -36,7 +37,7 @@ pub struct CentralSchedulerBankingStage {
     container: TransactionStateContainer,
 
     /// Scheduler for consuming transactions
-    consume_scheduler: MultiIteratorConsumeScheduler,
+    consume_scheduler: SimpleScheduler,
 
     /// Receives finished consume work from consume worker(s)
     finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
@@ -75,7 +76,7 @@ impl CentralSchedulerBankingStage {
             packet_deserializer,
             transaction_id_generator: TransactionIdGenerator::default(),
             container: TransactionStateContainer::with_capacity(700_000),
-            consume_scheduler: MultiIteratorConsumeScheduler::new(consume_work_senders),
+            consume_scheduler: SimpleScheduler::new(consume_work_senders),
             finished_consume_work_receiver,
         }
     }
