@@ -148,6 +148,11 @@ impl SimpleScheduler {
             }
         }
 
+        // Push unschedulable ids back into the container
+        for id in unschedulable_ids {
+            container.push_id_into_queue(id);
+        }
+
         Ok(num_scheduled)
     }
 
