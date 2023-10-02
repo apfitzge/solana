@@ -55,6 +55,9 @@ impl SimpleScheduler {
 
         const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 100_000;
         while let Some(id) = container.pop_max() {
+            if schedulable_threads.is_empty() {
+                break;
+            }
             if num_scheduled > MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
                 break;
             }
@@ -146,6 +149,49 @@ impl SimpleScheduler {
             {
                 schedulable_threads.remove(thread_id);
             }
+
+            if batches.ids[thread_id].len() >= TARGET_NUM_TRANSACTIONS_PER_BATCH {
+                let (ids, transactions, max_age_slots, total_cus) = batches.take_batch(thread_id);
+                let batch_id = self
+                    .in_flight_tracker
+                    .track_batch(ids.len(), total_cus, thread_id);
+                num_scheduled += ids.len();
+
+                let work = ConsumeWork {
+                    batch_id,
+                    ids,
+                    transactions,
+                    max_age_slots,
+                };
+                self.consume_work_senders[thread_id]
+                    .send(work)
+                    .map_err(|_| SchedulerError::DisconnectedSendChannel("consume work sender"))?;
+            }
+        }
+
+        // Send batches for any remaining transactions
+        for thread_id in 0..num_threads {
+            let (ids, transactions, max_age_slots, total_cus) = batches.take_batch(thread_id);
+
+            if ids.is_empty() {
+                continue;
+            }
+
+            let batch_id = self
+                .in_flight_tracker
+                .track_batch(ids.len(), total_cus, thread_id);
+
+            num_scheduled += ids.len();
+
+            let work = ConsumeWork {
+                batch_id,
+                ids,
+                transactions,
+                max_age_slots,
+            };
+            self.consume_work_senders[thread_id]
+                .send(work)
+                .map_err(|_| SchedulerError::DisconnectedSendChannel("consume work sender"))?;
         }
 
         // Push unschedulable ids back into the container
