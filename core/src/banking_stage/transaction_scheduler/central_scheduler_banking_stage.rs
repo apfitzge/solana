@@ -1,6 +1,5 @@
 use {
     super::{
-        multi_iterator_consume_scheduler::MultiIteratorConsumeScheduler,
         scheduler_error::SchedulerError, simple_scheduler::SimpleScheduler,
         transaction_id_generator::TransactionIdGenerator,
         transaction_state::SanitizedTransactionTTL,

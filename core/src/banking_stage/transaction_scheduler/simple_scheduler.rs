@@ -105,32 +105,7 @@ impl SimpleScheduler {
                 .take_locks(sanitized_transaction_ttl.transaction.message());
 
             if should_send_batches {
-                for thread_id in 0..num_threads {
-                    let (ids, transactions, max_age_slots, total_cus) =
-                        batches.take_batch(thread_id);
-
-                    if ids.is_empty() {
-                        continue;
-                    }
-
-                    let batch_id =
-                        self.in_flight_tracker
-                            .track_batch(ids.len(), total_cus, thread_id);
-
-                    num_scheduled += ids.len();
-
-                    let work = ConsumeWork {
-                        batch_id,
-                        ids,
-                        transactions,
-                        max_age_slots,
-                    };
-                    self.consume_work_senders[thread_id]
-                        .send(work)
-                        .map_err(|_| {
-                            SchedulerError::DisconnectedSendChannel("consume work sender")
-                        })?;
-                }
+                num_scheduled += self.send_batches(&mut batches)?;
             }
 
             let SanitizedTransactionTTL {
@@ -151,48 +126,12 @@ impl SimpleScheduler {
             }
 
             if batches.ids[thread_id].len() >= TARGET_NUM_TRANSACTIONS_PER_BATCH {
-                let (ids, transactions, max_age_slots, total_cus) = batches.take_batch(thread_id);
-                let batch_id = self
-                    .in_flight_tracker
-                    .track_batch(ids.len(), total_cus, thread_id);
-                num_scheduled += ids.len();
-
-                let work = ConsumeWork {
-                    batch_id,
-                    ids,
-                    transactions,
-                    max_age_slots,
-                };
-                self.consume_work_senders[thread_id]
-                    .send(work)
-                    .map_err(|_| SchedulerError::DisconnectedSendChannel("consume work sender"))?;
+                num_scheduled += self.send_batch(&mut batches, thread_id)?;
             }
         }
 
         // Send batches for any remaining transactions
-        for thread_id in 0..num_threads {
-            let (ids, transactions, max_age_slots, total_cus) = batches.take_batch(thread_id);
-
-            if ids.is_empty() {
-                continue;
-            }
-
-            let batch_id = self
-                .in_flight_tracker
-                .track_batch(ids.len(), total_cus, thread_id);
-
-            num_scheduled += ids.len();
-
-            let work = ConsumeWork {
-                batch_id,
-                ids,
-                transactions,
-                max_age_slots,
-            };
-            self.consume_work_senders[thread_id]
-                .send(work)
-                .map_err(|_| SchedulerError::DisconnectedSendChannel("consume work sender"))?;
-        }
+        num_scheduled += self.send_batches(&mut batches)?;
 
         // Push unschedulable ids back into the container
         for id in unschedulable_ids {
@@ -235,6 +174,41 @@ impl SimpleScheduler {
             .map(|(thread_id, _)| thread_id)
             .unwrap()
     }
+
+    fn send_batches(&mut self, batches: &mut Batches) -> Result<usize, SchedulerError> {
+        (0..self.consume_work_senders.len())
+            .map(|thread_index| self.send_batch(batches, thread_index))
+            .sum()
+    }
+
+    fn send_batch(
+        &mut self,
+        batches: &mut Batches,
+        thread_index: usize,
+    ) -> Result<usize, SchedulerError> {
+        let (ids, transactions, max_age_slots, total_cus) = batches.take_batch(thread_index);
+
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let batch_id = self
+            .in_flight_tracker
+            .track_batch(ids.len(), total_cus, thread_index);
+
+        let num_scheduled = ids.len();
+        let work = ConsumeWork {
+            batch_id,
+            ids,
+            transactions,
+            max_age_slots,
+        };
+        self.consume_work_senders[thread_index]
+            .send(work)
+            .map_err(|_| SchedulerError::DisconnectedSendChannel("consume work sender"))?;
+
+        Ok(num_scheduled)
+    }
 }
 
 struct Batches {
@@ -252,7 +226,7 @@ impl Batches {
             transactions: vec![Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH); num_threads],
             max_age_slots: vec![Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH); num_threads],
             total_cus: vec![0; num_threads],
-            locks: std::iter::repeat_with(|| ReadWriteAccountSet::default())
+            locks: std::iter::repeat_with(ReadWriteAccountSet::default)
                 .take(num_threads)
                 .collect(),
         }
