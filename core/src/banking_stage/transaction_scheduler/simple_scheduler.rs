@@ -10,9 +10,12 @@ use {
         consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
         read_write_account_set::ReadWriteAccountSet,
         scheduler_messages::{ConsumeWork, TransactionBatchId, TransactionId},
+        transaction_scheduler::transaction_priority_id::TransactionPriorityId,
     },
     crossbeam_channel::Sender,
+    prio_graph::PrioGraph,
     solana_sdk::{clock::Slot, transaction::SanitizedTransaction},
+    std::collections::HashMap,
 };
 
 const QUEUED_TRANSACTION_LIMIT: usize = 64 * 100;
@@ -53,8 +56,28 @@ impl SimpleScheduler {
         let mut num_scheduled = 0;
         let mut blocking_locks = ReadWriteAccountSet::default();
 
+        const LOOK_AHEAD_WINDOW: usize = 1000;
+        let mut prio_graph = PrioGraph::new(|id: &TransactionPriorityId, _| id.priority);
+
+        // Create the initial look ahead window
+        for _ in 0..LOOK_AHEAD_WINDOW {
+            let Some(id) = container.pop_max() else {
+                break;
+            };
+
+            let transaction = container.get_transaction_ttl(&id.id).unwrap();
+            prio_graph.insert_transaction(transaction);
+        }
+
+        let mut chain_id_to_thread = HashMap::new();
         const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 100_000;
-        while let Some(id) = container.pop_max() {
+        while let Some(id) = prio_graph.pop_and_unblock() {
+            // Push into the look ahead window
+            if let Some(next_id) = container.pop_max() {
+                let transaction = container.get_transaction_ttl(&next_id.id).unwrap();
+                prio_graph.insert_transaction(transaction);
+            }
+
             if schedulable_threads.is_empty() {
                 break;
             }
@@ -74,12 +97,21 @@ impl SimpleScheduler {
                 continue;
             }
 
+            // Check if this chain is already scheduled onto a thread
+            let chain_id = prio_graph.chain_id(&id);
+            let tx_schedulable_threads =
+                if let Some(thread_index) = chain_id_to_thread.get(&chain_id) {
+                    schedulable_threads & ThreadSet::only(*thread_index)
+                } else {
+                    schedulable_threads
+                };
+
             // Schedule the transaction if it can be
             let transaction_locks = transaction.get_account_locks_unchecked();
             let Some(thread_id) = self.account_locks.try_lock_accounts(
                 transaction_locks.writable.into_iter(),
                 transaction_locks.readonly.into_iter(),
-                schedulable_threads,
+                tx_schedulable_threads,
                 |thread_set| {
                     Self::select_thread(
                         &batches.transactions,
@@ -92,6 +124,9 @@ impl SimpleScheduler {
                 unschedulable_ids.push(id);
                 continue;
             };
+
+            // Mark the thread for this chain id
+            chain_id_to_thread.insert(chain_id, thread_id);
 
             let sanitized_transaction_ttl = transaction_state.transition_to_pending();
             let cu_limit = transaction_state
@@ -109,6 +144,7 @@ impl SimpleScheduler {
             }
 
             let SanitizedTransactionTTL {
+                id,
                 transaction,
                 max_age_slot,
             } = sanitized_transaction_ttl;
@@ -334,6 +370,7 @@ mod tests {
             let transaction_ttl = SanitizedTransactionTTL {
                 transaction,
                 max_age_slot: Slot::MAX,
+                id: TransactionPriorityId { id, priority },
             };
             container.insert_new_transaction(
                 id,

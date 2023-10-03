@@ -2,7 +2,7 @@ use {
     super::{
         scheduler_error::SchedulerError, simple_scheduler::SimpleScheduler,
         transaction_id_generator::TransactionIdGenerator,
-        transaction_state::SanitizedTransactionTTL,
+        transaction_priority_id::TransactionPriorityId, transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
     crate::banking_stage::{
@@ -172,13 +172,16 @@ impl CentralSchedulerBankingStage {
                     .map(|_| (packet, transaction))
             })
         {
+            let transaction_id = self.transaction_id_generator.next();
+            let transaction_priority_details = packet.transaction_priority_details().clone();
             let transaction_ttl = SanitizedTransactionTTL {
                 transaction,
                 max_age_slot: last_slot_in_epoch,
+                id: TransactionPriorityId::new(
+                    transaction_priority_details.priority,
+                    transaction_id,
+                ),
             };
-
-            let transaction_id = self.transaction_id_generator.next();
-            let transaction_priority_details = packet.transaction_priority_details().clone();
             self.container.insert_new_transaction(
                 transaction_id,
                 transaction_ttl,
@@ -225,9 +228,15 @@ impl CentralSchedulerBankingStage {
         {
             match retryable_id_iter.peek() {
                 Some(retryable_index) if index == *retryable_index => {
+                    let priority = self
+                        .container
+                        .get_mut_transaction_state(&id)
+                        .unwrap()
+                        .priority();
                     self.container.retry_transaction(
                         id,
                         SanitizedTransactionTTL {
+                            id: TransactionPriorityId::new(priority, id),
                             transaction,
                             max_age_slot,
                         },

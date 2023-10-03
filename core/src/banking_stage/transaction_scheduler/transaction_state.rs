@@ -1,12 +1,35 @@
 use {
+    super::transaction_priority_id::TransactionPriorityId,
     solana_runtime::transaction_priority_details::TransactionPriorityDetails,
-    solana_sdk::{slot_history::Slot, transaction::SanitizedTransaction},
+    solana_sdk::{pubkey::Pubkey, slot_history::Slot, transaction::SanitizedTransaction},
 };
 
 /// Simple wrapper type to tie a sanitized transaction to max age slot.
 pub(crate) struct SanitizedTransactionTTL {
+    pub(crate) id: TransactionPriorityId,
     pub(crate) transaction: SanitizedTransaction,
     pub(crate) max_age_slot: Slot,
+}
+
+impl prio_graph::Transaction<TransactionPriorityId, Pubkey> for SanitizedTransactionTTL {
+    fn id(&self) -> TransactionPriorityId {
+        self.id
+    }
+
+    fn reward(&self) -> u64 {
+        self.id.priority
+    }
+
+    fn check_resource_keys<F: FnMut(&Pubkey, prio_graph::AccessKind)>(&self, mut checker: F) {
+        let message = self.transaction.message();
+        for (index, resource_key) in message.account_keys().iter().enumerate() {
+            if message.is_writable(index) {
+                checker(resource_key, prio_graph::AccessKind::Write);
+            } else {
+                checker(resource_key, prio_graph::AccessKind::Read);
+            }
+        }
+    }
 }
 
 /// TransactionState is used to track the state of a transaction in the transaction scheduler
@@ -172,6 +195,7 @@ impl TransactionState {
 mod tests {
     use {
         super::*,
+        crate::banking_stage::scheduler_messages::TransactionId,
         solana_sdk::{
             compute_budget::ComputeBudgetInstruction, hash::Hash, message::Message,
             signature::Keypair, signer::Signer, system_instruction, transaction::Transaction,
@@ -194,6 +218,7 @@ mod tests {
         let transaction_ttl = SanitizedTransactionTTL {
             transaction: SanitizedTransaction::from_transaction_for_tests(tx),
             max_age_slot: Slot::MAX,
+            id: TransactionPriorityId::new(priority, TransactionId::new(0)),
         };
 
         TransactionState::new(
@@ -236,10 +261,12 @@ mod tests {
         let SanitizedTransactionTTL {
             transaction,
             max_age_slot,
+            id,
         } = transaction_state.transaction_ttl();
         let transaction_ttl = SanitizedTransactionTTL {
             transaction: transaction.clone(),
             max_age_slot: *max_age_slot,
+            id: *id,
         };
         transaction_state.transition_to_unprocessed(transaction_ttl); // invalid transition
     }

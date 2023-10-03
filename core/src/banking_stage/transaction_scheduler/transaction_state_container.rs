@@ -202,6 +202,7 @@ mod tests {
         let tx = Transaction::new(&[&from_keypair], message, Hash::default());
 
         let transaction_ttl = SanitizedTransactionTTL {
+            id: TransactionPriorityId::new(priority, TransactionId::new(0)),
             transaction: SanitizedTransaction::from_transaction_for_tests(tx),
             max_age_slot: Slot::MAX,
         };

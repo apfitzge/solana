@@ -226,7 +226,7 @@ impl<'a> ActiveMultiIteratorConsumeScheduler<'a> {
                 let cu_limit = transaction_state
                     .transaction_priority_details()
                     .compute_unit_limit;
-                self.add_transaction_to_batch(id, transaction_ttl, cu_limit, thread_id);
+                self.add_transaction_to_batch(transaction_ttl, cu_limit, thread_id);
                 ProcessingDecision::Now
             }
             ConsumeSchedulingDecision::Later => ProcessingDecision::Later,
@@ -278,8 +278,8 @@ impl<'a> ActiveMultiIteratorConsumeScheduler<'a> {
 
     fn add_transaction_to_batch(
         &mut self,
-        id: &TransactionPriorityId,
         SanitizedTransactionTTL {
+            id,
             transaction,
             max_age_slot,
         }: SanitizedTransactionTTL,
@@ -392,6 +392,7 @@ mod tests {
             let transaction =
                 prioritized_tranfers(from_keypair.borrow(), to_pubkeys, lamports, priority);
             let transaction_ttl = SanitizedTransactionTTL {
+                id: TransactionPriorityId::new(priority, id),
                 transaction,
                 max_age_slot: Slot::MAX,
             };

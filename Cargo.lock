@@ -3935,6 +3935,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "prio-graph"
+version = "0.1.0"
+source = "git+https://github.com/apfitzge/prio-graph.git?rev=dd65f5ceb884eca8f64a085c613cf6c4af5693eb#dd65f5ceb884eca8f64a085c613cf6c4af5693eb"
+
+[[package]]
 name = "proc-macro-crate"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5783,6 +5788,7 @@ dependencies = [
  "lru",
  "min-max-heap",
  "num_enum 0.7.0",
+ "prio-graph",
  "quinn",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
