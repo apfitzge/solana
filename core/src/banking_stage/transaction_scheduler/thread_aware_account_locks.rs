@@ -75,42 +75,14 @@ impl ThreadAwareAccountLocks {
         allowed_threads: ThreadSet,
         thread_selector: impl FnOnce(ThreadSet) -> ThreadId,
     ) -> Option<ThreadId> {
-        let Some(accounts_schedulable_threads) = self
-            .accounts_schedulable_threads(write_account_locks.clone(), read_account_locks.clone())
-        else {
-            let writes = write_account_locks.clone().collect::<Vec<_>>();
-            let writes_held = writes
-                .iter()
-                .map(|key| self.write_locks.get(key))
-                .collect::<Vec<_>>();
-            error!("accounts not schedulable: {writes:?}");
-            error!("write locks held: {writes_held:?}");
-            return None;
-        };
-
-        let schedulable_threads = accounts_schedulable_threads & allowed_threads;
-        (!schedulable_threads.is_empty())
-            .then(|| {
-                let thread_id = thread_selector(schedulable_threads);
-                self.lock_accounts(
-                    write_account_locks.clone(),
-                    read_account_locks.clone(),
-                    thread_id,
-                );
-                thread_id
-            })
-            .or_else(|| {
-                let writes = write_account_locks.clone().collect::<Vec<_>>();
-                let writes_held = writes
-                    .iter()
-                    .map(|key| self.write_locks.get(key))
-                    .collect::<Vec<_>>();
-                error!("accounts schedulable threads: {accounts_schedulable_threads:?}");
-                error!("                            : {allowed_threads:?}");
-                error!("accounts not schedulable: {writes:?}");
-                error!("write locks held: {writes_held:?}");
-                None
-            })
+        let schedulable_threads = self
+            .accounts_schedulable_threads(write_account_locks, read_account_locks)?
+            & allowed_threads;
+        (!schedulable_threads.is_empty()).then(|| {
+            let thread_id = thread_selector(schedulable_threads);
+            self.lock_accounts(write_account_locks, read_account_locks, thread_id);
+            thread_id
+        })
     }
 
     /// Unlocks the accounts for the given thread.
