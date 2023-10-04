@@ -15,7 +15,10 @@ use {
     crossbeam_channel::Sender,
     prio_graph::PrioGraph,
     solana_sdk::{clock::Slot, transaction::SanitizedTransaction},
-    std::collections::HashMap,
+    std::{
+        collections::HashMap,
+        sync::atomic::{AtomicU32, Ordering},
+    },
 };
 
 const QUEUED_TRANSACTION_LIMIT: usize = 64 * 100;
@@ -51,13 +54,21 @@ impl SimpleScheduler {
             }
         }
 
+        let mut num_scheduled_per_thread = vec![0; num_threads];
+
         let mut unschedulable_ids = Vec::new();
         let mut batches = Batches::new(num_threads);
         let mut num_scheduled = 0;
         let mut blocking_locks = ReadWriteAccountSet::default();
 
-        const LOOK_AHEAD_WINDOW: usize = 1000;
-        let mut prio_graph = PrioGraph::new(|id: &TransactionPriorityId, _| id.priority);
+        const LOOK_AHEAD_WINDOW: usize = 10_000;
+        const PRIORITY_MASK: u64 = 0x0000_0000_ffff_ffff;
+        let mut priority_bump = AtomicU32::new(u32::MAX);
+        let mut prio_graph = PrioGraph::new(move |id: &TransactionPriorityId, _| {
+            let current_bump = (priority_bump.load(Ordering::Relaxed) as u64);
+            priority_bump.fetch_sub(1, Ordering::Relaxed);
+            ((id.priority & PRIORITY_MASK) << 32) | current_bump
+        });
 
         // Create the initial look ahead window
         for _ in 0..LOOK_AHEAD_WINDOW {
@@ -71,98 +82,119 @@ impl SimpleScheduler {
 
         let mut chain_id_to_thread = HashMap::new();
         const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 100_000;
-        while let Some(id) = prio_graph.pop_and_unblock() {
-            // Push into the look ahead window
-            if let Some(next_id) = container.pop_max() {
-                let transaction = container.get_transaction_ttl(&next_id.id).unwrap();
-                prio_graph.insert_transaction(transaction);
-            }
 
-            if schedulable_threads.is_empty() {
+        let mut unblock_this_batch =
+            Vec::with_capacity(self.consume_work_senders.len() * TARGET_NUM_TRANSACTIONS_PER_BATCH);
+        while num_scheduled < MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
+            if prio_graph.is_empty() {
                 break;
             }
-            if num_scheduled > MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
-                break;
-            }
-            let Some(transaction_state) = container.get_mut_transaction_state(&id.id) else {
-                continue;
-            };
 
-            let transaction = &transaction_state.transaction_ttl().transaction;
+            while let Some(id) = prio_graph.pop() {
+                unblock_this_batch.push(id);
 
-            // Check if this transaction conflicts with any blocked transactions
-            if !blocking_locks.check_locks(transaction.message()) {
-                blocking_locks.take_locks(transaction.message());
-                unschedulable_ids.push(id);
-                continue;
-            }
+                // Push into the look ahead window
+                if let Some(next_id) = container.pop_max() {
+                    let transaction = container.get_transaction_ttl(&next_id.id).unwrap();
+                    prio_graph.insert_transaction(transaction);
+                }
 
-            // Check if this chain is already scheduled onto a thread
-            let chain_id = prio_graph.chain_id(&id);
-            let tx_schedulable_threads =
-                if let Some(thread_index) = chain_id_to_thread.get(&chain_id) {
-                    schedulable_threads & ThreadSet::only(*thread_index)
-                } else {
-                    schedulable_threads
+                if schedulable_threads.is_empty() {
+                    break;
+                }
+                if num_scheduled > MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
+                    break;
+                }
+                let Some(transaction_state) = container.get_mut_transaction_state(&id.id) else {
+                    continue;
                 };
 
-            // Schedule the transaction if it can be
-            let transaction_locks = transaction.get_account_locks_unchecked();
-            let Some(thread_id) = self.account_locks.try_lock_accounts(
-                transaction_locks.writable.into_iter(),
-                transaction_locks.readonly.into_iter(),
-                tx_schedulable_threads,
-                |thread_set| {
-                    Self::select_thread(
-                        &batches.transactions,
-                        self.in_flight_tracker.num_in_flight_per_thread(),
-                        thread_set,
-                    )
-                },
-            ) else {
-                blocking_locks.take_locks(transaction.message());
-                unschedulable_ids.push(id);
-                continue;
-            };
+                let transaction = &transaction_state.transaction_ttl().transaction;
 
-            // Mark the thread for this chain id
-            chain_id_to_thread.insert(chain_id, thread_id);
+                // Check if this transaction conflicts with any blocked transactions
+                if !blocking_locks.check_locks(transaction.message()) {
+                    blocking_locks.take_locks(transaction.message());
+                    unschedulable_ids.push(id);
+                    continue;
+                }
 
-            let sanitized_transaction_ttl = transaction_state.transition_to_pending();
-            let cu_limit = transaction_state
-                .transaction_priority_details()
-                .compute_unit_limit;
+                // // Check if this chain is already scheduled onto a thread
+                let chain_id = prio_graph.chain_id(&id);
+                let tx_schedulable_threads =
+                    if let Some(thread_index) = chain_id_to_thread.get(&chain_id) {
+                        let tx_schedulable_threads =
+                            schedulable_threads & ThreadSet::only(*thread_index);
+                        tx_schedulable_threads
+                    } else {
+                        let tx_schedulable_threads = schedulable_threads;
+                        tx_schedulable_threads
+                    };
 
-            // Add to the current batch.
-            // If conflicting with any transactions in the current batch on this thread,
-            // immediately send all batches
-            let should_send_batches = batches.locks[thread_id]
-                .take_locks(sanitized_transaction_ttl.transaction.message());
+                // Schedule the transaction if it can be
+                let transaction_locks = transaction.get_account_locks_unchecked();
+                let Some(thread_id) = self.account_locks.try_lock_accounts(
+                    transaction_locks.writable.into_iter(),
+                    transaction_locks.readonly.into_iter(),
+                    tx_schedulable_threads,
+                    |thread_set| {
+                        Self::select_thread(
+                            &batches.transactions,
+                            self.in_flight_tracker.num_in_flight_per_thread(),
+                            thread_set,
+                        )
+                    },
+                ) else {
+                    blocking_locks.take_locks(transaction.message());
+                    unschedulable_ids.push(id);
+                    continue;
+                };
+                num_scheduled_per_thread[thread_id] += 1;
 
-            if should_send_batches {
-                num_scheduled += self.send_batches(&mut batches)?;
+                // Mark the thread for this chain id
+                chain_id_to_thread.insert(chain_id, thread_id);
+
+                let sanitized_transaction_ttl = transaction_state.transition_to_pending();
+                let cu_limit = transaction_state
+                    .transaction_priority_details()
+                    .compute_unit_limit;
+
+                // Add to the current batch.
+                // If conflicting with any transactions in the current batch on this thread,
+                // immediately send all batches
+                let should_send_batches = !batches.locks[thread_id]
+                    .take_locks(sanitized_transaction_ttl.transaction.message());
+
+                if should_send_batches {
+                    num_scheduled += self.send_batches(&mut batches)?;
+                    batches.locks[thread_id]
+                        .take_locks(sanitized_transaction_ttl.transaction.message());
+                }
+
+                let SanitizedTransactionTTL {
+                    id,
+                    transaction,
+                    max_age_slot,
+                } = sanitized_transaction_ttl;
+
+                batches.transactions[thread_id].push(transaction);
+                batches.ids[thread_id].push(id.id);
+                batches.max_age_slots[thread_id].push(max_age_slot);
+                batches.total_cus[thread_id] += cu_limit;
+
+                if batches.ids[thread_id].len()
+                    + self.in_flight_tracker.num_in_flight_per_thread()[thread_id]
+                    >= QUEUED_TRANSACTION_LIMIT
+                {
+                    schedulable_threads.remove(thread_id);
+                }
+
+                if batches.ids[thread_id].len() >= TARGET_NUM_TRANSACTIONS_PER_BATCH {
+                    num_scheduled += self.send_batch(&mut batches, thread_id)?;
+                }
             }
 
-            let SanitizedTransactionTTL {
-                id,
-                transaction,
-                max_age_slot,
-            } = sanitized_transaction_ttl;
-
-            batches.transactions[thread_id].push(transaction);
-            batches.ids[thread_id].push(id.id);
-            batches.max_age_slots[thread_id].push(max_age_slot);
-            batches.total_cus[thread_id] += cu_limit;
-
-            if batches.ids[thread_id].len()
-                + self.in_flight_tracker.num_in_flight_per_thread()[thread_id]
-                >= QUEUED_TRANSACTION_LIMIT
-            {
-                schedulable_threads.remove(thread_id);
-            }
-
-            if batches.ids[thread_id].len() >= TARGET_NUM_TRANSACTIONS_PER_BATCH {
-                num_scheduled += self.send_batch(&mut batches, thread_id)?;
+            for id in unblock_this_batch.drain(..) {
+                prio_graph.unblock_id(&id);
             }
         }
 
@@ -171,6 +203,11 @@ impl SimpleScheduler {
 
         // Push unschedulable ids back into the container
         for id in unschedulable_ids {
+            container.push_id_into_queue(id);
+        }
+
+        // Push remaining transactions back into the container
+        while let Some(id) = prio_graph.pop_and_unblock() {
             container.push_id_into_queue(id);
         }
 
@@ -222,11 +259,11 @@ impl SimpleScheduler {
         batches: &mut Batches,
         thread_index: usize,
     ) -> Result<usize, SchedulerError> {
-        let (ids, transactions, max_age_slots, total_cus) = batches.take_batch(thread_index);
-
-        if ids.is_empty() {
+        if batches.ids[thread_index].is_empty() {
             return Ok(0);
         }
+
+        let (ids, transactions, max_age_slots, total_cus) = batches.take_batch(thread_index);
 
         let batch_id = self
             .in_flight_tracker

@@ -18,11 +18,13 @@ type LockCount = u32;
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) struct ThreadSet(u64);
 
+#[derive(Debug)]
 struct AccountWriteLocks {
     thread_id: ThreadId,
     lock_count: LockCount,
 }
 
+#[derive(Debug)]
 struct AccountReadLocks {
     thread_set: ThreadSet,
     lock_counts: [LockCount; MAX_THREADS],
@@ -32,6 +34,7 @@ struct AccountReadLocks {
 /// that already hold locks on the account. This is useful for allowing
 /// queued transactions to be scheduled on a thread while the transaction
 /// is still being executed on the thread.
+#[derive(Debug)]
 pub(crate) struct ThreadAwareAccountLocks {
     /// Number of threads.
     num_threads: usize, // 0..MAX_THREADS
@@ -72,15 +75,42 @@ impl ThreadAwareAccountLocks {
         allowed_threads: ThreadSet,
         thread_selector: impl FnOnce(ThreadSet) -> ThreadId,
     ) -> Option<ThreadId> {
-        let schedulable_threads = self.accounts_schedulable_threads(
-            write_account_locks.clone(),
-            read_account_locks.clone(),
-        )? & allowed_threads;
-        (!schedulable_threads.is_empty()).then(|| {
-            let thread_id = thread_selector(schedulable_threads);
-            self.lock_accounts(write_account_locks, read_account_locks, thread_id);
-            thread_id
-        })
+        let Some(accounts_schedulable_threads) = self
+            .accounts_schedulable_threads(write_account_locks.clone(), read_account_locks.clone())
+        else {
+            let writes = write_account_locks.clone().collect::<Vec<_>>();
+            let writes_held = writes
+                .iter()
+                .map(|key| self.write_locks.get(key))
+                .collect::<Vec<_>>();
+            error!("accounts not schedulable: {writes:?}");
+            error!("write locks held: {writes_held:?}");
+            return None;
+        };
+
+        let schedulable_threads = accounts_schedulable_threads & allowed_threads;
+        (!schedulable_threads.is_empty())
+            .then(|| {
+                let thread_id = thread_selector(schedulable_threads);
+                self.lock_accounts(
+                    write_account_locks.clone(),
+                    read_account_locks.clone(),
+                    thread_id,
+                );
+                thread_id
+            })
+            .or_else(|| {
+                let writes = write_account_locks.clone().collect::<Vec<_>>();
+                let writes_held = writes
+                    .iter()
+                    .map(|key| self.write_locks.get(key))
+                    .collect::<Vec<_>>();
+                error!("accounts schedulable threads: {accounts_schedulable_threads:?}");
+                error!("                            : {allowed_threads:?}");
+                error!("accounts not schedulable: {writes:?}");
+                error!("write locks held: {writes_held:?}");
+                None
+            })
     }
 
     /// Unlocks the accounts for the given thread.
