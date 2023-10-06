@@ -19,7 +19,7 @@ use {
         validator::GeneratorConfig,
     },
     crossbeam_channel::{unbounded, Receiver},
-    solana_client::connection_cache::{ConnectionCache, Protocol},
+    solana_client::connection_cache::Protocol,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{
         blockstore::Blockstore, blockstore_processor::TransactionStatusSender,
@@ -99,7 +99,6 @@ impl Tpu {
         bank_notification_sender: Option<BankNotificationSender>,
         tpu_coalesce: Duration,
         cluster_confirmed_slot_sender: GossipDuplicateConfirmedSlotsSender,
-        connection_cache: &Arc<ConnectionCache>,
         keypair: &Keypair,
         log_messages_bytes_limit: Option<usize>,
         staked_nodes: &Arc<RwLock<StakedNodes>>,
@@ -199,7 +198,6 @@ impl Tpu {
             transaction_status_sender,
             replay_vote_sender,
             log_messages_bytes_limit,
-            connection_cache.clone(),
             bank_forks.clone(),
             prioritization_fee_cache,
         );

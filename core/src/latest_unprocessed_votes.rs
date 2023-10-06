@@ -325,6 +325,10 @@ impl LatestUnprocessedVotes {
             .collect_vec()
     }
 
+    pub fn clear(&self) {
+        self.latest_votes_per_pubkey.write().unwrap().clear();
+    }
+
     /// Sometimes we forward and hold the packets, sometimes we forward and clear.
     /// This also clears all gossip votes since by definition they have been forwarded
     pub fn clear_forwarded_packets(&self) {

@@ -8,7 +8,6 @@ use {
     log::*,
     rand::{thread_rng, Rng},
     rayon::prelude::*,
-    solana_client::connection_cache::ConnectionCache,
     solana_core::{
         banking_stage::{
             committer::Committer, consumer::Consumer, BankingStage, BankingStageStats,
@@ -297,7 +296,6 @@ fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
             None,
             s,
             None,
-            Arc::new(ConnectionCache::new("connection_cache_test")),
             bank_forks,
             &Arc::new(PrioritizationFeeCache::new(0u64)),
         );

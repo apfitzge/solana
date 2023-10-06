@@ -6,7 +6,6 @@ use {
     self::{
         consumer::Consumer,
         decision_maker::{BufferedPacketsDecision, DecisionMaker},
-        forwarder::Forwarder,
         packet_receiver::PacketReceiver,
     },
     crate::{
@@ -21,11 +20,10 @@ use {
     },
     crossbeam_channel::RecvTimeoutError,
     histogram::Histogram,
-    solana_client::connection_cache::ConnectionCache,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::blockstore_processor::TransactionStatusSender,
-    solana_measure::{measure, measure_us},
-    solana_perf::{data_budget::DataBudget, packet::PACKETS_PER_BATCH},
+    solana_measure::measure,
+    solana_perf::packet::PACKETS_PER_BATCH,
     solana_poh::poh_recorder::PohRecorder,
     solana_runtime::{
         bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
@@ -46,14 +44,12 @@ use {
 pub mod committer;
 pub mod consumer;
 mod decision_maker;
-mod forwarder;
 mod packet_receiver;
 
 #[allow(dead_code)]
 mod scheduler_messages;
 
 mod consume_worker;
-mod forward_worker;
 #[allow(dead_code)]
 mod thread_aware_account_locks;
 
@@ -293,16 +289,6 @@ pub enum ForwardOption {
     ForwardTransaction,
 }
 
-#[derive(Debug, Default)]
-pub struct FilterForwardingResults {
-    pub(crate) total_forwardable_packets: usize,
-    pub(crate) total_tracer_packets_in_buffer: usize,
-    pub(crate) total_forwardable_tracer_packets: usize,
-    pub(crate) total_dropped_packets: usize,
-    pub(crate) total_packet_conversion_us: u64,
-    pub(crate) total_filter_packets_us: u64,
-}
-
 impl BankingStage {
     /// Create the stage using `bank`. Exit when `verified_receiver` is dropped.
     #[allow(clippy::too_many_arguments)]
@@ -315,7 +301,6 @@ impl BankingStage {
         transaction_status_sender: Option<TransactionStatusSender>,
         replay_vote_sender: ReplayVoteSender,
         log_messages_bytes_limit: Option<usize>,
-        connection_cache: Arc<ConnectionCache>,
         bank_forks: Arc<RwLock<BankForks>>,
         prioritization_fee_cache: &Arc<PrioritizationFeeCache>,
     ) -> Self {
@@ -329,7 +314,6 @@ impl BankingStage {
             transaction_status_sender,
             replay_vote_sender,
             log_messages_bytes_limit,
-            connection_cache,
             bank_forks,
             prioritization_fee_cache,
         )
@@ -346,7 +330,6 @@ impl BankingStage {
         transaction_status_sender: Option<TransactionStatusSender>,
         replay_vote_sender: ReplayVoteSender,
         log_messages_bytes_limit: Option<usize>,
-        connection_cache: Arc<ConnectionCache>,
         bank_forks: Arc<RwLock<BankForks>>,
         prioritization_fee_cache: &Arc<PrioritizationFeeCache>,
     ) -> Self {
@@ -354,7 +337,6 @@ impl BankingStage {
         // Single thread to generate entries from many banks.
         // This thread talks to poh_service and broadcasts the entries once they have been recorded.
         // Once an entry has been recorded, its blockhash is registered with the bank.
-        let data_budget = Arc::new(DataBudget::default());
         let batch_limit =
             TOTAL_BUFFERED_PACKETS / ((num_threads - NUM_VOTE_PROCESSING_THREADS) as usize);
         // Keeps track of extraneous vote transactions for the vote threads
@@ -419,13 +401,6 @@ impl BankingStage {
                     prioritization_fee_cache.clone(),
                 );
                 let decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
-                let forwarder = Forwarder::new(
-                    poh_recorder.clone(),
-                    bank_forks.clone(),
-                    cluster_info.clone(),
-                    connection_cache.clone(),
-                    data_budget.clone(),
-                );
                 let consumer = Consumer::new(
                     committer,
                     poh_recorder.read().unwrap().new_recorder(),
@@ -439,7 +414,6 @@ impl BankingStage {
                         Self::process_loop(
                             &mut packet_receiver,
                             &decision_maker,
-                            &forwarder,
                             &consumer,
                             id,
                             unprocessed_transaction_storage,
@@ -454,12 +428,10 @@ impl BankingStage {
     #[allow(clippy::too_many_arguments)]
     fn process_buffered_packets(
         decision_maker: &DecisionMaker,
-        forwarder: &Forwarder,
         consumer: &Consumer,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         banking_stage_stats: &BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
-        tracer_packet_stats: &mut TracerPacketStats,
     ) {
         if unprocessed_transaction_storage.should_not_process() {
             return;
@@ -489,38 +461,21 @@ impl BankingStage {
                     .increment_consume_buffered_packets_us(consume_buffered_packets_time.as_us());
             }
             BufferedPacketsDecision::Forward => {
-                let ((), forward_us) = measure_us!(forwarder.handle_forwarding(
-                    unprocessed_transaction_storage,
-                    false,
-                    slot_metrics_tracker,
-                    banking_stage_stats,
-                    tracer_packet_stats,
-                ));
-                slot_metrics_tracker.increment_forward_us(forward_us);
+                unprocessed_transaction_storage.clear();
                 // Take metrics action after forwarding packets to include forwarded
                 // metrics into current slot
                 slot_metrics_tracker.apply_action(metrics_action);
             }
-            BufferedPacketsDecision::ForwardAndHold => {
-                let ((), forward_and_hold_us) = measure_us!(forwarder.handle_forwarding(
-                    unprocessed_transaction_storage,
-                    true,
-                    slot_metrics_tracker,
-                    banking_stage_stats,
-                    tracer_packet_stats,
-                ));
-                slot_metrics_tracker.increment_forward_and_hold_us(forward_and_hold_us);
+            BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Hold => {
                 // Take metrics action after forwarding packets
                 slot_metrics_tracker.apply_action(metrics_action);
             }
-            _ => (),
         }
     }
 
     fn process_loop(
         packet_receiver: &mut PacketReceiver,
         decision_maker: &DecisionMaker,
-        forwarder: &Forwarder,
         consumer: &Consumer,
         id: u32,
         mut unprocessed_transaction_storage: UnprocessedTransactionStorage,
@@ -538,12 +493,10 @@ impl BankingStage {
                 let (_, process_buffered_packets_time) = measure!(
                     Self::process_buffered_packets(
                         decision_maker,
-                        forwarder,
                         consumer,
                         &mut unprocessed_transaction_storage,
                         &banking_stage_stats,
                         &mut slot_metrics_tracker,
-                        &mut tracer_packet_stats,
                     ),
                     "process_buffered_packets",
                 );
@@ -677,7 +630,6 @@ mod tests {
                 None,
                 replay_vote_sender,
                 None,
-                Arc::new(ConnectionCache::new("connection_cache_test")),
                 bank_forks,
                 &Arc::new(PrioritizationFeeCache::new(0u64)),
             );
@@ -733,7 +685,6 @@ mod tests {
                 None,
                 replay_vote_sender,
                 None,
-                Arc::new(ConnectionCache::new("connection_cache_test")),
                 bank_forks,
                 &Arc::new(PrioritizationFeeCache::new(0u64)),
             );
@@ -814,7 +765,6 @@ mod tests {
                 None,
                 replay_vote_sender,
                 None,
-                Arc::new(ConnectionCache::new("connection_cache_test")),
                 bank_forks,
                 &Arc::new(PrioritizationFeeCache::new(0u64)),
             );
@@ -976,7 +926,6 @@ mod tests {
                     None,
                     replay_vote_sender,
                     None,
-                    Arc::new(ConnectionCache::new("connection_cache_test")),
                     bank_forks,
                     &Arc::new(PrioritizationFeeCache::new(0u64)),
                 );
@@ -1170,7 +1119,6 @@ mod tests {
                 None,
                 replay_vote_sender,
                 None,
-                Arc::new(ConnectionCache::new("connection_cache_test")),
                 bank_forks,
                 &Arc::new(PrioritizationFeeCache::new(0u64)),
             );
