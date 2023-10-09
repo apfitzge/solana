@@ -4,6 +4,8 @@ pub(crate) mod central_scheduler_banking_stage;
 mod in_flight_tracker;
 #[allow(dead_code)]
 mod multi_iterator_consume_scheduler;
+#[allow(dead_code)]
+mod prio_graph_scheduler;
 mod scheduler_error;
 #[allow(dead_code)]
 mod simple_scheduler;
