@@ -1,6 +1,7 @@
 use {
     crate::banking_stage::scheduler_messages::TransactionId,
     core::hash::{Hash, Hasher},
+    prio_graph::TopLevelId,
     std::fmt::{Display, Formatter},
 };
 
@@ -39,5 +40,11 @@ impl Hash for TransactionPriorityId {
 impl Display for TransactionPriorityId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "TransactionPriorityId({self:?})")
+    }
+}
+
+impl TopLevelId<Self> for TransactionPriorityId {
+    fn id(&self) -> Self {
+        *self
     }
 }
