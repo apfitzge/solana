@@ -6,4 +6,6 @@ pub enum SchedulerError {
     DisconnectedSendChannel(&'static str),
     #[error("Receiving channel disconnected: {0}")]
     DisconnectedReceiveChannel(&'static str),
+    #[error("Recv channel disconnected: {0}")]
+    DisconnectedRecvChannel(&'static str),
 }
