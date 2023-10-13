@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Eq, PartialEq, Error)]
 pub enum SchedulerError {
     #[error("Sending channel disconnected: {0}")]
     DisconnectedSendChannel(&'static str),
