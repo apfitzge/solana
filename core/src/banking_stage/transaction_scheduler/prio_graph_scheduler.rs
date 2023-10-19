@@ -232,6 +232,14 @@ impl PrioGraphScheduler {
         Ok(num_scheduled)
     }
 
+    pub fn receive_completed(
+        &mut self,
+        container: &mut TransactionStateContainer,
+    ) -> Result<(), SchedulerError> {
+        while self.try_receive_completed(container, Some(|_: &_| {}))? {}
+        Ok(())
+    }
+
     /// Receive completed batches of transactions.
     fn try_receive_completed<F: FnOnce(&[TransactionPriorityId])>(
         &mut self,

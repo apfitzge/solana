@@ -75,9 +75,10 @@ impl ThreadAwareAccountLocks {
         allowed_threads: ThreadSet,
         thread_selector: impl FnOnce(ThreadSet) -> ThreadId,
     ) -> Option<ThreadId> {
-        let schedulable_threads = self
-            .accounts_schedulable_threads(write_account_locks, read_account_locks)?
-            & allowed_threads;
+        let schedulable_threads = self.accounts_schedulable_threads(
+            write_account_locks.clone(),
+            read_account_locks.clone(),
+        )? & allowed_threads;
         (!schedulable_threads.is_empty()).then(|| {
             let thread_id = thread_selector(schedulable_threads);
             self.lock_accounts(write_account_locks, read_account_locks, thread_id);

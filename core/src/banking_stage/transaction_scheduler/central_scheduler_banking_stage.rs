@@ -1,6 +1,6 @@
 use {
     super::{
-        scheduler_error::SchedulerError, simple_scheduler::SimpleScheduler,
+        prio_graph_scheduler::PrioGraphScheduler, scheduler_error::SchedulerError,
         transaction_id_generator::TransactionIdGenerator,
         transaction_priority_id::TransactionPriorityId, transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
@@ -36,7 +36,7 @@ pub struct CentralSchedulerBankingStage {
     container: TransactionStateContainer,
 
     /// Scheduler for consuming transactions
-    consume_scheduler: SimpleScheduler,
+    consume_scheduler: PrioGraphScheduler,
 
     /// Receives finished consume work from consume worker(s)
     finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
@@ -75,7 +75,10 @@ impl CentralSchedulerBankingStage {
             packet_deserializer,
             transaction_id_generator: TransactionIdGenerator::default(),
             container: TransactionStateContainer::with_capacity(700_000),
-            consume_scheduler: SimpleScheduler::new(consume_work_senders),
+            consume_scheduler: PrioGraphScheduler::new(
+                consume_work_senders,
+                finished_consume_work_receiver.clone(),
+            ),
             finished_consume_work_receiver,
         }
     }
@@ -90,7 +93,9 @@ impl CentralSchedulerBankingStage {
                 let decision = self.decision_maker.make_consume_or_forward_decision();
                 match decision {
                     BufferedPacketsDecision::Consume(_) => {
-                        let num_scheduled = self.consume_scheduler.schedule(&mut self.container)?;
+                        let num_scheduled = self
+                            .consume_scheduler
+                            .schedule::<false>(&mut self.container)?;
                         scheduler_metrics.consumed_packet_count += num_scheduled;
                     }
                     BufferedPacketsDecision::Forward => self.container.clear(),
@@ -177,10 +182,6 @@ impl CentralSchedulerBankingStage {
             let transaction_ttl = SanitizedTransactionTTL {
                 transaction,
                 max_age_slot: last_slot_in_epoch,
-                id: TransactionPriorityId::new(
-                    transaction_priority_details.priority,
-                    transaction_id,
-                ),
             };
             self.container.insert_new_transaction(
                 transaction_id,
@@ -191,61 +192,8 @@ impl CentralSchedulerBankingStage {
     }
 
     fn receive_and_process_finished_work(&mut self) -> Result<(), SchedulerError> {
-        loop {
-            match self.finished_consume_work_receiver.try_recv() {
-                Ok(finished_consume_work) => {
-                    self.process_finished_consume_work(finished_consume_work)
-                }
-                Err(TryRecvError::Empty) => return Ok(()),
-                Err(TryRecvError::Disconnected) => {
-                    return Err(SchedulerError::DisconnectedReceiveChannel(
-                        "finished consume work receiver",
-                    ));
-                }
-            }
-        }
-    }
-
-    fn process_finished_consume_work(
-        &mut self,
-        FinishedConsumeWork {
-            work:
-                ConsumeWork {
-                    batch_id,
-                    ids,
-                    transactions,
-                    max_age_slots,
-                },
-            retryable_indexes,
-        }: FinishedConsumeWork,
-    ) {
         self.consume_scheduler
-            .complete_batch(batch_id, &transactions);
-
-        let mut retryable_id_iter = retryable_indexes.into_iter().peekable();
-        for (index, (id, transaction, max_age_slot)) in
-            izip!(ids, transactions, max_age_slots).enumerate()
-        {
-            match retryable_id_iter.peek() {
-                Some(retryable_index) if index == *retryable_index => {
-                    let priority = self
-                        .container
-                        .get_mut_transaction_state(&id)
-                        .unwrap()
-                        .priority();
-                    self.container.retry_transaction(
-                        id,
-                        SanitizedTransactionTTL {
-                            id: TransactionPriorityId::new(priority, id),
-                            transaction,
-                            max_age_slot,
-                        },
-                    );
-                    retryable_id_iter.next(); // advance the iterator
-                }
-                _ => {}
-            }
-        }
+            .receive_completed(&mut self.container)
     }
 }
 
