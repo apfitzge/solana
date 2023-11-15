@@ -34,11 +34,7 @@ use {
         address_lookup_table::{self, error::AddressLookupError, state::AddressLookupTable},
         bpf_loader_upgradeable::{self, UpgradeableLoaderState},
         clock::{BankId, Slot},
-        feature_set::{
-            self, include_loaded_accounts_data_size_in_fee_calculation,
-            remove_congestion_multiplier_from_fee_calculation,
-            simplify_writable_program_account_check, FeatureSet,
-        },
+        feature_set::{self, simplify_writable_program_account_check, FeatureSet},
         fee::FeeStructure,
         genesis_config::ClusterType,
         message::{
