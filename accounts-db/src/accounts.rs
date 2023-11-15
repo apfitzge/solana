@@ -18,6 +18,7 @@ use {
         rent_debits::RentDebits,
         storable_accounts::StorableAccounts,
         transaction_error_metrics::TransactionErrorMetrics,
+        transaction_fee_details::calculate_transaction_fee_details,
         transaction_results::{TransactionCheckResult, TransactionExecutionResult},
     },
     dashmap::DashMap,
@@ -646,22 +647,15 @@ impl Accounts {
             .zip(lock_results)
             .map(|etx| match etx {
                 (tx, (Ok(()), nonce)) => {
-                    let lamports_per_signature = nonce
-                        .as_ref()
-                        .map(|nonce| nonce.lamports_per_signature())
-                        .unwrap_or_else(|| {
-                            hash_queue.get_lamports_per_signature(tx.message().recent_blockhash())
-                        });
-                    let fee = if let Some(lamports_per_signature) = lamports_per_signature {
-                        fee_structure.calculate_fee(
-                            tx.message(),
-                            lamports_per_signature,
-                            &process_compute_budget_instructions(tx.message().program_instructions_iter(), feature_set).unwrap_or_default().into(),
-                            feature_set.is_active(&remove_congestion_multiplier_from_fee_calculation::id()),
-                            feature_set.is_active(&include_loaded_accounts_data_size_in_fee_calculation::id()),
-                        )
-                    } else {
-                        return (Err(TransactionError::BlockhashNotFound), None);
+                    let fee = match calculate_transaction_fee_details(
+                        tx.message(),
+                        &nonce,
+                        hash_queue,
+                        feature_set,
+                        fee_structure,
+                    ) {
+                        Ok(fee_details) => fee_details.total_fee,
+                        Err(e) => return (Err(e), None),
                     };
 
                     let loaded_transaction = match self.load_transaction_accounts(
