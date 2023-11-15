@@ -16,6 +16,7 @@ use {
 };
 
 /// Details of total fee and fee from prioritization.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionFeeDetails {
     pub total_fee: u64,
     pub priority_fee: u64,
