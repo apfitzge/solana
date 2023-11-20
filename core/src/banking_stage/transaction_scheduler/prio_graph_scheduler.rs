@@ -38,8 +38,16 @@ impl PrioGraphScheduler {
             account_locks: ThreadAwareAccountLocks::new(num_threads),
             consume_work_senders,
             finished_consume_work_receiver,
-            look_ahead_window_size: 2048,
+            look_ahead_window_size: Self::get_look_ahead_window_size(),
         }
+    }
+
+    /// Gets the look-ahead window size from the environment variable
+    /// `SOLANA_SCHEDULER_LOOK_AHEAD_WINDOW_SIZE` or defaults to 256.
+    fn get_look_ahead_window_size() -> usize {
+        std::env::var("SOLANA_SCHEDULER_LOOK_AHEAD_WINDOW_SIZE")
+            .map(|x| x.parse().unwrap_or(256))
+            .unwrap_or(256)
     }
 
     /// Schedule transactions from the given `TransactionStateContainer` to be consumed by the
@@ -76,7 +84,7 @@ impl PrioGraphScheduler {
 
         let mut unblock_this_batch =
             Vec::with_capacity(self.consume_work_senders.len() * TARGET_NUM_TRANSACTIONS_PER_BATCH);
-        const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 100_000;
+        const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 10_000;
         let mut num_scheduled = 0;
         let mut num_sent = 0;
         while num_scheduled < MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
