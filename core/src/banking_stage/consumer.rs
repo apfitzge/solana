@@ -423,8 +423,10 @@ impl Consumer {
                 // Any transaction executed between sanitization time and now may have closed the lookup table(s).
                 // Above re-sanitization already loads addresses, so don't need to re-check in that case.
                 let lookup_tables = tx.message().message_address_table_lookups();
-                if !lookup_tables.is_empty() {
-                    bank.load_addresses(lookup_tables)?;
+                if !lookup_tables.is_empty()
+                    && tx.get_loaded_addresses() != bank.load_addresses(lookup_tables)?
+                {
+                    return Err(TransactionError::ResanitizationNeeded);
                 }
             }
             Ok(())
