@@ -614,6 +614,13 @@ impl Message {
             .iter()
             .any(|&key| key == bpf_loader_upgradeable::id())
     }
+
+    pub fn num_requested_write_locks(&self) -> u64 {
+        self.account_keys
+            .len()
+            .saturating_sub(self.header.num_readonly_signed_accounts.into())
+            .saturating_sub(self.header.num_readonly_unsigned_accounts.into()) as u64
+    }
 }
 
 #[cfg(test)]

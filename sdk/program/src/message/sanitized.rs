@@ -365,6 +365,13 @@ impl SanitizedMessage {
             .len()
             .saturating_sub(self.num_readonly_accounts()) as u64
     }
+
+    pub fn num_write_locks_requested(&self) -> u64 {
+        match self {
+            SanitizedMessage::Legacy(message) => message.message.num_requested_write_locks(),
+            SanitizedMessage::V0(message) => message.message.num_requested_write_locks(),
+        }
+    }
 }
 
 #[cfg(test)]

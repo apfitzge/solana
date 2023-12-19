@@ -352,6 +352,20 @@ impl Message {
                     && !self.is_upgradeable_loader_in_static_keys()
             }
     }
+
+    pub fn num_requested_write_locks(&self) -> u64 {
+        let num_static_write_locks = self
+            .account_keys
+            .len()
+            .saturating_sub(self.header.num_readonly_signed_accounts.into())
+            .saturating_sub(self.header.num_readonly_unsigned_accounts.into())
+            as u64;
+        let num_dynamic_write_locks =
+            self.address_table_lookups.iter().fold(0u64, |acc, lookup| {
+                acc.saturating_add(lookup.writable_indexes.len() as u64)
+            });
+        num_static_write_locks.saturating_add(num_dynamic_write_locks)
+    }
 }
 
 #[cfg(test)]
