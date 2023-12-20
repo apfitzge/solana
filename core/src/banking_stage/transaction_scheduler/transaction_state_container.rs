@@ -129,17 +129,14 @@ impl TransactionStateContainer {
         transaction_cost: TransactionCost,
         total_fee: u64,
     ) -> bool {
-        let priority_id =
-            TransactionPriorityId::new(transaction_priority_details.priority, transaction_id);
-        self.id_to_transaction_state.insert(
-            transaction_id,
-            TransactionState::new(
-                transaction_ttl,
-                transaction_priority_details,
-                transaction_cost,
-                total_fee,
-            ),
+        let state = TransactionState::new(
+            transaction_ttl,
+            transaction_priority_details,
+            transaction_cost,
+            total_fee,
         );
+        let priority_id = TransactionPriorityId::new(state.priority(), transaction_id);
+        self.id_to_transaction_state.insert(transaction_id, state);
         self.push_id_into_queue(priority_id)
     }
 
