@@ -83,6 +83,20 @@ impl PrioGraphScheduler {
         let mut num_filtered_out: usize = 0;
         let mut total_filter_time_us: u64 = 0;
 
+        // CU-limits per thread
+        let mut schedulable_threads = ThreadSet::any(num_threads);
+        const THREAD_CU_QUEUE_LIMIT: u64 = 4_000_000;
+        for (index, cu_limit) in self
+            .in_flight_tracker
+            .cus_in_flight_per_thread()
+            .iter()
+            .enumerate()
+        {
+            if *cu_limit >= THREAD_CU_QUEUE_LIMIT {
+                schedulable_threads.remove(index);
+            }
+        }
+
         let mut window_budget = self.look_ahead_window_size;
         let mut chunked_pops = |container: &mut TransactionStateContainer,
                                 prio_graph: &mut PrioGraph<_, _, _, _>,
@@ -143,7 +157,7 @@ impl PrioGraphScheduler {
         let mut num_unschedulable: usize = 0;
         while num_scheduled < MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
             // If nothing is in the main-queue of the `PrioGraph` then there's nothing left to schedule.
-            if prio_graph.is_empty() {
+            if prio_graph.is_empty() || schedulable_threads.is_empty() {
                 break;
             }
 
@@ -179,7 +193,7 @@ impl PrioGraphScheduler {
                 let Some(thread_id) = self.account_locks.try_lock_accounts(
                     transaction_locks.writable.into_iter(),
                     transaction_locks.readonly.into_iter(),
-                    ThreadSet::any(num_threads),
+                    schedulable_threads,
                     |thread_set| {
                         Self::select_thread(
                             thread_set,
@@ -201,9 +215,7 @@ impl PrioGraphScheduler {
                 chain_id_to_thread_index.insert(prio_graph.chain_id(&id), thread_id);
 
                 let sanitized_transaction_ttl = transaction_state.transition_to_pending();
-                let cu_limit = transaction_state
-                    .transaction_priority_details()
-                    .compute_unit_limit;
+                let cost = transaction_state.cost();
 
                 let SanitizedTransactionTTL {
                     transaction,
@@ -213,11 +225,21 @@ impl PrioGraphScheduler {
                 batches.transactions[thread_id].push(transaction);
                 batches.ids[thread_id].push(id.id);
                 batches.max_age_slots[thread_id].push(max_age_slot);
-                saturating_add_assign!(batches.total_cus[thread_id], cu_limit);
+                saturating_add_assign!(batches.total_cus[thread_id], cost);
 
                 // If target batch size is reached, send only this batch.
                 if batches.ids[thread_id].len() >= TARGET_NUM_TRANSACTIONS_PER_BATCH {
                     saturating_add_assign!(num_sent, self.send_batch(&mut batches, thread_id)?);
+                }
+
+                if batches.total_cus[thread_id]
+                    + self.in_flight_tracker.cus_in_flight_per_thread()[thread_id]
+                    >= THREAD_CU_QUEUE_LIMIT
+                {
+                    schedulable_threads.remove(thread_id);
+                    if schedulable_threads.is_empty() {
+                        break;
+                    }
                 }
 
                 if num_scheduled >= MAX_TRANSACTIONS_PER_SCHEDULING_PASS {

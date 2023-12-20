@@ -65,17 +65,14 @@ impl TransactionState {
         }
     }
 
-    /// Returns a reference to the priority details of the transaction.
-    pub(crate) fn transaction_priority_details(&self) -> &TransactionPriorityDetails {
+    pub(crate) fn cost(&self) -> u64 {
         match self {
             Self::Unprocessed {
-                transaction_priority_details,
-                ..
-            } => transaction_priority_details,
+                transaction_cost, ..
+            } => transaction_cost.sum(),
             Self::Pending {
-                transaction_priority_details,
-                ..
-            } => transaction_priority_details,
+                transaction_cost, ..
+            } => transaction_cost.sum(),
         }
     }
 
