@@ -509,6 +509,7 @@ mod tests {
         crate::banking_stage::consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
         crossbeam_channel::{unbounded, Receiver},
         itertools::Itertools,
+        solana_cost_model::transaction_cost::TransactionCost,
         solana_runtime::transaction_priority_details::TransactionPriorityDetails,
         solana_sdk::{
             compute_budget::ComputeBudgetInstruction, hash::Hash, message::Message, pubkey::Pubkey,
@@ -596,6 +597,10 @@ mod tests {
                     priority,
                     compute_unit_limit: 1,
                 },
+                TransactionCost::SimpleVote {
+                    writable_accounts: vec![],
+                },
+                5000 + priority * 1000,
             );
         }
 

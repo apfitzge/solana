@@ -1,4 +1,5 @@
 use {
+    solana_cost_model::transaction_cost::TransactionCost,
     solana_runtime::transaction_priority_details::TransactionPriorityDetails,
     solana_sdk::{slot_history::Slot, transaction::SanitizedTransaction},
 };
@@ -34,11 +35,15 @@ pub(crate) enum TransactionState {
     Unprocessed {
         transaction_ttl: SanitizedTransactionTTL,
         transaction_priority_details: TransactionPriorityDetails,
+        transaction_cost: TransactionCost,
+        total_fee: u64,
         forwarded: bool,
     },
     /// The transaction is currently scheduled or being processed.
     Pending {
         transaction_priority_details: TransactionPriorityDetails,
+        transaction_cost: TransactionCost,
+        total_fee: u64,
         forwarded: bool,
     },
 }
@@ -48,11 +53,15 @@ impl TransactionState {
     pub(crate) fn new(
         transaction_ttl: SanitizedTransactionTTL,
         transaction_priority_details: TransactionPriorityDetails,
+        transaction_cost: TransactionCost,
+        total_fee: u64,
     ) -> Self {
         Self::Unprocessed {
             transaction_ttl,
             transaction_priority_details,
             forwarded: false,
+            transaction_cost,
+            total_fee,
         }
     }
 
@@ -72,7 +81,18 @@ impl TransactionState {
 
     /// Returns the priority of the transaction.
     pub(crate) fn priority(&self) -> u64 {
-        self.transaction_priority_details().priority
+        match self {
+            Self::Unprocessed {
+                transaction_cost,
+                total_fee,
+                ..
+            } => total_fee.saturating_div(transaction_cost.sum().min(1)),
+            Self::Pending {
+                transaction_cost,
+                total_fee,
+                ..
+            } => total_fee.saturating_div(transaction_cost.sum().min(1)),
+        }
     }
 
     /// Returns whether or not the transaction has already been forwarded.
@@ -104,10 +124,14 @@ impl TransactionState {
                 transaction_ttl,
                 transaction_priority_details,
                 forwarded,
+                transaction_cost,
+                total_fee,
             } => {
                 *self = TransactionState::Pending {
                     transaction_priority_details,
                     forwarded,
+                    transaction_cost,
+                    total_fee,
                 };
                 transaction_ttl
             }
@@ -129,11 +153,15 @@ impl TransactionState {
             TransactionState::Pending {
                 transaction_priority_details,
                 forwarded,
+                transaction_cost,
+                total_fee,
             } => {
                 *self = Self::Unprocessed {
                     transaction_ttl,
                     transaction_priority_details,
                     forwarded,
+                    transaction_cost,
+                    total_fee,
                 }
             }
         }
@@ -163,6 +191,11 @@ impl TransactionState {
                     compute_unit_limit: 0,
                 },
                 forwarded: false,
+                transaction_cost: TransactionCost::SimpleVote {
+                    // TODO: this is a dummy value
+                    writable_accounts: vec![],
+                },
+                total_fee: 0,
             },
         )
     }
@@ -202,6 +235,10 @@ mod tests {
                 priority,
                 compute_unit_limit: 0,
             },
+            TransactionCost::SimpleVote {
+                writable_accounts: vec![],
+            },
+            5000 + 1000 * priority,
         )
     }
 
