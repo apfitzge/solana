@@ -88,10 +88,10 @@ fn bench_unprocessed_transaction_storage(bencher: &mut Bencher, capacity: usize)
         let mut new_retryable_packets = MinMaxHeap::with_capacity(original_capacity);
 
         let mut scanner = MultiIteratorScanner::new(&all_packets_to_process, 64, (), |_, _| {
-            ProcessingDecision::Now
+            test::black_box(ProcessingDecision::Now)
         });
 
-        while let Some((chunk, _)) = scanner.iterate() {
+        while let Some((chunk, _)) = test::black_box(scanner.iterate()) {
             let packets_to_process = chunk.into_iter().map(|p| (*p).clone()).collect_vec();
             new_retryable_packets.extend(packets_to_process);
         }
