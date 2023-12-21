@@ -12,6 +12,7 @@ use {
     solana_core::{
         banking_stage::{committer::Committer, consumer::Consumer},
         immutable_deserialized_packet::ImmutableDeserializedPacket,
+        multi_iterator_scanner::{MultiIteratorScanner, ProcessingDecision},
         qos_service::QosService,
         unprocessed_transaction_storage::{
             ThreadLocalUnprocessedPackets, UnprocessedTransactionStorage,
@@ -86,7 +87,11 @@ fn bench_unprocessed_transaction_storage(bencher: &mut Bencher, capacity: usize)
         let all_packets_to_process = retryable_packets.drain_desc().collect_vec();
         let mut new_retryable_packets = MinMaxHeap::with_capacity(original_capacity);
 
-        for chunk in all_packets_to_process.iter().chunks(64).into_iter() {
+        let mut scanner = MultiIteratorScanner::new(&all_packets_to_process, 64, (), |_, _| {
+            ProcessingDecision::Now
+        });
+
+        while let Some((chunk, _)) = scanner.iterate() {
             let packets_to_process = chunk.into_iter().map(|p| (*p).clone()).collect_vec();
             new_retryable_packets.extend(packets_to_process);
         }
