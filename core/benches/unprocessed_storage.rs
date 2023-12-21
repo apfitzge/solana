@@ -83,9 +83,13 @@ fn bench_unprocessed_transaction_storage(bencher: &mut Bencher, capacity: usize)
         let mut retryable_packets = core::mem::take(&mut heap);
         assert_eq!(retryable_packets.len(), capacity, "fucked something up");
         let original_capacity = retryable_packets.capacity();
-        let mut new_retryable_packets = MinMaxHeap::with_capacity(original_capacity);
         let all_packets_to_process = retryable_packets.drain_desc().collect_vec();
-        new_retryable_packets.extend(all_packets_to_process);
+        let mut new_retryable_packets = MinMaxHeap::with_capacity(original_capacity);
+
+        for chunk in all_packets_to_process.iter().chunks(64).into_iter() {
+            let packets_to_process = chunk.into_iter().map(|p| (*p).clone()).collect_vec();
+            new_retryable_packets.extend(packets_to_process);
+        }
 
         // swap so next iter works
         core::mem::swap(&mut heap, &mut new_retryable_packets);
