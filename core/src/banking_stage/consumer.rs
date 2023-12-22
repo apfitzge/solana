@@ -397,17 +397,21 @@ impl Consumer {
         // No filtering before QoS - transactions should have been sanitized immediately prior to this call
         let pre_results: Vec<_> = vec![Ok(()); txs.len()];
         // Call check transactions to see wtf is happening
-        let _ = bank.check_transactions(
-            txs,
-            &pre_results,
-            MAX_PROCESSING_AGE,
-            &mut TransactionErrorMetrics::default(),
-        );
+        let check_results = bank
+            .check_transactions(
+                txs,
+                &pre_results,
+                MAX_PROCESSING_AGE,
+                &mut TransactionErrorMetrics::default(),
+            )
+            .into_iter()
+            .map(|x| x.0)
+            .collect_vec();
         self.process_and_record_transactions_with_pre_results(
             bank,
             txs,
             chunk_offset,
-            pre_results.into_iter(),
+            check_results.into_iter(),
         )
     }
 
