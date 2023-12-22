@@ -395,8 +395,20 @@ impl Consumer {
         chunk_offset: usize,
     ) -> ProcessTransactionBatchOutput {
         // No filtering before QoS - transactions should have been sanitized immediately prior to this call
-        let pre_results = std::iter::repeat(Ok(()));
-        self.process_and_record_transactions_with_pre_results(bank, txs, chunk_offset, pre_results)
+        let pre_results: Vec<_> = vec![Ok(()); txs.len()];
+        // Call check transactions to see wtf is happening
+        let _ = bank.check_transactions(
+            txs,
+            &pre_results,
+            MAX_PROCESSING_AGE,
+            &mut TransactionErrorMetrics::default(),
+        );
+        self.process_and_record_transactions_with_pre_results(
+            bank,
+            txs,
+            chunk_offset,
+            pre_results.into_iter(),
+        )
     }
 
     pub fn process_and_record_aged_transactions(
