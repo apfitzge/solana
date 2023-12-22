@@ -140,3 +140,31 @@ fn bench_unprocessed_transaction_storage_150000(bencher: &mut Bencher) {
 fn bench_unprocessed_transaction_storage_175000(bencher: &mut Bencher) {
     bench_unprocessed_transaction_storage(bencher, 175000);
 }
+
+fn bench_unprocessed_transaction_storage_insert_at_full(bencher: &mut Bencher, capacity: usize) {
+    let transactions = create_transactions(capacity);
+    let mut heap = MinMaxHeap::with_capacity(capacity);
+    for transaction in transactions {
+        heap.push(transaction);
+    }
+
+    const BATCH_SIZE: usize = 128;
+    const NUM_BATCHES: usize = 12 * 1024;
+    let batches: Vec<Vec<Arc<ImmutableDeserializedPacket>>> = (0..NUM_BATCHES)
+        .into_par_iter()
+        .map(|_| create_transactions(BATCH_SIZE))
+        .collect();
+    let mut batches_iter = test::black_box(batches.into_iter().cycle());
+    eprintln!("starting bench...");
+    bencher.iter(move || {
+        let batch = test::black_box(batches_iter.next().unwrap());
+        for p in batch {
+            test::black_box(heap.push_pop_min(p));
+        }
+    });
+}
+
+#[bench]
+fn bench_unprocessed_transaction_storage_insert_at_full_175000(bencher: &mut Bencher) {
+    bench_unprocessed_transaction_storage_insert_at_full(bencher, 175000);
+}
