@@ -47,7 +47,7 @@ pub mod committer;
 pub mod consumer;
 mod decision_maker;
 mod forwarder;
-mod packet_receiver;
+pub mod packet_receiver;
 
 #[allow(dead_code)]
 mod scheduler_messages;

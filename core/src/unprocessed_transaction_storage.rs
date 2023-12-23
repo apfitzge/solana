@@ -302,6 +302,13 @@ impl UnprocessedTransactionStorage {
         }
     }
 
+    pub fn clear(&mut self) {
+        match self {
+            Self::LocalTransactionStorage(transaction_storage) => transaction_storage.clear(),
+            Self::VoteStorage(_) => {}
+        }
+    }
+
     pub(crate) fn insert_batch(
         &mut self,
         deserialized_packets: Vec<ImmutableDeserializedPacket>,
