@@ -401,7 +401,7 @@ impl Consumer {
         let pre_results: Vec<_> = vec![Ok(()); txs.len()];
         let mut error_counters = TransactionErrorMetrics::default();
         let check_results = bank
-            .check_transactions(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters)
+            .check_age(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters)
             .into_iter()
             .zip(txs)
             .map(|((result, _nonce), tx)| {
