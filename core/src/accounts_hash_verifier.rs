@@ -281,6 +281,13 @@ impl AccountsHashVerifier {
         accounts_package: &AccountsPackage,
         snapshot_config: &SnapshotConfig,
     ) -> AccountsHashKind {
+        static CRASH_NEXT_TIME: AtomicBool = AtomicBool::new(false);
+        if CRASH_NEXT_TIME.load(Ordering::Relaxed) {
+            error!("gonna crash soon!");
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            panic!("crashing...");
+        }
+
         let accounts_hash_calculation_kind = match accounts_package.package_kind {
             AccountsPackageKind::AccountsHashVerifier => CalcAccountsHashKind::Full,
             AccountsPackageKind::EpochAccountsHash => CalcAccountsHashKind::Full,
@@ -360,7 +367,7 @@ impl AccountsHashVerifier {
         }
 
         if should_crash {
-            panic!("crashing now.");
+            CRASH_NEXT_TIME.fetch_or(true, Ordering::Relaxed);
         }
         // After an accounts package has had its accounts hash calculated and
         // has been reserialized to become a BankSnapshotPost, it is now safe
