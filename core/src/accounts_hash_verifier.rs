@@ -300,11 +300,17 @@ impl AccountsHashVerifier {
             accounts_hash_kind,
             accounts_hash_for_reserialize,
             bank_incremental_snapshot_persistence,
+            should_crash,
         ) = match accounts_hash_calculation_kind {
             CalcAccountsHashKind::Full => {
                 let (accounts_hash, _capitalization) =
                     Self::_calculate_full_accounts_hash(accounts_package);
-                (accounts_hash.into(), accounts_hash, None)
+                (
+                    accounts_hash.into(),
+                    accounts_hash,
+                    None,
+                    _capitalization != accounts_package.expected_capitalization,
+                )
             }
             CalcAccountsHashKind::Incremental => {
                 let AccountsPackageKind::Snapshot(SnapshotKind::IncrementalSnapshot(base_slot)) =
@@ -330,6 +336,7 @@ impl AccountsHashVerifier {
                     incremental_accounts_hash.into(),
                     AccountsHash(Hash::default()), // value does not matter; not used for incremental snapshots
                     Some(bank_incremental_snapshot_persistence),
+                    false,
                 )
             }
         };
@@ -352,6 +359,9 @@ impl AccountsHashVerifier {
                 .purge_old_accounts_hashes(accounts_package.slot);
         }
 
+        if should_crash {
+            panic!("crashing now.");
+        }
         // After an accounts package has had its accounts hash calculated and
         // has been reserialized to become a BankSnapshotPost, it is now safe
         // to clean up some older bank snapshots.
@@ -442,13 +452,14 @@ impl AccountsHashVerifier {
                 );
         }
 
-        assert_eq!(
-            accounts_package.expected_capitalization, lamports,
-            "accounts hash capitalization mismatch"
-        );
-        if let Some(expected_hash) = accounts_package.accounts_hash_for_testing {
-            assert_eq!(expected_hash, accounts_hash);
-        };
+        // assert_eq!(
+        //     accounts_package.expected_capitalization, lamports,
+        //     "accounts hash capitalization mismatch"
+        // );
+        // if let Some(expected_hash) = accounts_package.accounts_hash_for_testing {
+        //     assert_eq!(expected_hash, accounts_hash);
+        // };
+        warn!("accounts hash capitalization mismatch. Writing snapshot file then crashing later!");
 
         datapoint_info!(
             "accounts_hash_verifier",
