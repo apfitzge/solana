@@ -1,4 +1,5 @@
 use {
+    rand::random,
     super::{
         committer::{CommitTransactionDetails, Committer, PreBalanceInfo},
         immutable_deserialized_packet::ImmutableDeserializedPacket,
@@ -398,13 +399,13 @@ impl Consumer {
         chunk_offset: usize,
     ) -> ProcessTransactionBatchOutput {
         // No filtering before QoS - transactions should have been sanitized immediately prior to this call
-        let pre_results: Vec<_> = vec![Ok(()); txs.len()];
-        let mut error_counters = TransactionErrorMetrics::default();
-        let check_results = bank
-            .check_age(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters)
-            .into_iter()
-            .zip(txs)
-            .map(|((result, _nonce), tx)| {
+        //let pre_results: Vec<_> = vec![Ok(()); txs.len()];
+        //let mut error_counters = TransactionErrorMetrics::default();
+        //let check_results = bank
+        //    .check_age(txs, &pre_results, MAX_PROCESSING_AGE, &mut error_counters)
+        //    .into_iter()
+        //    .zip(txs)
+        //.map(|((result, _nonce), tx)| {
                 // result?; // if there's already error do nothing
                 // let fee_payer = tx.message().fee_payer();
                 // let budget_limits =
@@ -433,9 +434,19 @@ impl Consumer {
                 //     bank.rent_collector(),
                 //     fee,
                 // )
-                result
+        //        result
+        //    })
+        //    .collect_vec();
+        let check_results: Vec<_> = (0..txs.len())
+            .map(|_| {
+                let x: f64 = random();
+                if x < 0.01 {
+                    Err(TransactionError::AlreadyProcessed)
+                } else {
+                    Ok(())
+                }
             })
-            .collect_vec();
+            .collect();
         self.process_and_record_transactions_with_pre_results(
             bank,
             txs,
