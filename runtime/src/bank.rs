@@ -4286,6 +4286,18 @@ impl Bank {
             transaction_results,
             tx_account_lock_limit,
         );
+
+        if lock_results
+            .iter()
+            .any(|e| e == &Err(TransactionError::ResanitizationNeeded))
+        {
+            error!(
+                "{}: lock_results: {:?}",
+                std::thread::current().name().unwrap(),
+                lock_results,
+            );
+        }
+
         TransactionBatch::new(lock_results, self, Cow::Borrowed(transactions))
     }
 
@@ -5182,6 +5194,16 @@ impl Bank {
             max_age,
             &mut error_counters,
         );
+        if check_results
+            .iter()
+            .any(|e| e.0 == Err(TransactionError::ResanitizationNeeded))
+        {
+            error!(
+                "{}: check_results: {:?}",
+                std::thread::current().name().unwrap(),
+                check_results,
+            );
+        }
         check_time.stop();
 
         let mut program_accounts_map = self.filter_executable_program_accounts(
@@ -5217,6 +5239,16 @@ impl Bank {
             &programs_loaded_for_tx_batch.borrow(),
             self.should_collect_rent(),
         );
+        if loaded_transactions
+            .iter()
+            .any(|e| e.0 == Err(TransactionError::ResanitizationNeeded))
+        {
+            error!(
+                "{}: loaded_transactions: {:?}",
+                std::thread::current().name().unwrap(),
+                loaded_transactions,
+            );
+        }
         load_time.stop();
 
         let mut execution_time = Measure::start("execution_time");
@@ -5282,6 +5314,17 @@ impl Bank {
                 }
             })
             .collect();
+
+        if execution_results
+            .iter()
+            .any(|e| e.flattened_result() == Err(TransactionError::ResanitizationNeeded))
+        {
+            error!(
+                "{}: execution_results: {:?}",
+                std::thread::current().name().unwrap(),
+                execution_results,
+            );
+        }
 
         execution_time.stop();
 

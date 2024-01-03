@@ -1,5 +1,4 @@
 use {
-    rand::random,
     super::{
         committer::{CommitTransactionDetails, Committer, PreBalanceInfo},
         immutable_deserialized_packet::ImmutableDeserializedPacket,
@@ -10,6 +9,7 @@ use {
         BankingStageStats,
     },
     itertools::Itertools,
+    rand::random,
     solana_accounts_db::{
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_results::TransactionCheckResult,
@@ -406,47 +406,58 @@ impl Consumer {
         //    .into_iter()
         //    .zip(txs)
         //.map(|((result, _nonce), tx)| {
-                // result?; // if there's already error do nothing
-                // let fee_payer = tx.message().fee_payer();
-                // let budget_limits =
-                //     process_compute_budget_instructions(tx.message().program_instructions_iter())?
-                //         .into();
-                // let fee = bank.fee_structure.calculate_fee(
-                //     tx.message(),
-                //     bank.get_lamports_per_signature(),
-                //     &budget_limits,
-                //     bank.feature_set.is_active(
-                //         &feature_set::include_loaded_accounts_data_size_in_fee_calculation::id(),
-                //     ),
-                // );
-                // let (mut fee_payer_account, _slot) = bank
-                //     .rc
-                //     .accounts
-                //     .accounts_db
-                //     .load_with_fixed_root(&bank.ancestors, fee_payer)
-                //     .ok_or(TransactionError::AccountNotFound)?;
+        // result?; // if there's already error do nothing
+        // let fee_payer = tx.message().fee_payer();
+        // let budget_limits =
+        //     process_compute_budget_instructions(tx.message().program_instructions_iter())?
+        //         .into();
+        // let fee = bank.fee_structure.calculate_fee(
+        //     tx.message(),
+        //     bank.get_lamports_per_signature(),
+        //     &budget_limits,
+        //     bank.feature_set.is_active(
+        //         &feature_set::include_loaded_accounts_data_size_in_fee_calculation::id(),
+        //     ),
+        // );
+        // let (mut fee_payer_account, _slot) = bank
+        //     .rc
+        //     .accounts
+        //     .accounts_db
+        //     .load_with_fixed_root(&bank.ancestors, fee_payer)
+        //     .ok_or(TransactionError::AccountNotFound)?;
 
-                // validate_fee_payer(
-                //     fee_payer,
-                //     &mut fee_payer_account,
-                //     0,
-                //     &mut error_counters,
-                //     bank.rent_collector(),
-                //     fee,
-                // )
+        // validate_fee_payer(
+        //     fee_payer,
+        //     &mut fee_payer_account,
+        //     0,
+        //     &mut error_counters,
+        //     bank.rent_collector(),
+        //     fee,
+        // )
         //        result
         //    })
         //    .collect_vec();
+        let mut random_discard = 0;
         let check_results: Vec<_> = (0..txs.len())
             .map(|_| {
                 let x: f64 = random();
                 if x < 0.01 {
-                    Err(TransactionError::AlreadyProcessed)
+                    random_discard += 1;
+                    Err(TransactionError::ResanitizationNeeded)
                 } else {
                     Ok(())
                 }
             })
             .collect();
+
+        if random_discard > 0 {
+            error!(
+                "{}: random discards {}: {:?}",
+                std::thread::current().name().unwrap(),
+                random_discard,
+                check_results,
+            );
+        }
         self.process_and_record_transactions_with_pre_results(
             bank,
             txs,
@@ -503,6 +514,16 @@ impl Consumer {
             txs,
             pre_results
         ));
+        if transaction_qos_cost_results.iter().any(|e| {
+            e.as_ref()
+                .is_err_and(|e| *e == TransactionError::ResanitizationNeeded)
+        }) {
+            error!(
+                "{}: transaction_qos_cost_results: {:?}",
+                std::thread::current().name().unwrap(),
+                transaction_qos_cost_results,
+            );
+        }
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -586,6 +607,11 @@ impl Consumer {
         bank: &Arc<Bank>,
         batch: &TransactionBatch,
     ) -> ExecuteAndCommitTransactionsOutput {
+        let random_discard_batch = batch
+            .lock_results()
+            .iter()
+            .any(|e| e == &Err(TransactionError::ResanitizationNeeded));
+
         let transaction_status_sender_enabled = self.committer.transaction_status_sender_enabled();
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
 
@@ -633,6 +659,10 @@ impl Consumer {
                 .zip(batch.sanitized_transactions())
                 .filter_map(|(execution_result, tx)| {
                     if execution_result.was_executed() {
+                        assert!(
+                            execution_result.flattened_result()
+                                != Err(TransactionError::ResanitizationNeeded)
+                        );
                         Some(tx.to_versioned_transaction())
                     } else {
                         None
@@ -661,6 +691,14 @@ impl Consumer {
             execution_results_to_transactions_us,
             ..record_transactions_timings
         };
+
+        if random_discard_batch {
+            error!(
+                "{}: random discard record: {:?}",
+                std::thread::current().name().unwrap(),
+                record_transactions_result
+            );
+        }
 
         if let Err(recorder_err) = record_transactions_result {
             retryable_transaction_indexes.extend(execution_results.iter().enumerate().filter_map(
