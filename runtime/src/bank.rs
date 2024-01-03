@@ -7323,8 +7323,9 @@ impl Bank {
         // debug_verify only exists as an extra debugging step under the assumption that this code path is only used for tests. But, this is used by ledger-tool create-snapshot
         // for example.
         let debug_verify = false;
-        self.capitalization
-            .store(self.calculate_capitalization(debug_verify), Relaxed);
+        let capitalization = self.calculate_capitalization(debug_verify);
+        error!("set_capitalization: {} -> {}", old, capitalization);
+        self.capitalization.store(capitalization, Relaxed);
         old
     }
 
