@@ -2492,6 +2492,7 @@ impl Bank {
                 stakes.vote_accounts().len(),
             )
         };
+        error!("epoch rewards: +{}", validator_rewards_paid);
         self.capitalization
             .fetch_add(validator_rewards_paid, Relaxed);
 
@@ -2605,6 +2606,7 @@ impl Bank {
                 stakes.vote_accounts().len(),
             )
         };
+        error!("epoch rewards 2: +{validator_rewards_paid}");
         self.capitalization
             .fetch_add(validator_rewards_paid, Relaxed);
 
@@ -3545,6 +3547,7 @@ impl Bank {
             measure_us!(self.store_stake_accounts_in_partition(this_partition_stake_rewards));
 
         // increase total capitalization by the distributed rewards
+        error!("distribute_epoch_rewards_in_partition: +{total_rewards_in_lamports}");
         self.capitalization
             .fetch_add(total_rewards_in_lamports, Relaxed);
 
@@ -3815,6 +3818,7 @@ impl Bank {
                 "{pubkey} repeated in genesis config"
             );
             self.store_account(pubkey, account);
+            error!("process_genesis_config: +{}", account.lamports());
             self.capitalization.fetch_add(account.lamports(), Relaxed);
             self.accounts_data_size_initial += account.data().len() as u64;
         }
@@ -3871,6 +3875,7 @@ impl Bank {
 
     fn burn_and_purge_account(&self, program_id: &Pubkey, mut account: AccountSharedData) {
         let old_data_size = account.data().len();
+        error!("burn_and_purge_account: {}", account.lamports());
         self.capitalization.fetch_sub(account.lamports(), Relaxed);
         // Both resetting account balance to 0 and zeroing the account data
         // is needed to really purge from AccountsDb and flush the Stakes cache
@@ -5704,6 +5709,7 @@ impl Bank {
         if let Some((account, _)) =
             self.get_account_modified_since_parent_with_fixed_root(&incinerator::id())
         {
+            error!("run_incinerator: {}", account.lamports());
             self.capitalization.fetch_sub(account.lamports(), Relaxed);
             self.store_account(&incinerator::id(), &AccountSharedData::default());
         }
@@ -6566,19 +6572,17 @@ impl Bank {
                 match new_account.lamports().cmp(&old_account.lamports()) {
                     std::cmp::Ordering::Greater => {
                         let increased = new_account.lamports() - old_account.lamports();
-                        trace!(
+                        error!(
                             "store_account_and_update_capitalization: increased: {} {}",
-                            pubkey,
-                            increased
+                            pubkey, increased
                         );
                         self.capitalization.fetch_add(increased, Relaxed);
                     }
                     std::cmp::Ordering::Less => {
                         let decreased = old_account.lamports() - new_account.lamports();
-                        trace!(
+                        error!(
                             "store_account_and_update_capitalization: decreased: {} {}",
-                            pubkey,
-                            decreased
+                            pubkey, decreased
                         );
                         self.capitalization.fetch_sub(decreased, Relaxed);
                     }
@@ -6586,7 +6590,7 @@ impl Bank {
                 }
                 old_account.data().len()
             } else {
-                trace!(
+                error!(
                     "store_account_and_update_capitalization: created: {} {}",
                     pubkey,
                     new_account.lamports()
@@ -8052,6 +8056,7 @@ impl Bank {
                 datapoint_info!(datapoint_name, ("slot", self.slot, i64));
 
                 // Burn lamports in the old account
+                error!("replace_program_account: {}", old_account.lamports());
                 self.capitalization
                     .fetch_sub(old_account.lamports(), Relaxed);
 

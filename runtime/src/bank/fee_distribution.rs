@@ -85,6 +85,7 @@ impl Bank {
                     }
                 }
             }
+            log::error!("distribute_transaction_fees: {burn}");
             self.capitalization.fetch_sub(burn, Relaxed);
         }
     }
@@ -167,6 +168,7 @@ impl Bank {
         #[cfg(test)]
         if validator_stakes.is_empty() {
             // some tests bank.freezes() with bad staking state
+            log::error!("test distribute_rent_to_validators: {rent_to_be_distributed}");
             self.capitalization
                 .fetch_sub(rent_to_be_distributed, Relaxed);
             return;
@@ -246,6 +248,7 @@ impl Bank {
         self.rewards.write().unwrap().append(&mut rewards);
 
         if rent_to_burn > 0 {
+            log::error!("distribute_rent_to_validators: {rent_to_burn}");
             self.capitalization.fetch_sub(rent_to_burn, Relaxed);
             datapoint_warn!(
                 "bank-burned_rent",
@@ -272,9 +275,11 @@ impl Bank {
             .rent
             .calculate_burn(total_rent_collected);
 
-        debug!(
+        log::error!(
             "distributed rent: {} (rounded from: {}, burned: {})",
-            rent_to_be_distributed, total_rent_collected, burned_portion
+            rent_to_be_distributed,
+            total_rent_collected,
+            burned_portion
         );
         self.capitalization.fetch_sub(burned_portion, Relaxed);
 
