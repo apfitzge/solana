@@ -140,6 +140,9 @@ impl Committer {
         pre_balance_info: &mut PreBalanceInfo,
         starting_transaction_index: Option<usize>,
     ) {
+        let post_balances = bank.collect_balances(batch);
+error!("{}: post-balance {:?}", std::thread::current().name().unwrap(), post_balances);
+
         if let Some(transaction_status_sender) = &self.transaction_status_sender {
             let txs = batch.sanitized_transactions().to_vec();
             let post_balances = bank.collect_balances(batch);

@@ -619,11 +619,12 @@ impl Consumer {
         let (_, collect_balances_us) = measure_us!({
             // If the extra meta-data services are enabled for RPC, collect the
             // pre-balances for native and token programs.
-            if transaction_status_sender_enabled {
+            //if transaction_status_sender_enabled {
                 pre_balance_info.native = bank.collect_balances(batch);
-                pre_balance_info.token =
-                    collect_token_balances(bank, batch, &mut pre_balance_info.mint_decimals)
-            }
+                error!("{}: pre-balance {:?}", std::thread::current().name().unwrap(), pre_balance_info.native);
+           //     pre_balance_info.token =
+           //         collect_token_balances(bank, batch, &mut pre_balance_info.mint_decimals)
+            //}
         });
         execute_and_commit_timings.collect_balances_us = collect_balances_us;
 
@@ -717,6 +718,9 @@ impl Consumer {
         }
 
         let (commit_time_us, commit_transaction_statuses) = if executed_transactions_count != 0 {
+            if random_discard_batch {
+              error!("{}: comitting execution_results {:?}", std::thread::current().name().unwrap(), execution_results);
+            }
             self.committer.commit_transactions(
                 batch,
                 &mut loaded_transactions,
