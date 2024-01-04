@@ -365,6 +365,15 @@ impl SanitizedMessage {
             .len()
             .saturating_sub(self.num_readonly_accounts()) as u64
     }
+
+    pub fn to_versioned_message(&self) -> VersionedMessage {
+        match self {
+            Self::V0(message) => VersionedMessage::V0(v0::Message::clone(&message.message)),
+            Self::Legacy(message) => {
+                VersionedMessage::Legacy(legacy::Message::clone(&message.message))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

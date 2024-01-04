@@ -6,7 +6,6 @@ use {
     crate::{
         hash::Hash,
         message::{
-            legacy,
             v0::{self, LoadedAddresses},
             LegacyMessage, SanitizedMessage, VersionedMessage,
         },
@@ -162,16 +161,9 @@ impl SanitizedTransaction {
     /// Convert this sanitized transaction into a versioned transaction for
     /// recording in the ledger.
     pub fn to_versioned_transaction(&self) -> VersionedTransaction {
-        let signatures = self.signatures.clone();
-        match &self.message {
-            SanitizedMessage::V0(sanitized_msg) => VersionedTransaction {
-                signatures,
-                message: VersionedMessage::V0(v0::Message::clone(&sanitized_msg.message)),
-            },
-            SanitizedMessage::Legacy(legacy_message) => VersionedTransaction {
-                signatures,
-                message: VersionedMessage::Legacy(legacy::Message::clone(&legacy_message.message)),
-            },
+        VersionedTransaction {
+            signatures: self.signatures.clone(),
+            message: self.message.to_versioned_message(),
         }
     }
 

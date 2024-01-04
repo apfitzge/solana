@@ -9,6 +9,7 @@
 //! 2. Dynamically Loaded: after successfully loaded account addresses from onchain
 //!    ALT, RuntimeTransaction<SanitizedMessage> transits into Dynamically Loaded state,
 //!    with its dynamic metadata loaded.
+
 use {
     crate::transaction_meta::{DynamicMeta, StaticMeta, TransactionMeta},
     solana_program_runtime::compute_budget_processor::{
@@ -19,9 +20,27 @@ use {
         message::{AddressLoader, SanitizedMessage, SanitizedVersionedMessage},
         signature::Signature,
         simple_vote_transaction_checker::is_simple_vote_transaction,
-        transaction::{Result, SanitizedVersionedTransaction},
+        transaction::{Result, SanitizedVersionedTransaction, VersionedTransaction},
     },
 };
+
+pub trait ProcessableTransaction {
+    fn message(&self) -> &SanitizedMessage;
+    fn to_versioned_transaction(&self) -> VersionedTransaction;
+}
+
+impl ProcessableTransaction for RuntimeTransaction<SanitizedMessage> {
+    fn message(&self) -> &SanitizedMessage {
+        &self.message
+    }
+
+    fn to_versioned_transaction(&self) -> VersionedTransaction {
+        VersionedTransaction {
+            signatures: self.signatures.clone(),
+            message: self.message.to_versioned_message(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RuntimeTransaction<M> {
