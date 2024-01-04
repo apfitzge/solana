@@ -614,6 +614,11 @@ impl Accounts {
         tx_account_locks_results: Vec<Result<TransactionAccountLocks>>,
     ) -> Vec<Result<()>> {
         let account_locks = &mut self.account_locks.lock().unwrap();
+        error!(
+            "{}: grabbing account locks: {:?}",
+            std::thread::current().name().unwrap(),
+            tx_account_locks_results
+        );
         tx_account_locks_results
             .into_iter()
             .map(|tx_account_locks_result| match tx_account_locks_result {

@@ -5443,9 +5443,14 @@ impl Bank {
                     executed_with_successful_result_count += 1;
                 }
                 Err(err) => {
-                    if *err_count == 0 {
-                        debug!("tx error: {:?} {:?}", err, tx);
-                    }
+                    // if *err_count == 0 {
+                    error!(
+                        "{}: tx error: {:?} {:?}",
+                        std::thread::current().name().unwrap(),
+                        err,
+                        tx.message_hash()
+                    );
+                    // }
                     *err_count += 1;
                 }
             }
