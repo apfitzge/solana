@@ -619,7 +619,7 @@ impl Accounts {
             std::thread::current().name().unwrap(),
             tx_account_locks_results
         );
-        tx_account_locks_results
+        let result = tx_account_locks_results
             .into_iter()
             .map(|tx_account_locks_result| match tx_account_locks_result {
                 Ok(tx_account_locks) => self.lock_account(
@@ -629,7 +629,13 @@ impl Accounts {
                 ),
                 Err(err) => Err(err),
             })
-            .collect()
+            .collect();
+        error!(
+            "{}: grabbed account locks: {:?}",
+            std::thread::current().name().unwrap(),
+            result
+        );
+        result
     }
 
     /// Once accounts are unlocked, new transactions that modify that state can enter the pipeline
