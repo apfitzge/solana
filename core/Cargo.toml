@@ -80,6 +80,8 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 trees = { workspace = true }
+crossbeam-skiplist = "0.1.2"
+indexed_map = { git = "https://github.com/apfitzge/indexed_map.git", rev = "06060002d0ae6e9b78bf203b30d2b45e725a770b" }
 
 [dev-dependencies]
 assert_matches = { workspace = true }

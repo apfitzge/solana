@@ -1,5 +1,6 @@
 use {
     super::immutable_deserialized_packet::ImmutableDeserializedPacket,
+    core::ops::Deref,
     solana_sdk::{clock::Slot, transaction::SanitizedTransaction},
     std::{fmt::Display, sync::Arc},
 };
@@ -33,6 +34,14 @@ impl TransactionId {
 impl Display for TransactionId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl Deref for TransactionId {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
