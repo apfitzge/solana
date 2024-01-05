@@ -18,10 +18,10 @@ use {
     crate::{
         banking_stage::{
             consume_worker::ConsumeWorker,
-            packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
-                prio_graph_scheduler::PrioGraphScheduler,
+                prio_graph_scheduler::PrioGraphScheduler, receive_worker::ReceiveWorker,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
+                transaction_state_container::TransactionStateContainer,
             },
         },
         banking_trace::BankingPacketReceiver,
@@ -583,14 +583,31 @@ impl BankingStage {
             )
         }
 
+        // Spawn the receive thread
+        let container = Arc::new(TransactionStateContainer::with_capacity(
+            TOTAL_BUFFERED_PACKETS,
+        ));
+        bank_thread_hdls.push({
+            let receive_worker = ReceiveWorker::new(
+                decision_maker.clone(),
+                non_vote_receiver,
+                bank_forks.clone(),
+                container.clone(),
+            );
+            Builder::new()
+                .name("solBnkTxRx".to_string())
+                .spawn(move || {
+                    receive_worker.run();
+                })
+                .unwrap()
+        });
+
         // Spawn the central scheduler thread
         bank_thread_hdls.push({
-            let packet_deserializer =
-                PacketDeserializer::new(non_vote_receiver, bank_forks.clone());
             let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
             let scheduler_controller = SchedulerController::new(
                 decision_maker.clone(),
-                packet_deserializer,
+                container,
                 bank_forks,
                 scheduler,
                 worker_metrics,
