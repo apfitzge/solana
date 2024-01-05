@@ -5,7 +5,6 @@ use {
 };
 
 /// A unique identifier tied with priority ordering for a transaction/packet:
-///     - `id` has no effect on ordering
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TransactionPriorityId {
     pub(crate) priority: u64,
@@ -20,7 +19,10 @@ impl TransactionPriorityId {
 
 impl Ord for TransactionPriorityId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
+        match self.priority.cmp(&other.priority) {
+            std::cmp::Ordering::Equal => self.id.cmp(&other.id),
+            ordering => ordering,
+        }
     }
 }
 
