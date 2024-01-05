@@ -22,10 +22,10 @@ impl Display for TransactionBatchId {
 
 /// A unique identifier for a transaction.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct TransactionId(u64);
+pub struct TransactionId(usize);
 
 impl TransactionId {
-    pub fn new(index: u64) -> Self {
+    pub fn new(index: usize) -> Self {
         Self(index)
     }
 }

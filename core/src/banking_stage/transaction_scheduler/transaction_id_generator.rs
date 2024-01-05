@@ -4,7 +4,7 @@ use crate::banking_stage::scheduler_messages::TransactionId;
 /// These IDs uniquely identify transactions during the scheduling process.
 #[derive(Default)]
 pub struct TransactionIdGenerator {
-    next_id: u64,
+    next_id: usize,
 }
 
 impl TransactionIdGenerator {

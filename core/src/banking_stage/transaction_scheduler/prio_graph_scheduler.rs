@@ -565,7 +565,7 @@ mod tests {
         for (index, (from_keypair, to_pubkeys, lamports, priority)) in
             tx_infos.into_iter().enumerate()
         {
-            let id = TransactionId::new(index as u64);
+            let id = TransactionId::new(index);
             let transaction =
                 prioritized_tranfers(from_keypair.borrow(), to_pubkeys, lamports, priority);
             let transaction_cost = CostModel::calculate_cost(&transaction, &FeatureSet::default());
