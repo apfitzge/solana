@@ -183,8 +183,8 @@ mod tests {
     }
 
     fn push_to_container(container: &mut TransactionStateContainer, num: usize) {
-        for id in 0..num as u64 {
-            let priority = id;
+        for id in 0..num {
+            let priority = id as u64;
             let (transaction_ttl, transaction_priority_details) = test_transaction(priority);
             container.insert_new_transaction(
                 TransactionId::new(id),
