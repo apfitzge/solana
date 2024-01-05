@@ -4,7 +4,6 @@
 use {
     super::{
         prio_graph_scheduler::PrioGraphScheduler, scheduler_error::SchedulerError,
-        transaction_id_generator::TransactionIdGenerator,
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
@@ -38,8 +37,6 @@ pub(crate) struct SchedulerController {
     /// Packet/Transaction ingress.
     packet_receiver: PacketDeserializer,
     bank_forks: Arc<RwLock<BankForks>>,
-    /// Generates unique IDs for incoming transactions.
-    transaction_id_generator: TransactionIdGenerator,
     /// Container for transaction state.
     /// Shared resource between `packet_receiver` and `scheduler`.
     container: TransactionStateContainer,
@@ -65,7 +62,6 @@ impl SchedulerController {
             decision_maker,
             packet_receiver: packet_deserializer,
             bank_forks,
-            transaction_id_generator: TransactionIdGenerator::default(),
             container: TransactionStateContainer::with_capacity(TOTAL_BUFFERED_PACKETS),
             scheduler,
             count_metrics: SchedulerCountMetrics::default(),
@@ -342,7 +338,6 @@ impl SchedulerController {
                 .filter(|(_, check_result)| check_result.0.is_ok())
             {
                 saturating_add_assign!(post_transaction_check_count, 1);
-                let transaction_id = self.transaction_id_generator.next();
 
                 let transaction_cost = CostModel::calculate_cost(&transaction, &bank.feature_set);
                 let transaction_ttl = SanitizedTransactionTTL {
@@ -351,7 +346,6 @@ impl SchedulerController {
                 };
 
                 if self.container.insert_new_transaction(
-                    transaction_id,
                     transaction_ttl,
                     priority_details,
                     transaction_cost,

@@ -561,11 +561,8 @@ mod tests {
             ),
         >,
     ) -> TransactionStateContainer {
-        let mut container = TransactionStateContainer::with_capacity(10 * 1024);
-        for (index, (from_keypair, to_pubkeys, lamports, priority)) in
-            tx_infos.into_iter().enumerate()
-        {
-            let id = TransactionId::new(index);
+        let container = TransactionStateContainer::with_capacity(10 * 1024);
+        for (from_keypair, to_pubkeys, lamports, priority) in tx_infos.into_iter() {
             let transaction =
                 prioritized_tranfers(from_keypair.borrow(), to_pubkeys, lamports, priority);
             let transaction_cost = CostModel::calculate_cost(&transaction, &FeatureSet::default());
@@ -574,7 +571,6 @@ mod tests {
                 max_age_slot: Slot::MAX,
             };
             container.insert_new_transaction(
-                id,
                 transaction_ttl,
                 TransactionPriorityDetails {
                     priority,
