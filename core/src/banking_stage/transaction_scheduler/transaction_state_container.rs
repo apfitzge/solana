@@ -34,13 +34,13 @@ use {
 ///
 /// The container maintains a fixed capacity. If the queue is full when pushing
 /// a new transaction, the lowest priority transaction will be dropped.
-pub(crate) struct TransactionStateContainer {
+pub struct TransactionStateContainer {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
     id_to_transaction_state: HashMap<TransactionId, TransactionState>,
 }
 
 impl TransactionStateContainer {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),
             id_to_transaction_state: HashMap::with_capacity(capacity),
@@ -48,34 +48,31 @@ impl TransactionStateContainer {
     }
 
     /// Returns true if the queue is empty.
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.priority_queue.is_empty()
     }
 
     /// Returns the remaining capacity of the queue
-    pub(crate) fn remaining_queue_capacity(&self) -> usize {
+    pub fn remaining_queue_capacity(&self) -> usize {
         self.priority_queue.capacity() - self.priority_queue.len()
     }
 
     /// Get the top transaction id in the priority queue.
-    pub(crate) fn pop(&mut self) -> Option<TransactionPriorityId> {
+    pub fn pop(&mut self) -> Option<TransactionPriorityId> {
         self.priority_queue.pop_max()
     }
 
     /// Get an iterator of the top `n` transaction ids in the priority queue.
     /// This will remove the ids from the queue, but not drain the remainder
     /// of the queue.
-    pub(crate) fn take_top_n(
-        &mut self,
-        n: usize,
-    ) -> impl Iterator<Item = TransactionPriorityId> + '_ {
+    pub fn take_top_n(&mut self, n: usize) -> impl Iterator<Item = TransactionPriorityId> + '_ {
         (0..n).map_while(|_| self.pop())
     }
 
     /// Serialize entire priority queue. `hold` indicates whether the priority queue should
     /// be drained or not.
     /// If `hold` is true, these ids should not be removed from the map while processing.
-    pub(crate) fn priority_ordered_ids(&mut self, hold: bool) -> Vec<TransactionPriorityId> {
+    pub fn priority_ordered_ids(&mut self, hold: bool) -> Vec<TransactionPriorityId> {
         let priority_queue = if hold {
             self.priority_queue.clone()
         } else {
@@ -90,7 +87,7 @@ impl TransactionStateContainer {
     }
 
     /// Get mutable transaction state by id.
-    pub(crate) fn get_mut_transaction_state(
+    pub fn get_mut_transaction_state(
         &mut self,
         id: &TransactionId,
     ) -> Option<&mut TransactionState> {
@@ -99,10 +96,7 @@ impl TransactionStateContainer {
 
     /// Get reference to `SanitizedTransactionTTL` by id.
     /// Panics if the transaction does not exist.
-    pub(crate) fn get_transaction_ttl(
-        &self,
-        id: &TransactionId,
-    ) -> Option<&SanitizedTransactionTTL> {
+    pub fn get_transaction_ttl(&self, id: &TransactionId) -> Option<&SanitizedTransactionTTL> {
         self.id_to_transaction_state
             .get(id)
             .map(|state| state.transaction_ttl())
@@ -111,7 +105,7 @@ impl TransactionStateContainer {
     /// Take `SanitizedTransactionTTL` by id.
     /// This transitions the transaction to `Pending` state.
     /// Panics if the transaction does not exist.
-    pub(crate) fn take_transaction(&mut self, id: &TransactionId) -> SanitizedTransactionTTL {
+    pub fn take_transaction(&mut self, id: &TransactionId) -> SanitizedTransactionTTL {
         self.id_to_transaction_state
             .get_mut(id)
             .expect("transaction must exist")
@@ -120,7 +114,7 @@ impl TransactionStateContainer {
 
     /// Insert a new transaction into the container's queues and maps.
     /// Returns `true` if a packet was dropped due to capacity limits.
-    pub(crate) fn insert_new_transaction(
+    pub fn insert_new_transaction(
         &mut self,
         transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL,
@@ -137,7 +131,7 @@ impl TransactionStateContainer {
 
     /// Retries a transaction - inserts transaction back into map (but not packet).
     /// This transitions the transaction to `Unprocessed` state.
-    pub(crate) fn retry_transaction(
+    pub fn retry_transaction(
         &mut self,
         transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL,
@@ -153,7 +147,7 @@ impl TransactionStateContainer {
     /// Pushes a transaction id into the priority queue. If the queue is full, the lowest priority
     /// transaction will be dropped (removed from the queue and map).
     /// Returns `true` if a packet was dropped due to capacity limits.
-    pub(crate) fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
+    pub fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
         if self.remaining_queue_capacity() == 0 {
             let popped_id = self.priority_queue.push_pop_min(priority_id);
             self.remove_by_id(&popped_id.id);
@@ -165,7 +159,7 @@ impl TransactionStateContainer {
     }
 
     /// Remove transaction by id.
-    pub(crate) fn remove_by_id(&mut self, id: &TransactionId) {
+    pub fn remove_by_id(&mut self, id: &TransactionId) {
         self.id_to_transaction_state
             .remove(id)
             .expect("transaction must exist");

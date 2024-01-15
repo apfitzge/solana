@@ -71,8 +71,8 @@ mod packet_deserializer;
 mod packet_receiver;
 mod read_write_account_set;
 #[allow(dead_code)]
-mod scheduler_messages;
-mod transaction_scheduler;
+pub mod scheduler_messages;
+pub mod transaction_scheduler;
 
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;

@@ -22,7 +22,7 @@ use {
     },
 };
 
-pub(crate) struct PrioGraphScheduler {
+pub struct PrioGraphScheduler {
     in_flight_tracker: InFlightTracker,
     account_locks: ThreadAwareAccountLocks,
     consume_work_senders: Vec<Sender<ConsumeWork>>,
@@ -31,7 +31,7 @@ pub(crate) struct PrioGraphScheduler {
 }
 
 impl PrioGraphScheduler {
-    pub(crate) fn new(
+    pub fn new(
         consume_work_senders: Vec<Sender<ConsumeWork>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
     ) -> Self {
@@ -61,7 +61,7 @@ impl PrioGraphScheduler {
     /// This, combined with internal tracking of threads' in-flight transactions, allows
     /// for load-balancing while prioritizing scheduling transactions onto threads that will
     /// not cause conflicts in the near future.
-    pub(crate) fn schedule(
+    pub fn schedule(
         &mut self,
         container: &mut TransactionStateContainer,
         pre_graph_filter: impl Fn(&[&SanitizedTransaction], &mut [bool]),
@@ -430,7 +430,7 @@ impl PrioGraphScheduler {
 
 /// Metrics from scheduling transactions.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct SchedulingSummary {
+pub struct SchedulingSummary {
     /// Number of transactions scheduled.
     pub num_scheduled: usize,
     /// Number of transactions that were not scheduled due to conflicts.

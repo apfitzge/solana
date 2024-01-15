@@ -7,13 +7,13 @@ use {
 /// A unique identifier tied with priority ordering for a transaction/packet:
 ///     - `id` has no effect on ordering
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TransactionPriorityId {
-    pub(crate) priority: u64,
-    pub(crate) id: TransactionId,
+pub struct TransactionPriorityId {
+    pub priority: u64,
+    pub id: TransactionId,
 }
 
 impl TransactionPriorityId {
-    pub(crate) fn new(priority: u64, id: TransactionId) -> Self {
+    pub fn new(priority: u64, id: TransactionId) -> Self {
         Self { priority, id }
     }
 }

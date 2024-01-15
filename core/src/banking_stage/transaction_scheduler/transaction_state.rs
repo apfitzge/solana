@@ -4,9 +4,9 @@ use {
 };
 
 /// Simple wrapper type to tie a sanitized transaction to max age slot.
-pub(crate) struct SanitizedTransactionTTL {
-    pub(crate) transaction: SanitizedTransaction,
-    pub(crate) max_age_slot: Slot,
+pub struct SanitizedTransactionTTL {
+    pub transaction: SanitizedTransaction,
+    pub max_age_slot: Slot,
 }
 
 /// TransactionState is used to track the state of a transaction in the transaction scheduler
@@ -29,7 +29,7 @@ pub(crate) struct SanitizedTransactionTTL {
 ///   to the appropriate thread for processing. This is done to avoid cloning the
 ///  `SanitizedTransaction`.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum TransactionState {
+pub enum TransactionState {
     /// The transaction is available for scheduling.
     Unprocessed {
         transaction_ttl: SanitizedTransactionTTL,
@@ -45,7 +45,7 @@ pub(crate) enum TransactionState {
 
 impl TransactionState {
     /// Creates a new `TransactionState` in the `Unprocessed` state.
-    pub(crate) fn new(
+    pub fn new(
         transaction_ttl: SanitizedTransactionTTL,
         transaction_priority_details: TransactionPriorityDetails,
     ) -> Self {
@@ -57,7 +57,7 @@ impl TransactionState {
     }
 
     /// Returns a reference to the priority details of the transaction.
-    pub(crate) fn transaction_priority_details(&self) -> &TransactionPriorityDetails {
+    pub fn transaction_priority_details(&self) -> &TransactionPriorityDetails {
         match self {
             Self::Unprocessed {
                 transaction_priority_details,
@@ -71,12 +71,12 @@ impl TransactionState {
     }
 
     /// Returns the priority of the transaction.
-    pub(crate) fn priority(&self) -> u64 {
+    pub fn priority(&self) -> u64 {
         self.transaction_priority_details().priority
     }
 
     /// Returns whether or not the transaction has already been forwarded.
-    pub(crate) fn forwarded(&self) -> bool {
+    pub fn forwarded(&self) -> bool {
         match self {
             Self::Unprocessed { forwarded, .. } => *forwarded,
             Self::Pending { forwarded, .. } => *forwarded,
@@ -84,7 +84,7 @@ impl TransactionState {
     }
 
     /// Sets the transaction as forwarded.
-    pub(crate) fn set_forwarded(&mut self) {
+    pub fn set_forwarded(&mut self) {
         match self {
             Self::Unprocessed { forwarded, .. } => *forwarded = true,
             Self::Pending { forwarded, .. } => *forwarded = true,
@@ -98,7 +98,7 @@ impl TransactionState {
     /// # Panics
     /// This method will panic if the transaction is already in the `Pending` state,
     ///   as this is an invalid state transition.
-    pub(crate) fn transition_to_pending(&mut self) -> SanitizedTransactionTTL {
+    pub fn transition_to_pending(&mut self) -> SanitizedTransactionTTL {
         match self.take() {
             TransactionState::Unprocessed {
                 transaction_ttl,
@@ -123,7 +123,7 @@ impl TransactionState {
     /// # Panics
     /// This method will panic if the transaction is already in the `Unprocessed`
     ///   state, as this is an invalid state transition.
-    pub(crate) fn transition_to_unprocessed(&mut self, transaction_ttl: SanitizedTransactionTTL) {
+    pub fn transition_to_unprocessed(&mut self, transaction_ttl: SanitizedTransactionTTL) {
         match self.take() {
             TransactionState::Unprocessed { .. } => panic!("already unprocessed"),
             TransactionState::Pending {
@@ -143,7 +143,7 @@ impl TransactionState {
     ///
     /// # Panics
     /// This method will panic if the transaction is in the `Pending` state.
-    pub(crate) fn transaction_ttl(&self) -> &SanitizedTransactionTTL {
+    pub fn transaction_ttl(&self) -> &SanitizedTransactionTTL {
         match self {
             Self::Unprocessed {
                 transaction_ttl, ..
