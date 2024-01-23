@@ -279,8 +279,7 @@ impl MetricsAgent {
                         last_write_time = Instant::now();
                         barrier.wait();
                     }
-                    MetricsCommand::Submit(point, level) => {
-                        log!(level, "{}", point);
+                    MetricsCommand::Submit(point, _level) => {
                         points.push(point);
                     }
                     MetricsCommand::SubmitCounter(counter, _level, bucket) => {
