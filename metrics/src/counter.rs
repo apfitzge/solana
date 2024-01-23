@@ -200,7 +200,7 @@ impl Counter {
                 count: counts as i64 - lastlog as i64,
                 timestamp: SystemTime::now(),
             };
-            submit_counter(counter, level, bucket);
+            submit_counter(counter, bucket);
         }
     }
 }

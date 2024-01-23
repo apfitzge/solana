@@ -169,14 +169,14 @@ macro_rules! datapoint {
         if log::log_enabled!($level) {
             let point = $crate::create_datapoint!(@point $name);
             log::log!($level, "{point}");
-            $crate::submit(point, $level);
+            $crate::submit(point);
         }
     };
     ($level:expr, $name:expr, $($fields:tt)+) => {
         if log::log_enabled!($level) {
             let point = $crate::create_datapoint!(@point $name, $($fields)+);
             log::log!($level, "{point}");
-            $crate::submit(point, $level);
+            $crate::submit(point);
         }
     };
 }

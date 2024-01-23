@@ -3,7 +3,6 @@
 extern crate test;
 
 use {
-    log::*,
     rand::distributions::{Distribution, Uniform},
     solana_metrics::{
         counter::CounterPoint,
@@ -44,7 +43,6 @@ fn bench_datapoint_submission(bencher: &mut Bencher) {
                 DataPoint::new("measurement")
                     .add_field_i64("i", i)
                     .to_owned(),
-                Level::Info,
             );
         }
         agent.flush();
@@ -58,7 +56,7 @@ fn bench_counter_submission(bencher: &mut Bencher) {
 
     bencher.iter(|| {
         for i in 0..1000 {
-            agent.submit_counter(CounterPoint::new("counter 1"), Level::Info, i);
+            agent.submit_counter(CounterPoint::new("counter 1"), i);
         }
         agent.flush();
     })
@@ -76,13 +74,12 @@ fn bench_random_submission(bencher: &mut Bencher) {
             let dice = die.sample(&mut rng);
 
             if dice == 6 {
-                agent.submit_counter(CounterPoint::new("counter 1"), Level::Info, i);
+                agent.submit_counter(CounterPoint::new("counter 1"), i);
             } else {
                 agent.submit(
                     DataPoint::new("measurement")
                         .add_field_i64("i", i as i64)
                         .to_owned(),
-                    Level::Info,
                 );
             }
         }

@@ -54,8 +54,8 @@ impl From<&CounterPoint> for DataPoint {
 #[derive(Debug)]
 enum MetricsCommand {
     Flush(Arc<Barrier>),
-    Submit(DataPoint, log::Level),
-    SubmitCounter(CounterPoint, log::Level, u64),
+    Submit(DataPoint),
+    SubmitCounter(CounterPoint, u64),
 }
 
 pub struct MetricsAgent {
@@ -279,10 +279,10 @@ impl MetricsAgent {
                         last_write_time = Instant::now();
                         barrier.wait();
                     }
-                    MetricsCommand::Submit(point, _level) => {
+                    MetricsCommand::Submit(point) => {
                         points.push(point);
                     }
-                    MetricsCommand::SubmitCounter(counter, _level, bucket) => {
+                    MetricsCommand::SubmitCounter(counter, bucket) => {
                         debug!("{:?}", counter);
                         let key = (counter.name, bucket);
                         if let Some(value) = counters.get_mut(&key) {
@@ -317,15 +317,13 @@ impl MetricsAgent {
         trace!("run: exit");
     }
 
-    pub fn submit(&self, point: DataPoint, level: log::Level) {
-        self.sender
-            .send(MetricsCommand::Submit(point, level))
-            .unwrap();
+    pub fn submit(&self, point: DataPoint) {
+        self.sender.send(MetricsCommand::Submit(point)).unwrap();
     }
 
-    pub fn submit_counter(&self, counter: CounterPoint, level: log::Level, bucket: u64) {
+    pub fn submit_counter(&self, counter: CounterPoint, bucket: u64) {
         self.sender
-            .send(MetricsCommand::SubmitCounter(counter, level, bucket))
+            .send(MetricsCommand::SubmitCounter(counter, bucket))
             .unwrap();
     }
 
@@ -372,16 +370,16 @@ pub fn set_host_id(host_id: String) {
 
 /// Submits a new point from any thread.  Note that points are internally queued
 /// and transmitted periodically in batches.
-pub fn submit(point: DataPoint, level: log::Level) {
+pub fn submit(point: DataPoint) {
     let agent = get_singleton_agent();
-    agent.submit(point, level);
+    agent.submit(point);
 }
 
 /// Submits a new counter or updates an existing counter from any thread.  Note that points are
 /// internally queued and transmitted periodically in batches.
-pub(crate) fn submit_counter(point: CounterPoint, level: log::Level, bucket: u64) {
+pub(crate) fn submit_counter(point: CounterPoint, bucket: u64) {
     let agent = get_singleton_agent();
-    agent.submit_counter(point, level, bucket);
+    agent.submit_counter(point, bucket);
 }
 
 #[derive(Debug, Default)]
@@ -488,7 +486,6 @@ pub fn set_panic_hook(program: &'static str, version: Option<String>) {
                     .add_field_str("location", &location)
                     .add_field_str("version", version.as_ref().unwrap_or(&"".to_string()))
                     .to_owned(),
-                Level::Error,
             );
             // Flush metrics immediately
             flush();
@@ -554,7 +551,6 @@ mod test {
                 DataPoint::new("measurement")
                     .add_field_i64("i", i)
                     .to_owned(),
-                Level::Info,
             );
         }
 
@@ -568,8 +564,8 @@ mod test {
         let agent = MetricsAgent::new(writer.clone(), Duration::from_secs(10), 1000);
 
         for i in 0..10 {
-            agent.submit_counter(CounterPoint::new("counter 1"), Level::Info, i);
-            agent.submit_counter(CounterPoint::new("counter 2"), Level::Info, i);
+            agent.submit_counter(CounterPoint::new("counter 1"), i);
+            agent.submit_counter(CounterPoint::new("counter 2"), i);
         }
 
         agent.flush();
@@ -588,7 +584,6 @@ mod test {
                     count: 10,
                     timestamp: UNIX_EPOCH,
                 },
-                Level::Info,
                 0, // use the same bucket
             );
         }
@@ -606,8 +601,8 @@ mod test {
         let agent = MetricsAgent::new(writer.clone(), Duration::from_secs(10), 1000);
 
         for i in 0..50 {
-            agent.submit_counter(CounterPoint::new("counter 1"), Level::Info, i / 10);
-            agent.submit_counter(CounterPoint::new("counter 2"), Level::Info, i / 10);
+            agent.submit_counter(CounterPoint::new("counter 1"), i / 10);
+            agent.submit_counter(CounterPoint::new("counter 2"), i / 10);
         }
 
         agent.flush();
@@ -619,7 +614,7 @@ mod test {
         let writer = Arc::new(MockMetricsWriter::new());
         let agent = MetricsAgent::new(writer.clone(), Duration::from_secs(1), 1000);
 
-        agent.submit(DataPoint::new("point 1"), Level::Info);
+        agent.submit(DataPoint::new("point 1"));
         thread::sleep(Duration::from_secs(2));
         assert_eq!(writer.points_written(), 2);
     }
@@ -634,7 +629,6 @@ mod test {
                 DataPoint::new("measurement")
                     .add_field_i64("i", i)
                     .to_owned(),
-                Level::Info,
             );
         }
 
@@ -662,7 +656,7 @@ mod test {
             point.add_field_i64("i", i);
             let agent = Arc::clone(&agent);
             threads.push(thread::spawn(move || {
-                agent.lock().unwrap().submit(point, Level::Info);
+                agent.lock().unwrap().submit(point);
             }));
         }
 
@@ -679,7 +673,7 @@ mod test {
         let writer = Arc::new(MockMetricsWriter::new());
         {
             let agent = MetricsAgent::new(writer.clone(), Duration::from_secs(9_999_999), 1000);
-            agent.submit(DataPoint::new("point 1"), Level::Info);
+            agent.submit(DataPoint::new("point 1"));
         }
 
         assert_eq!(writer.points_written(), 2);
@@ -694,6 +688,6 @@ mod test {
             .add_field_bool("random_bool", rand::random::<u8>() < 128)
             .add_field_i64("random_int", rand::random::<u8>() as i64)
             .to_owned();
-        agent.submit(point, Level::Info);
+        agent.submit(point);
     }
 }
