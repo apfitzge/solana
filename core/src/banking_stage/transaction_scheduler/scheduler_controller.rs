@@ -204,13 +204,18 @@ impl SchedulerController {
 
         for chunk in transaction_ids.chunks(CHUNK_SIZE) {
             let lock_results = vec![Ok(()); chunk.len()];
-            let sanitized_txs: Vec<_> = chunk
+            let state_refs: Vec<_> = chunk
                 .iter()
-                .map(|id| {
-                    &self
-                        .container
-                        .get_transaction_ttl(&id.id)
+                .map(|id| self.container.get_transaction_state(&id.id))
+                .collect();
+
+            let sanitized_txs: Vec<_> = state_refs
+                .iter()
+                .map(|state_ref| {
+                    &state_ref
+                        .as_ref()
                         .expect("transaction must exist")
+                        .transaction_ttl()
                         .transaction
                 })
                 .collect();

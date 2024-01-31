@@ -5,9 +5,10 @@ use {
     },
     crate::banking_stage::scheduler_messages::TransactionId,
     crossbeam_skiplist::SkipSet,
-    indexed_map::IndexedMap,
     solana_cost_model::transaction_cost::TransactionCost,
     solana_runtime::transaction_priority_details::TransactionPriorityDetails,
+    std::cell::{Ref, RefMut},
+    valet::Valet,
 };
 
 /// This structure will hold `TransactionState` for the entirety of a
@@ -38,7 +39,7 @@ use {
 pub(crate) struct TransactionStateContainer {
     capacity: usize,
     priority_queue: SkipSet<TransactionPriorityId>,
-    id_to_transaction_state: IndexedMap<TransactionState>,
+    id_to_transaction_state: Valet<TransactionState>,
 }
 
 impl TransactionStateContainer {
@@ -46,42 +47,39 @@ impl TransactionStateContainer {
         Self {
             capacity,
             priority_queue: SkipSet::new(),
-            id_to_transaction_state: IndexedMap::with_capacity(capacity + 1),
+            id_to_transaction_state: Valet::with_capacity(capacity + 1024),
         }
     }
 
     /// Returns true if the queue is empty.
     pub(crate) fn is_empty(&self) -> bool {
-        self.priority_queue.is_empty()
+        self.id_to_transaction_state.len() == 0
     }
 
     /// Returns the remaining capacity of the queue
     pub(crate) fn remaining_queue_capacity(&self) -> usize {
-        self.capacity - self.priority_queue.len()
+        1 + self.capacity - self.id_to_transaction_state.len()
     }
 
     /// Get the top transaction id in the priority queue.
     pub(crate) fn pop(&self) -> Option<TransactionPriorityId> {
-        self.priority_queue.pop_front().map(|entry| *entry.value())
+        self.priority_queue.pop_back().map(|entry| *entry.value())
+    }
+
+    /// Get transaction state by id.
+    pub(crate) fn get_transaction_state<'a>(
+        &'a self,
+        id: &TransactionId,
+    ) -> Ref<'a, Option<TransactionState>> {
+        self.id_to_transaction_state.get(**id)
     }
 
     /// Get mutable transaction state by id.
-    pub(crate) fn get_mut_transaction_state(
-        &self,
+    pub(crate) fn get_mut_transaction_state<'a>(
+        &'a self,
         id: &TransactionId,
-    ) -> Option<&mut TransactionState> {
-        self.id_to_transaction_state.get_mut(id)
-    }
-
-    /// Get reference to `SanitizedTransactionTTL` by id.
-    /// Panics if the transaction does not exist.
-    pub(crate) fn get_transaction_ttl(
-        &self,
-        id: &TransactionId,
-    ) -> Option<&SanitizedTransactionTTL> {
-        self.id_to_transaction_state
-            .get(id)
-            .map(|state| state.transaction_ttl())
+    ) -> RefMut<'a, Option<TransactionState>> {
+        self.id_to_transaction_state.get_mut(**id)
     }
 
     /// Take `SanitizedTransactionTTL` by id.
@@ -89,7 +87,8 @@ impl TransactionStateContainer {
     /// Panics if the transaction does not exist.
     pub(crate) fn take_transaction(&self, id: &TransactionId) -> SanitizedTransactionTTL {
         self.id_to_transaction_state
-            .get_mut(id)
+            .get_mut(**id)
+            .as_mut()
             .expect("transaction must exist")
             .transition_to_pending()
     }
@@ -122,9 +121,8 @@ impl TransactionStateContainer {
         transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL,
     ) {
-        let transaction_state = self
-            .get_mut_transaction_state(&transaction_id)
-            .expect("transaction must exist");
+        let mut state_ref = self.get_mut_transaction_state(&transaction_id);
+        let transaction_state = state_ref.as_mut().expect("transaction must exist");
         let priority_id = TransactionPriorityId::new(transaction_state.priority(), transaction_id);
         transaction_state.transition_to_unprocessed(transaction_ttl);
         self.push_id_into_queue(priority_id);
@@ -136,7 +134,7 @@ impl TransactionStateContainer {
     pub(crate) fn push_id_into_queue(&self, priority_id: TransactionPriorityId) -> bool {
         self.priority_queue.insert(priority_id);
         if self.remaining_queue_capacity() == 0 {
-            let popped_id = self.priority_queue.pop_back().unwrap();
+            let popped_id = self.priority_queue.pop_front().unwrap();
             self.remove_by_id(&popped_id.id);
             true
         } else {
@@ -147,7 +145,7 @@ impl TransactionStateContainer {
     /// Remove transaction by id.
     pub(crate) fn remove_by_id(&self, id: &TransactionId) {
         self.id_to_transaction_state
-            .remove(id)
+            .take(**id)
             .expect("transaction must exist");
     }
 }

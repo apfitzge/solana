@@ -89,6 +89,7 @@ impl PrioGraphScheduler {
                 const MAX_FILTER_CHUNK_SIZE: usize = 128;
                 let mut filter_array = [true; MAX_FILTER_CHUNK_SIZE];
                 let mut ids = Vec::with_capacity(MAX_FILTER_CHUNK_SIZE);
+                let mut refs = Vec::with_capacity(MAX_FILTER_CHUNK_SIZE);
                 let mut txs = Vec::with_capacity(MAX_FILTER_CHUNK_SIZE);
 
                 let chunk_size = (*window_budget).min(MAX_FILTER_CHUNK_SIZE);
@@ -102,17 +103,29 @@ impl PrioGraphScheduler {
                 *window_budget = window_budget.saturating_sub(chunk_size);
 
                 ids.iter().for_each(|id| {
-                    let transaction = container.get_transaction_ttl(&id.id).unwrap();
-                    txs.push(&transaction.transaction);
+                    let state_ref = container.get_transaction_state(&id.id);
+                    refs.push(state_ref);
                 });
+                for state_ref in &refs {
+                    let state = state_ref.as_ref().unwrap();
+                    txs.push(&state.transaction_ttl().transaction);
+                }
 
                 let (_, filter_us) =
                     measure_us!(pre_graph_filter(&txs, &mut filter_array[..chunk_size]));
                 saturating_add_assign!(total_filter_time_us, filter_us);
 
+                // Drop txs and refs to avoid holding references to `container` and `txs`.
+                txs.clear();
+                refs.clear();
                 for (id, filter_result) in ids.iter().zip(&filter_array[..chunk_size]) {
+                    eprintln!("begin");
                     if *filter_result {
-                        let transaction = container.get_transaction_ttl(&id.id).unwrap();
+                        let state_ref = container.get_transaction_state(&id.id);
+                        let transaction = state_ref
+                            .as_ref()
+                            .expect("transaction must exist")
+                            .transaction_ttl();
                         prio_graph.insert_transaction(
                             *id,
                             Self::get_transaction_account_access(transaction),
@@ -121,6 +134,7 @@ impl PrioGraphScheduler {
                         saturating_add_assign!(num_filtered_out, 1);
                         container.remove_by_id(&id.id);
                     }
+                    eprintln!("end");
                 }
 
                 if ids.len() != chunk_size {
@@ -150,12 +164,15 @@ impl PrioGraphScheduler {
 
                 // Should always be in the container, during initial testing phase panic.
                 // Later, we can replace with a continue in case this does happen.
-                let Some(transaction_state) = container.get_mut_transaction_state(&id.id) else {
-                    panic!("transaction state must exist")
-                };
+                let mut mut_ref = container.get_mut_transaction_state(&id.id);
+                let transaction_state = mut_ref
+                    .as_mut()
+                    .unwrap_or_else(|| panic!("transaction state must exist"));
 
                 let transaction = &transaction_state.transaction_ttl().transaction;
                 if !pre_lock_filter(transaction) {
+                    // need to drop in order to avoid holding a mutable reference to `container`
+                    drop(mut_ref);
                     container.remove_by_id(&id.id);
                     continue;
                 }

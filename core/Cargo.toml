@@ -82,7 +82,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 trees = { workspace = true }
 crossbeam-skiplist = "0.1.2"
-indexed_map = { git = "https://github.com/apfitzge/indexed_map.git", rev = "06060002d0ae6e9b78bf203b30d2b45e725a770b" }
+valet = { git = "https://github.com/apfitzge/indexed_map.git", rev = "439609af34f0ae6feb4c2f7678e44ae97348ab4f" }
 
 [dev-dependencies]
 assert_matches = { workspace = true }

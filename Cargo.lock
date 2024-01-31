@@ -2673,11 +2673,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70891286cb8e844fdfcf1178b47569699f9e20b5ecc4b45a6240a64771444638"
 
 [[package]]
-name = "indexed_map"
-version = "0.1.0"
-source = "git+https://github.com/apfitzge/indexed_map.git?rev=06060002d0ae6e9b78bf203b30d2b45e725a770b#06060002d0ae6e9b78bf203b30d2b45e725a770b"
-
-[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5908,7 +5903,6 @@ dependencies = [
  "fs_extra",
  "futures 0.3.30",
  "histogram",
- "indexed_map",
  "itertools",
  "lazy_static",
  "log",
@@ -5976,6 +5970,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "trees",
+ "valet",
 ]
 
 [[package]]
@@ -8970,6 +8965,11 @@ name = "utf8-width"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cf7d77f457ef8dfa11e4cd5933c5ddb5dc52a94664071951219a97710f0a32b"
+
+[[package]]
+name = "valet"
+version = "0.1.0"
+source = "git+https://github.com/apfitzge/indexed_map.git?rev=439609af34f0ae6feb4c2f7678e44ae97348ab4f#439609af34f0ae6feb4c2f7678e44ae97348ab4f"
 
 [[package]]
 name = "valuable"
