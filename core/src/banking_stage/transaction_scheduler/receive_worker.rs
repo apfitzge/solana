@@ -2,6 +2,7 @@ use {
     super::transaction_state_container::TransactionStateContainer,
     crate::{
         banking_stage::{
+            consumer::Consumer,
             decision_maker::{BufferedPacketsDecision, DecisionMaker},
             immutable_deserialized_packet::ImmutableDeserializedPacket,
             transaction_scheduler::transaction_state::SanitizedTransactionTTL,
@@ -131,6 +132,9 @@ impl ReceiveWorker {
                 .zip(priority_details.drain(..))
                 .zip(check_results)
                 .filter(|(_, check_result)| check_result.0.is_ok())
+                .filter(|((tx, _), _)| {
+                    Consumer::check_fee_payer_unlocked(bank, tx.message(), error_counts).is_ok()
+                })
             {
                 let cost = CostModel::calculate_cost(&transaction, &bank.feature_set);
                 let transaction_ttl = SanitizedTransactionTTL {
