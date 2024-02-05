@@ -119,7 +119,6 @@ impl PrioGraphScheduler {
                 txs.clear();
                 refs.clear();
                 for (id, filter_result) in ids.iter().zip(&filter_array[..chunk_size]) {
-                    eprintln!("begin");
                     if *filter_result {
                         let state_ref = container.get_transaction_state(&id.id);
                         let transaction = state_ref
@@ -134,7 +133,6 @@ impl PrioGraphScheduler {
                         saturating_add_assign!(num_filtered_out, 1);
                         container.remove_by_id(&id.id);
                     }
-                    eprintln!("end");
                 }
 
                 if ids.len() != chunk_size {

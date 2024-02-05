@@ -134,8 +134,9 @@ impl TransactionStateContainer {
     pub(crate) fn push_id_into_queue(&self, priority_id: TransactionPriorityId) -> bool {
         self.priority_queue.insert(priority_id);
         if self.remaining_queue_capacity() == 0 {
-            let popped_id = self.priority_queue.pop_front().unwrap();
-            self.remove_by_id(&popped_id.id);
+            if let Some(popped_id) = self.priority_queue.pop_front() {
+                self.remove_by_id(&popped_id.id);
+            }
             true
         } else {
             false
