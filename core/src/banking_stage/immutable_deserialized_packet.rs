@@ -1,4 +1,5 @@
 use {
+    solana_cost_model::block_cost_limits::BUILT_IN_INSTRUCTION_COSTS,
     solana_perf::packet::Packet,
     solana_runtime::compute_budget_details::{ComputeBudgetDetails, GetComputeBudgetDetails},
     solana_sdk::{
@@ -6,6 +7,7 @@ use {
         hash::Hash,
         message::Message,
         sanitize::SanitizeError,
+        saturating_add_assign,
         short_vec::decode_shortu16_len,
         signature::Signature,
         transaction::{
@@ -96,6 +98,22 @@ impl ImmutableDeserializedPacket {
 
     pub fn compute_budget_details(&self) -> ComputeBudgetDetails {
         self.compute_budget_details.clone()
+    }
+
+    /// Returns true if the transaction's compute unit limit is at least as
+    /// large as the sum of the static builtins' costs.
+    /// This is a simple sanity check so the leader can discard transactions
+    /// which are statically known to exceed the compute budget, and will
+    /// result in no useful state-change.
+    pub fn compute_unit_limit_above_static_builtins(&self) -> bool {
+        let mut static_builtin_cost_sum: u64 = 0;
+        for (program_id, _) in self.transaction.get_message().program_instructions_iter() {
+            if let Some(ix_cost) = BUILT_IN_INSTRUCTION_COSTS.get(program_id) {
+                saturating_add_assign!(static_builtin_cost_sum, *ix_cost);
+            }
+        }
+
+        self.compute_unit_limit() >= static_builtin_cost_sum
     }
 
     // This function deserializes packets into transactions, computes the blake3 hash of transaction
