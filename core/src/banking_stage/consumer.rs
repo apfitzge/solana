@@ -471,6 +471,7 @@ impl Consumer {
         chunk_offset: usize,
         pre_results: impl Iterator<Item = Result<(), TransactionError>>,
     ) -> ProcessTransactionBatchOutput {
+        let cost_tracker_report_lock = bank.cost_tracker_report_read_lock();
         let (
             (transaction_qos_cost_results, cost_model_throttled_transactions_count),
             cost_model_us,
@@ -529,6 +530,9 @@ impl Consumer {
                 bank,
             );
         }
+        // Costs for in-flight transactions are removed from the cost tracker,
+        // release this lock so reporting thread is free to report.
+        drop(cost_tracker_report_lock);
 
         retryable_transaction_indexes
             .iter_mut()

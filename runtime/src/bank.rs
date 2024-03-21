@@ -572,6 +572,7 @@ impl PartialEq for Bank {
             transaction_processor: _,
             check_program_modification_slot: _,
             collector_fee_details: _,
+            cost_tracker_report_lock: _,
             // Ignore new fields explicitly if they do not impact PartialEq.
             // Adding ".." will remove compile-time checks that if a new field
             // is added to the struct, this PartialEq is accordingly updated.
@@ -837,6 +838,12 @@ pub struct Bank {
 
     /// Collected fee details
     collector_fee_details: RwLock<CollectorFeeDetails>,
+    /// A lock which execution threads will acquire the read lock during execution
+    /// until cost-tracker updates are complete.
+    /// The cost-tracking reporting will acquire the write lock before reporting,
+    /// this is to avoid cost-tracker-stats from being reported before the updates
+    /// are complete.
+    cost_tracker_report_lock: RwLock<()>,
 }
 
 struct VoteWithStakeDelegations {
@@ -1025,6 +1032,7 @@ impl Bank {
             transaction_processor: TransactionBatchProcessor::default(),
             check_program_modification_slot: false,
             collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
+            cost_tracker_report_lock: RwLock::new(()),
         };
 
         bank.transaction_processor = TransactionBatchProcessor::new(
@@ -1345,6 +1353,7 @@ impl Bank {
             transaction_processor: TransactionBatchProcessor::default(),
             check_program_modification_slot: false,
             collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
+            cost_tracker_report_lock: RwLock::new(()),
         };
 
         new.transaction_processor = TransactionBatchProcessor::new(
@@ -1892,8 +1901,9 @@ impl Bank {
             epoch_reward_status: fields.epoch_reward_status,
             transaction_processor: TransactionBatchProcessor::default(),
             check_program_modification_slot: false,
-            // collector_fee_details is not serialized to snapshot
+            // collector_fee_details, cost_tracker_report_lock are not serialized to snapshot
             collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
+            cost_tracker_report_lock: RwLock::new(()),
         };
 
         bank.transaction_processor = TransactionBatchProcessor::new(
@@ -2023,6 +2033,14 @@ impl Bank {
 
     pub fn first_normal_epoch(&self) -> Epoch {
         self.epoch_schedule().first_normal_epoch
+    }
+
+    pub fn cost_tracker_report_read_lock(&self) -> RwLockReadGuard<()> {
+        self.cost_tracker_report_lock.read().unwrap()
+    }
+
+    pub fn cost_tracker_report_write_lock(&self) -> RwLockWriteGuard<()> {
+        self.cost_tracker_report_lock.write().unwrap()
     }
 
     pub fn freeze_lock(&self) -> RwLockReadGuard<Hash> {

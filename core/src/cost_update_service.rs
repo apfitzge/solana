@@ -39,6 +39,7 @@ impl CostUpdateService {
         for cost_update in cost_update_receiver.iter() {
             match cost_update {
                 CostUpdate::FrozenBank { bank } => {
+                    let _lock = bank.cost_tracker_report_write_lock(); // wait for in-flight transactions to finish
                     bank.read_cost_tracker().unwrap().report_stats(bank.slot());
                 }
             }
