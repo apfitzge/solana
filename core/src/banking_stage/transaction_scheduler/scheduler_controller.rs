@@ -272,16 +272,8 @@ impl SchedulerController {
 
         let (received_packet_results, receive_time_us) = measure_us!(self
             .packet_receiver
-<<<<<<< HEAD
-            .receive_packets(recv_timeout, remaining_queue_capacity));
-        saturating_add_assign!(self.timing_metrics.receive_time_us, receive_time_us);
-=======
             .receive_packets(recv_timeout, remaining_queue_capacity, |_| true));
-
-        self.timing_metrics.update(|timing_metrics| {
-            saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
-        });
->>>>>>> 5f1693224e (Discard packets statically known to fail (#370))
+        saturating_add_assign!(self.timing_metrics.receive_time_us, receive_time_us);
 
         match received_packet_results {
             Ok(receive_packet_results) => {
