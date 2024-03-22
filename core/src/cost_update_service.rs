@@ -39,7 +39,25 @@ impl CostUpdateService {
         for cost_update in cost_update_receiver.iter() {
             match cost_update {
                 CostUpdate::FrozenBank { bank } => {
-                    bank.read_cost_tracker().unwrap().report_stats(bank.slot());
+                    let mut loop_count = 0;
+                    loop {
+                        loop_count += 1;
+                        let cost_tracker = bank.read_cost_tracker().unwrap();
+                        if cost_tracker.in_flight_transaction_count() == 0 {
+                            break;
+                        }
+                        if loop_count >= 100 {
+                            warn!("in_flight_transaction_count ({}) did not reach 0 before reaching timeout for slot {}",
+                                cost_tracker.in_flight_transaction_count(), bank.slot());
+                            break;
+                        }
+
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+
+                    let cost_tracker = bank.read_cost_tracker().unwrap();
+                    cost_tracker.report_stats(bank.slot());
                 }
             }
         }

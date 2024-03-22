@@ -120,6 +120,7 @@ impl QosService {
                 }
             })
             .collect();
+        cost_tracker.add_transactions_in_flight(num_included);
 
         cost_tracking_time.stop();
         self.metrics
@@ -167,17 +168,20 @@ impl QosService {
         bank: &Bank,
     ) {
         let mut cost_tracker = bank.write_cost_tracker().unwrap();
+        let mut num_included = 0;
         transaction_cost_results
             .zip(transaction_committed_status)
             .for_each(|(tx_cost, transaction_committed_details)| {
                 // Only transactions that the qos service included have to be
                 // checked for update
                 if let Ok(tx_cost) = tx_cost {
+                    num_included += 1;
                     if *transaction_committed_details == CommitTransactionDetails::NotCommitted {
                         cost_tracker.remove(tx_cost)
                     }
                 }
             });
+        cost_tracker.sub_transactions_in_flight(num_included);
     }
 
     fn update_committed_transaction_costs<'a>(
@@ -186,12 +190,14 @@ impl QosService {
         bank: &Bank,
     ) {
         let mut cost_tracker = bank.write_cost_tracker().unwrap();
+        let mut num_included = 0;
         transaction_cost_results
             .zip(transaction_committed_status)
             .for_each(|(tx_cost, transaction_committed_details)| {
                 // Only transactions that the qos service included have to be
                 // checked for update
                 if let Ok(tx_cost) = tx_cost {
+                    num_included += 1;
                     if let CommitTransactionDetails::Committed { compute_units } =
                         transaction_committed_details
                     {
@@ -199,6 +205,7 @@ impl QosService {
                     }
                 }
             });
+        cost_tracker.sub_transactions_in_flight(num_included);
     }
 
     fn remove_transaction_costs<'a>(

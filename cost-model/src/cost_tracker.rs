@@ -61,6 +61,8 @@ pub struct CostTracker {
     transaction_signature_count: u64,
     secp256k1_instruction_signature_count: u64,
     ed25519_instruction_signature_count: u64,
+
+    in_flight_transaction_count: usize,
 }
 
 impl Default for CostTracker {
@@ -83,6 +85,7 @@ impl Default for CostTracker {
             transaction_signature_count: 0,
             secp256k1_instruction_signature_count: 0,
             ed25519_instruction_signature_count: 0,
+            in_flight_transaction_count: 0,
         }
     }
 }
@@ -98,6 +101,23 @@ impl CostTracker {
         self.account_cost_limit = account_cost_limit;
         self.block_cost_limit = block_cost_limit;
         self.vote_cost_limit = vote_cost_limit;
+    }
+
+    pub fn in_flight_transaction_count(&self) -> usize {
+        self.in_flight_transaction_count
+    }
+
+    pub fn add_transactions_in_flight(&mut self, in_flight_transaction_count: usize) {
+        saturating_add_assign!(
+            self.in_flight_transaction_count,
+            in_flight_transaction_count
+        );
+    }
+
+    pub fn sub_transactions_in_flight(&mut self, in_flight_transaction_count: usize) {
+        self.in_flight_transaction_count = self
+            .in_flight_transaction_count
+            .saturating_sub(in_flight_transaction_count);
     }
 
     pub fn try_add(&mut self, tx_cost: &TransactionCost) -> Result<u64, CostTrackerError> {
