@@ -56,10 +56,10 @@ pub(crate) struct SchedulerController {
     scheduler: PrioGraphScheduler,
     /// Metrics tracking counts on transactions in different states
     /// over an interval and during a leader slot.
-    count_metrics: SchedulerCountMetrics,
+    count_metrics: Arc<Mutex<SchedulerCountMetrics>>,
     /// Metrics tracking time spent in difference code sections
     /// over an interval and during a leader slot.
-    timing_metrics: SchedulerTimingMetrics,
+    timing_metrics: Arc<Mutex<SchedulerTimingMetrics>>,
     /// Metric report handles for the worker threads.
     worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
 }
@@ -81,8 +81,8 @@ impl SchedulerController {
                 TOTAL_BUFFERED_PACKETS,
             ))),
             scheduler,
-            count_metrics: SchedulerCountMetrics::default(),
-            timing_metrics: SchedulerTimingMetrics::default(),
+            count_metrics: Arc::default(),
+            timing_metrics: Arc::default(),
             worker_metrics,
         }
     }
@@ -101,14 +101,21 @@ impl SchedulerController {
             // bypass sanitization and buffering and immediately drop the packets.
             let (decision, decision_time_us) =
                 measure_us!(self.decision_maker.make_consume_or_forward_decision());
-            self.timing_metrics.update(|timing_metrics| {
-                saturating_add_assign!(timing_metrics.decision_time_us, decision_time_us);
-            });
+            self.timing_metrics
+                .lock()
+                .unwrap()
+                .update(|timing_metrics| {
+                    saturating_add_assign!(timing_metrics.decision_time_us, decision_time_us);
+                });
 
             let new_leader_slot = decision.bank_start().map(|b| b.working_bank.slot());
             self.count_metrics
+                .lock()
+                .unwrap()
                 .maybe_report_and_reset_slot(new_leader_slot);
             self.timing_metrics
+                .lock()
+                .unwrap()
                 .maybe_report_and_reset_slot(new_leader_slot);
 
             self.process_transactions(&decision)?;
@@ -118,15 +125,20 @@ impl SchedulerController {
             }
             // Report metrics only if there is data.
             // Reset intervals when appropriate, regardless of report.
-            let should_report = self.count_metrics.interval_has_data();
             let priority_min_max = self.container.lock().unwrap().get_min_max_priority();
-            self.count_metrics.update(|count_metrics| {
-                count_metrics.update_priority_stats(priority_min_max);
-            });
-            self.count_metrics
-                .maybe_report_and_reset_interval(should_report);
-            self.timing_metrics
-                .maybe_report_and_reset_interval(should_report);
+            {
+                let mut count_metrics = self.count_metrics.lock().unwrap();
+                let should_report = count_metrics.interval_has_data();
+                count_metrics.update(|count_metrics| {
+                    count_metrics.update_priority_stats(priority_min_max);
+                });
+                count_metrics.maybe_report_and_reset_interval(should_report);
+
+                self.timing_metrics
+                    .lock()
+                    .unwrap()
+                    .maybe_report_and_reset_interval(should_report);
+            }
             self.worker_metrics
                 .iter()
                 .for_each(|metrics| metrics.maybe_report_and_reset());
@@ -150,7 +162,7 @@ impl SchedulerController {
                     |_| true // no pre-lock filter for now
                 )?);
 
-                self.count_metrics.update(|count_metrics| {
+                self.count_metrics.lock().unwrap().update(|count_metrics| {
                     saturating_add_assign!(
                         count_metrics.num_scheduled,
                         scheduling_summary.num_scheduled
@@ -165,25 +177,34 @@ impl SchedulerController {
                     );
                 });
 
-                self.timing_metrics.update(|timing_metrics| {
-                    saturating_add_assign!(
-                        timing_metrics.schedule_filter_time_us,
-                        scheduling_summary.filter_time_us
-                    );
-                    saturating_add_assign!(timing_metrics.schedule_time_us, schedule_time_us);
-                });
+                self.timing_metrics
+                    .lock()
+                    .unwrap()
+                    .update(|timing_metrics| {
+                        saturating_add_assign!(
+                            timing_metrics.schedule_filter_time_us,
+                            scheduling_summary.filter_time_us
+                        );
+                        saturating_add_assign!(timing_metrics.schedule_time_us, schedule_time_us);
+                    });
             }
             BufferedPacketsDecision::Forward => {
                 let (_, clear_time_us) = measure_us!(self.clear_container());
-                self.timing_metrics.update(|timing_metrics| {
-                    saturating_add_assign!(timing_metrics.clear_time_us, clear_time_us);
-                });
+                self.timing_metrics
+                    .lock()
+                    .unwrap()
+                    .update(|timing_metrics| {
+                        saturating_add_assign!(timing_metrics.clear_time_us, clear_time_us);
+                    });
             }
             BufferedPacketsDecision::ForwardAndHold => {
                 let (_, clean_time_us) = measure_us!(self.clean_queue());
-                self.timing_metrics.update(|timing_metrics| {
-                    saturating_add_assign!(timing_metrics.clean_time_us, clean_time_us);
-                });
+                self.timing_metrics
+                    .lock()
+                    .unwrap()
+                    .update(|timing_metrics| {
+                        saturating_add_assign!(timing_metrics.clean_time_us, clean_time_us);
+                    });
             }
             BufferedPacketsDecision::Hold => {}
         }
@@ -226,7 +247,7 @@ impl SchedulerController {
                 saturating_add_assign!(num_dropped_on_clear, 1);
             }
         }
-        self.count_metrics.update(|count_metrics| {
+        self.count_metrics.lock().unwrap().update(|count_metrics| {
             saturating_add_assign!(count_metrics.num_dropped_on_clear, num_dropped_on_clear);
         });
     }
@@ -281,7 +302,7 @@ impl SchedulerController {
             }
         }
 
-        self.count_metrics.update(|count_metrics| {
+        self.count_metrics.lock().unwrap().update(|count_metrics| {
             saturating_add_assign!(
                 count_metrics.num_dropped_on_age_and_status,
                 num_dropped_on_age_and_status
@@ -294,16 +315,19 @@ impl SchedulerController {
         let ((num_transactions, num_retryable), receive_completed_time_us) =
             measure_us!(self.scheduler.receive_completed(&self.container)?);
 
-        self.count_metrics.update(|count_metrics| {
+        self.count_metrics.lock().unwrap().update(|count_metrics| {
             saturating_add_assign!(count_metrics.num_finished, num_transactions);
             saturating_add_assign!(count_metrics.num_retryable, num_retryable);
         });
-        self.timing_metrics.update(|timing_metrics| {
-            saturating_add_assign!(
-                timing_metrics.receive_completed_time_us,
-                receive_completed_time_us
-            );
-        });
+        self.timing_metrics
+            .lock()
+            .unwrap()
+            .update(|timing_metrics| {
+                saturating_add_assign!(
+                    timing_metrics.receive_completed_time_us,
+                    receive_completed_time_us
+                );
+            });
 
         Ok(())
     }
@@ -335,15 +359,18 @@ impl SchedulerController {
             .packet_receiver
             .receive_packets(recv_timeout, remaining_queue_capacity, |_| true));
 
-        self.timing_metrics.update(|timing_metrics| {
-            saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
-        });
+        self.timing_metrics
+            .lock()
+            .unwrap()
+            .update(|timing_metrics| {
+                saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
+            });
 
         match received_packet_results {
             Ok(receive_packet_results) => {
                 let num_received_packets = receive_packet_results.deserialized_packets.len();
 
-                self.count_metrics.update(|count_metrics| {
+                self.count_metrics.lock().unwrap().update(|count_metrics| {
                     saturating_add_assign!(count_metrics.num_received, num_received_packets);
                 });
 
@@ -351,11 +378,14 @@ impl SchedulerController {
                     let (_, buffer_time_us) = measure_us!(
                         self.buffer_packets(receive_packet_results.deserialized_packets)
                     );
-                    self.timing_metrics.update(|timing_metrics| {
-                        saturating_add_assign!(timing_metrics.buffer_time_us, buffer_time_us);
-                    });
+                    self.timing_metrics
+                        .lock()
+                        .unwrap()
+                        .update(|timing_metrics| {
+                            saturating_add_assign!(timing_metrics.buffer_time_us, buffer_time_us);
+                        });
                 } else {
-                    self.count_metrics.update(|count_metrics| {
+                    self.count_metrics.lock().unwrap().update(|count_metrics| {
                         saturating_add_assign!(
                             count_metrics.num_dropped_on_receive,
                             num_received_packets
@@ -451,7 +481,7 @@ impl SchedulerController {
             let num_dropped_on_transaction_checks =
                 post_lock_validation_count.saturating_sub(post_transaction_check_count);
 
-            self.count_metrics.update(|count_metrics| {
+            self.count_metrics.lock().unwrap().update(|count_metrics| {
                 saturating_add_assign!(
                     count_metrics.num_dropped_on_capacity,
                     num_dropped_on_capacity
