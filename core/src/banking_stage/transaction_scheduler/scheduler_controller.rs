@@ -61,6 +61,7 @@ impl SchedulerController {
         let count_metrics = Arc::new(Mutex::new(SchedulerCountMetrics::default()));
         let timing_metrics = Arc::new(Mutex::new(SchedulerTimingMetrics::default()));
         let transaction_receiver = TransactionReceiver::new(
+            decision_maker.clone(),
             packet_deserializer,
             bank_forks.clone(),
             container.clone(),
@@ -77,6 +78,10 @@ impl SchedulerController {
             timing_metrics,
             worker_metrics,
         }
+    }
+
+    pub fn transaction_receiver_clone(&self) -> TransactionReceiver {
+        self.transaction_receiver.clone()
     }
 
     pub fn run(mut self) -> Result<(), SchedulerError> {

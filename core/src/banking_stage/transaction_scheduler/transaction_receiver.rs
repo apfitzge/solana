@@ -1,11 +1,12 @@
 use {
     super::{
+        scheduler_error::SchedulerError,
         scheduler_metrics::{SchedulerCountMetrics, SchedulerTimingMetrics},
         transaction_id_generator::TransactionIdGenerator,
         transaction_state_container::TransactionStateContainer,
     },
     crate::banking_stage::{
-        decision_maker::BufferedPacketsDecision,
+        decision_maker::{BufferedPacketsDecision, DecisionMaker},
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         packet_deserializer::PacketDeserializer,
         transaction_scheduler::transaction_state::SanitizedTransactionTTL,
@@ -34,6 +35,8 @@ use {
 
 #[derive(Clone)]
 pub struct TransactionReceiver {
+    /// Decision maker for determining what should be done with transactions.
+    decision_maker: DecisionMaker,
     /// Packet/Transaction ingress.
     packet_receiver: PacketDeserializer,
     bank_forks: Arc<RwLock<BankForks>>,
@@ -52,6 +55,7 @@ pub struct TransactionReceiver {
 
 impl TransactionReceiver {
     pub(crate) fn new(
+        decision_maker: DecisionMaker,
         packet_receiver: PacketDeserializer,
         bank_forks: Arc<RwLock<BankForks>>,
         container: Arc<Mutex<TransactionStateContainer>>,
@@ -59,6 +63,7 @@ impl TransactionReceiver {
         timing_metrics: Arc<Mutex<SchedulerTimingMetrics>>,
     ) -> Self {
         Self {
+            decision_maker,
             packet_receiver,
             bank_forks,
             container,
@@ -68,11 +73,19 @@ impl TransactionReceiver {
         }
     }
 
+    pub(crate) fn run(self) -> Result<(), SchedulerError> {
+        loop {
+            let decision = self.decision_maker.make_consume_or_forward_decision();
+            if !self.receive_and_buffer_packets(&decision) {
+                return Err(SchedulerError::DisconnectedRecvChannel(
+                    "TransactionReceiver",
+                ));
+            }
+        }
+    }
+
     /// Returns whether the packet receiver is still connected.
-    pub(crate) fn receive_and_buffer_packets(
-        &mut self,
-        decision: &BufferedPacketsDecision,
-    ) -> bool {
+    pub(crate) fn receive_and_buffer_packets(&self, decision: &BufferedPacketsDecision) -> bool {
         let (is_empty, remaining_queue_capacity) = {
             let container = self.container.lock().unwrap();
             (container.is_empty(), container.remaining_queue_capacity())
@@ -139,7 +152,7 @@ impl TransactionReceiver {
         true
     }
 
-    fn buffer_packets(&mut self, packets: Vec<ImmutableDeserializedPacket>) {
+    fn buffer_packets(&self, packets: Vec<ImmutableDeserializedPacket>) {
         // Sanitize packets, generate IDs, and insert into the container.
         let bank = self.bank_forks.read().unwrap().working_bank();
         let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());

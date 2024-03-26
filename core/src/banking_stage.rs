@@ -592,6 +592,24 @@ impl BankingStage {
             worker_metrics,
         );
 
+        // Spawn additional receiving threads.
+        // TODO: Add CLI or env var to control the number of receiving threads.
+        for id in 0..4 {
+            let transaction_receiver = scheduler_controller.transaction_receiver_clone();
+            bank_thread_hdls.push(
+                Builder::new()
+                    .name(format!("solBnkTxRcv{id:02}"))
+                    .spawn(move || match transaction_receiver.run() {
+                        Ok(_) => {}
+                        Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                        Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                            warn!("Unexpected worker disconnect from receiver")
+                        }
+                    })
+                    .unwrap(),
+            );
+        }
+
         // Spawn the central scheduler thread
         bank_thread_hdls.push({
             Builder::new()
