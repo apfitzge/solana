@@ -20,6 +20,7 @@ use {
         pubkey::Pubkey, saturating_add_assign, slot_history::Slot,
         transaction::SanitizedTransaction,
     },
+    std::sync::Mutex,
 };
 
 pub(crate) struct PrioGraphScheduler {
@@ -63,7 +64,7 @@ impl PrioGraphScheduler {
     /// not cause conflicts in the near future.
     pub(crate) fn schedule(
         &mut self,
-        container: &mut TransactionStateContainer,
+        container: &Mutex<TransactionStateContainer>,
         pre_graph_filter: impl Fn(&[&SanitizedTransaction], &mut [bool]),
         pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
@@ -82,7 +83,7 @@ impl PrioGraphScheduler {
         let mut total_filter_time_us: u64 = 0;
 
         let mut window_budget = self.look_ahead_window_size;
-        let mut chunked_pops = |container: &mut TransactionStateContainer,
+        let mut chunked_pops = |container: &Mutex<TransactionStateContainer>,
                                 prio_graph: &mut PrioGraph<_, _, _, _>,
                                 window_budget: &mut usize| {
             while *window_budget > 0 {
@@ -92,6 +93,8 @@ impl PrioGraphScheduler {
                 let mut txs = Vec::with_capacity(MAX_FILTER_CHUNK_SIZE);
 
                 let chunk_size = (*window_budget).min(MAX_FILTER_CHUNK_SIZE);
+
+                let mut container = container.lock().unwrap();
                 for _ in 0..chunk_size {
                     if let Some(id) = container.pop() {
                         ids.push(id);
@@ -99,6 +102,7 @@ impl PrioGraphScheduler {
                         break;
                     }
                 }
+
                 *window_budget = window_budget.saturating_sub(chunk_size);
 
                 ids.iter().for_each(|id| {
@@ -150,6 +154,7 @@ impl PrioGraphScheduler {
 
                 // Should always be in the container, during initial testing phase panic.
                 // Later, we can replace with a continue in case this does happen.
+                let mut container = container.lock().unwrap();
                 let Some(transaction_state) = container.get_mut_transaction_state(&id.id) else {
                     panic!("transaction state must exist")
                 };
@@ -202,6 +207,7 @@ impl PrioGraphScheduler {
                 batches.ids[thread_id].push(id.id);
                 batches.max_age_slots[thread_id].push(max_age_slot);
                 saturating_add_assign!(batches.total_cus[thread_id], cost);
+                drop(container); // release lock before sending
 
                 // If target batch size is reached, send only this batch.
                 if batches.ids[thread_id].len() >= TARGET_NUM_TRANSACTIONS_PER_BATCH {
@@ -230,13 +236,16 @@ impl PrioGraphScheduler {
         saturating_add_assign!(num_sent, self.send_batches(&mut batches)?);
 
         // Push unschedulable ids back into the container
-        for id in unschedulable_ids {
-            container.push_id_into_queue(id);
-        }
+        {
+            let mut container = container.lock().unwrap();
+            for id in unschedulable_ids {
+                container.push_id_into_queue(id);
+            }
 
-        // Push remaining transactions back into the container
-        while let Some((id, _)) = prio_graph.pop_and_unblock() {
-            container.push_id_into_queue(id);
+            // Push remaining transactions back into the container
+            while let Some((id, _)) = prio_graph.pop_and_unblock() {
+                container.push_id_into_queue(id);
+            }
         }
 
         assert_eq!(
@@ -256,7 +265,7 @@ impl PrioGraphScheduler {
     /// Returns (num_transactions, num_retryable_transactions) on success.
     pub fn receive_completed(
         &mut self,
-        container: &mut TransactionStateContainer,
+        container: &Mutex<TransactionStateContainer>,
     ) -> Result<(usize, usize), SchedulerError> {
         let mut total_num_transactions: usize = 0;
         let mut total_num_retryable: usize = 0;
@@ -275,7 +284,7 @@ impl PrioGraphScheduler {
     /// Returns `Ok((num_transactions, num_retryable))` if a batch was received, `Ok((0, 0))` if no batch was received.
     fn try_receive_completed(
         &mut self,
-        container: &mut TransactionStateContainer,
+        container: &Mutex<TransactionStateContainer>,
     ) -> Result<(usize, usize), SchedulerError> {
         match self.finished_consume_work_receiver.try_recv() {
             Ok(FinishedConsumeWork {
@@ -296,23 +305,27 @@ impl PrioGraphScheduler {
 
                 // Retryable transactions should be inserted back into the container
                 let mut retryable_iter = retryable_indexes.into_iter().peekable();
-                for (index, (id, transaction, max_age_slot)) in
-                    izip!(ids, transactions, max_age_slots).enumerate()
+
                 {
-                    if let Some(retryable_index) = retryable_iter.peek() {
-                        if *retryable_index == index {
-                            container.retry_transaction(
-                                id,
-                                SanitizedTransactionTTL {
-                                    transaction,
-                                    max_age_slot,
-                                },
-                            );
-                            retryable_iter.next();
-                            continue;
+                    let mut container = container.lock().unwrap();
+                    for (index, (id, transaction, max_age_slot)) in
+                        izip!(ids, transactions, max_age_slots).enumerate()
+                    {
+                        if let Some(retryable_index) = retryable_iter.peek() {
+                            if *retryable_index == index {
+                                container.retry_transaction(
+                                    id,
+                                    SanitizedTransactionTTL {
+                                        transaction,
+                                        max_age_slot,
+                                    },
+                                );
+                                retryable_iter.next();
+                                continue;
+                            }
                         }
+                        container.remove_by_id(&id);
                     }
-                    container.remove_by_id(&id);
                 }
 
                 Ok((num_transactions, num_retryable))
@@ -558,7 +571,7 @@ mod tests {
                 u64,
             ),
         >,
-    ) -> TransactionStateContainer {
+    ) -> Mutex<TransactionStateContainer> {
         let mut container = TransactionStateContainer::with_capacity(10 * 1024);
         for (index, (from_keypair, to_pubkeys, lamports, compute_unit_price)) in
             tx_infos.into_iter().enumerate()
@@ -583,7 +596,7 @@ mod tests {
             );
         }
 
-        container
+        Mutex::new(container)
     }
 
     fn collect_work(
@@ -609,11 +622,11 @@ mod tests {
     #[test]
     fn test_schedule_disconnected_channel() {
         let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(1);
-        let mut container = create_container([(&Keypair::new(), &[Pubkey::new_unique()], 1, 1)]);
+        let container = create_container([(&Keypair::new(), &[Pubkey::new_unique()], 1, 1)]);
 
         drop(work_receivers); // explicitly drop receivers
         assert_matches!(
-            scheduler.schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter),
+            scheduler.schedule(&container, test_pre_graph_filter, test_pre_lock_filter),
             Err(SchedulerError::DisconnectedSendChannel(_))
         );
     }
@@ -621,13 +634,13 @@ mod tests {
     #[test]
     fn test_schedule_single_threaded_no_conflicts() {
         let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(1);
-        let mut container = create_container([
+        let container = create_container([
             (&Keypair::new(), &[Pubkey::new_unique()], 1, 1),
             (&Keypair::new(), &[Pubkey::new_unique()], 2, 2),
         ]);
 
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(&container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
@@ -638,13 +651,13 @@ mod tests {
     fn test_schedule_single_threaded_conflict() {
         let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(1);
         let pubkey = Pubkey::new_unique();
-        let mut container = create_container([
+        let container = create_container([
             (&Keypair::new(), &[pubkey], 1, 1),
             (&Keypair::new(), &[pubkey], 1, 2),
         ]);
 
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(&container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
@@ -657,14 +670,14 @@ mod tests {
     #[test]
     fn test_schedule_consume_single_threaded_multi_batch() {
         let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(1);
-        let mut container = create_container(
+        let container = create_container(
             (0..4 * TARGET_NUM_TRANSACTIONS_PER_BATCH)
                 .map(|i| (Keypair::new(), [Pubkey::new_unique()], i as u64, 1)),
         );
 
         // expect 4 full batches to be scheduled
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(&container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();
         assert_eq!(
             scheduling_summary.num_scheduled,
@@ -682,11 +695,11 @@ mod tests {
     #[test]
     fn test_schedule_simple_thread_selection() {
         let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(2);
-        let mut container =
+        let container =
             create_container((0..4).map(|i| (Keypair::new(), [Pubkey::new_unique()], 1, i)));
 
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(&container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 4);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
@@ -701,7 +714,7 @@ mod tests {
         scheduler.look_ahead_window_size = 2;
 
         let accounts = (0..8).map(|_| Keypair::new()).collect_vec();
-        let mut container = create_container([
+        let container = create_container([
             (&accounts[0], &[accounts[1].pubkey()], 1, 6),
             (&accounts[2], &[accounts[3].pubkey()], 1, 5),
             (&accounts[4], &[accounts[5].pubkey()], 1, 4),
@@ -727,7 +740,7 @@ mod tests {
         // not have knowledge of the joining at transaction [4] until after [0] and [1]
         // have been scheduled.
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(&container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 4);
         assert_eq!(scheduling_summary.num_unschedulable, 2);
@@ -740,7 +753,7 @@ mod tests {
 
         // Cannot schedule even on next pass because of lock conflicts
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(&container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 0);
         assert_eq!(scheduling_summary.num_unschedulable, 2);
@@ -752,9 +765,9 @@ mod tests {
                 retryable_indexes: vec![],
             })
             .unwrap();
-        scheduler.receive_completed(&mut container).unwrap();
+        scheduler.receive_completed(&container).unwrap();
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(&container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
@@ -770,7 +783,7 @@ mod tests {
         let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(1);
         let pubkey = Pubkey::new_unique();
         let keypair = Keypair::new();
-        let mut container = create_container([
+        let container = create_container([
             (&Keypair::new(), &[pubkey], 1, 1),
             (&keypair, &[pubkey], 1, 2),
             (&Keypair::new(), &[pubkey], 1, 3),
@@ -780,7 +793,7 @@ mod tests {
         let pre_lock_filter =
             |tx: &SanitizedTransaction| tx.message().fee_payer() != &keypair.pubkey();
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, pre_lock_filter)
+            .schedule(&container, test_pre_graph_filter, pre_lock_filter)
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);

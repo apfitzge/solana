@@ -35,7 +35,7 @@ use {
     },
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
-        sync::{Arc, RwLock},
+        sync::{Arc, Mutex, RwLock},
         time::Duration,
     },
 };
@@ -51,7 +51,7 @@ pub(crate) struct SchedulerController {
     transaction_id_generator: TransactionIdGenerator,
     /// Container for transaction state.
     /// Shared resource between `packet_receiver` and `scheduler`.
-    container: TransactionStateContainer,
+    container: Arc<Mutex<TransactionStateContainer>>,
     /// State for scheduling and communicating with worker threads.
     scheduler: PrioGraphScheduler,
     /// Metrics tracking counts on transactions in different states
@@ -77,7 +77,9 @@ impl SchedulerController {
             packet_receiver: packet_deserializer,
             bank_forks,
             transaction_id_generator: TransactionIdGenerator::default(),
-            container: TransactionStateContainer::with_capacity(TOTAL_BUFFERED_PACKETS),
+            container: Arc::new(Mutex::new(TransactionStateContainer::with_capacity(
+                TOTAL_BUFFERED_PACKETS,
+            ))),
             scheduler,
             count_metrics: SchedulerCountMetrics::default(),
             timing_metrics: SchedulerTimingMetrics::default(),
@@ -117,7 +119,7 @@ impl SchedulerController {
             // Report metrics only if there is data.
             // Reset intervals when appropriate, regardless of report.
             let should_report = self.count_metrics.interval_has_data();
-            let priority_min_max = self.container.get_min_max_priority();
+            let priority_min_max = self.container.lock().unwrap().get_min_max_priority();
             self.count_metrics.update(|count_metrics| {
                 count_metrics.update_priority_stats(priority_min_max);
             });
@@ -141,7 +143,7 @@ impl SchedulerController {
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {
                 let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
-                    &mut self.container,
+                    &self.container,
                     |txs, results| {
                         Self::pre_graph_filter(txs, results, &bank_start.working_bank)
                     },
@@ -217,11 +219,13 @@ impl SchedulerController {
     /// This only clears pending transactions, and does **not** clear in-flight transactions.
     fn clear_container(&mut self) {
         let mut num_dropped_on_clear: usize = 0;
-        while let Some(id) = self.container.pop() {
-            self.container.remove_by_id(&id.id);
-            saturating_add_assign!(num_dropped_on_clear, 1);
+        {
+            let mut container = self.container.lock().unwrap();
+            while let Some(id) = container.pop() {
+                container.remove_by_id(&id.id);
+                saturating_add_assign!(num_dropped_on_clear, 1);
+            }
         }
-
         self.count_metrics.update(|count_metrics| {
             saturating_add_assign!(count_metrics.num_dropped_on_clear, num_dropped_on_clear);
         });
@@ -236,8 +240,11 @@ impl SchedulerController {
         const MAX_TRANSACTION_CHECKS: usize = 10_000;
         let mut transaction_ids = Vec::with_capacity(MAX_TRANSACTION_CHECKS);
 
-        while let Some(id) = self.container.pop() {
-            transaction_ids.push(id);
+        {
+            let mut container = self.container.lock().unwrap();
+            while let Some(id) = container.pop() {
+                transaction_ids.push(id);
+            }
         }
 
         let bank = self.bank_forks.read().unwrap().working_bank();
@@ -247,11 +254,12 @@ impl SchedulerController {
         let mut num_dropped_on_age_and_status: usize = 0;
         for chunk in transaction_ids.chunks(CHUNK_SIZE) {
             let lock_results = vec![Ok(()); chunk.len()];
+
+            let mut container = self.container.lock().unwrap();
             let sanitized_txs: Vec<_> = chunk
                 .iter()
                 .map(|id| {
-                    &self
-                        .container
+                    &container
                         .get_transaction_ttl(&id.id)
                         .expect("transaction must exist")
                         .transaction
@@ -268,7 +276,7 @@ impl SchedulerController {
             for ((result, _nonce, _lamports), id) in check_results.into_iter().zip(chunk.iter()) {
                 if result.is_err() {
                     saturating_add_assign!(num_dropped_on_age_and_status, 1);
-                    self.container.remove_by_id(&id.id);
+                    container.remove_by_id(&id.id);
                 }
             }
         }
@@ -284,7 +292,7 @@ impl SchedulerController {
     /// Receives completed transactions from the workers and updates metrics.
     fn receive_completed(&mut self) -> Result<(), SchedulerError> {
         let ((num_transactions, num_retryable), receive_completed_time_us) =
-            measure_us!(self.scheduler.receive_completed(&mut self.container)?);
+            measure_us!(self.scheduler.receive_completed(&self.container)?);
 
         self.count_metrics.update(|count_metrics| {
             saturating_add_assign!(count_metrics.num_finished, num_transactions);
@@ -302,12 +310,15 @@ impl SchedulerController {
 
     /// Returns whether the packet receiver is still connected.
     fn receive_and_buffer_packets(&mut self, decision: &BufferedPacketsDecision) -> bool {
-        let remaining_queue_capacity = self.container.remaining_queue_capacity();
+        let (is_empty, remaining_queue_capacity) = {
+            let container = self.container.lock().unwrap();
+            (container.is_empty(), container.remaining_queue_capacity())
+        };
 
         const MAX_PACKET_RECEIVE_TIME: Duration = Duration::from_millis(100);
         let (recv_timeout, should_buffer) = match decision {
             BufferedPacketsDecision::Consume(_) => (
-                if self.container.is_empty() {
+                if is_empty {
                     MAX_PACKET_RECEIVE_TIME
                 } else {
                     Duration::ZERO
@@ -403,31 +414,34 @@ impl SchedulerController {
             let mut post_transaction_check_count: usize = 0;
             let mut num_dropped_on_capacity: usize = 0;
             let mut num_buffered: usize = 0;
-            for ((transaction, fee_budget_limits), _) in transactions
-                .into_iter()
-                .zip(fee_budget_limits_vec)
-                .zip(check_results)
-                .filter(|(_, check_result)| check_result.0.is_ok())
             {
-                saturating_add_assign!(post_transaction_check_count, 1);
-                let transaction_id = self.transaction_id_generator.next();
+                let mut container = self.container.lock().unwrap();
+                for ((transaction, fee_budget_limits), _) in transactions
+                    .into_iter()
+                    .zip(fee_budget_limits_vec)
+                    .zip(check_results)
+                    .filter(|(_, check_result)| check_result.0.is_ok())
+                {
+                    saturating_add_assign!(post_transaction_check_count, 1);
+                    let transaction_id = self.transaction_id_generator.next();
 
-                let (priority, cost) =
-                    Self::calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
-                let transaction_ttl = SanitizedTransactionTTL {
-                    transaction,
-                    max_age_slot: last_slot_in_epoch,
-                };
+                    let (priority, cost) =
+                        Self::calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
+                    let transaction_ttl = SanitizedTransactionTTL {
+                        transaction,
+                        max_age_slot: last_slot_in_epoch,
+                    };
 
-                if self.container.insert_new_transaction(
-                    transaction_id,
-                    transaction_ttl,
-                    priority,
-                    cost,
-                ) {
-                    saturating_add_assign!(num_dropped_on_capacity, 1);
+                    if container.insert_new_transaction(
+                        transaction_id,
+                        transaction_ttl,
+                        priority,
+                        cost,
+                    ) {
+                        saturating_add_assign!(num_dropped_on_capacity, 1);
+                    }
+                    saturating_add_assign!(num_buffered, 1);
                 }
-                saturating_add_assign!(num_buffered, 1);
             }
 
             // Update metrics for transactions that were dropped.
