@@ -194,6 +194,11 @@ impl CostTracker {
                 self.ed25519_instruction_signature_count,
                 i64
             ),
+            (
+                "in_flight_transaction_count",
+                self.in_flight_transaction_count,
+                i64
+            ),
         );
     }
 
