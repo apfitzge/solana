@@ -8,7 +8,8 @@ mod scheduler_metrics;
 mod thread_aware_account_locks;
 mod transaction_id_generator;
 mod transaction_priority_id;
+pub(crate) mod transaction_receiver;
 #[allow(dead_code)]
 mod transaction_state;
 #[allow(dead_code)]
-mod transaction_state_container;
+pub(crate) mod transaction_state_container;

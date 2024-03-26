@@ -582,18 +582,18 @@ impl BankingStage {
             )
         }
 
+        let packet_deserializer = PacketDeserializer::new(non_vote_receiver, bank_forks.clone());
+        let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
+        let scheduler_controller = SchedulerController::new(
+            decision_maker.clone(),
+            packet_deserializer,
+            bank_forks,
+            scheduler,
+            worker_metrics,
+        );
+
         // Spawn the central scheduler thread
         bank_thread_hdls.push({
-            let packet_deserializer =
-                PacketDeserializer::new(non_vote_receiver, bank_forks.clone());
-            let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
-            let scheduler_controller = SchedulerController::new(
-                decision_maker.clone(),
-                packet_deserializer,
-                bank_forks,
-                scheduler,
-                worker_metrics,
-            );
             Builder::new()
                 .name("solBnkTxSched".to_string())
                 .spawn(move || match scheduler_controller.run() {

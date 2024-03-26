@@ -27,6 +27,7 @@ pub struct ReceivePacketResults {
     pub failed_sigverify_count: u64,
 }
 
+#[derive(Clone)]
 pub struct PacketDeserializer {
     /// Receiver for packet batches from sigverify stage
     packet_batch_receiver: BankingPacketReceiver,
