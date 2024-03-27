@@ -136,9 +136,11 @@ impl PrioGraphScheduler {
         let mut unblock_this_batch =
             Vec::with_capacity(self.consume_work_senders.len() * TARGET_NUM_TRANSACTIONS_PER_BATCH);
         const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 100_000;
+        const NUM_OBSERVED_FORKS_LIMIT: usize = 16;
         let mut num_scheduled: usize = 0;
         let mut num_sent: usize = 0;
         let mut num_unschedulable: usize = 0;
+        let mut num_forks_observed: usize = 0;
         while num_scheduled < MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
             // If nothing is in the main-queue of the `PrioGraph` then there's nothing left to schedule.
             if prio_graph.is_empty() {
@@ -222,7 +224,19 @@ impl PrioGraphScheduler {
 
             // Unblock all transactions that were blocked by the transactions that were just sent.
             for id in unblock_this_batch.drain(..) {
-                prio_graph.unblock(&id);
+                let unblocked_count = prio_graph
+                    .unblock(&id)
+                    .into_iter()
+                    .filter(|id| !prio_graph.is_blocked(*id))
+                    .count();
+                if unblocked_count > 1 {
+                    num_forks_observed += 1;
+                }
+            }
+
+            // If we've observed too many forks, stop scheduling.
+            if num_forks_observed >= NUM_OBSERVED_FORKS_LIMIT {
+                break;
             }
         }
 
