@@ -22,6 +22,8 @@ use {
     },
 };
 
+const THREAD_ACCOUNT_LOCK_LIMIT: usize = 64 * 4 * 4; // 64 txs per batch, 4 locks per tx, 4 batches
+
 pub(crate) struct PrioGraphScheduler {
     in_flight_tracker: InFlightTracker,
     account_locks: ThreadAwareAccountLocks,
@@ -68,6 +70,21 @@ impl PrioGraphScheduler {
         pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
         let num_threads = self.consume_work_senders.len();
+        let mut schedulable_threads = ThreadSet::any(num_threads);
+        for thread_id in 0..num_threads {
+            if self.account_locks.get_locks_for_thread(thread_id) >= THREAD_ACCOUNT_LOCK_LIMIT {
+                schedulable_threads.remove(thread_id);
+            }
+        }
+        if schedulable_threads.is_empty() {
+            return Ok(SchedulingSummary {
+                num_scheduled: 0,
+                num_unschedulable: 0,
+                num_filtered_out: 0,
+                filter_time_us: 0,
+            });
+        }
+
         let mut batches = Batches::new(num_threads);
         // Some transactions may be unschedulable due to multi-thread conflicts.
         // These transactions cannot be scheduled until some conflicting work is completed.
@@ -173,7 +190,7 @@ impl PrioGraphScheduler {
                 let Some(thread_id) = self.account_locks.try_lock_accounts(
                     transaction_locks.writable.into_iter(),
                     transaction_locks.readonly.into_iter(),
-                    ThreadSet::any(num_threads),
+                    schedulable_threads,
                     |thread_set| {
                         Self::select_thread(
                             thread_set,
@@ -206,6 +223,11 @@ impl PrioGraphScheduler {
                 // If target batch size is reached, send only this batch.
                 if batches.ids[thread_id].len() >= TARGET_NUM_TRANSACTIONS_PER_BATCH {
                     saturating_add_assign!(num_sent, self.send_batch(&mut batches, thread_id)?);
+                }
+
+                // If the thread has too many locks, remove it from the schedulable set.
+                if self.account_locks.get_locks_for_thread(thread_id) >= THREAD_ACCOUNT_LOCK_LIMIT {
+                    schedulable_threads.remove(thread_id);
                 }
 
                 if num_scheduled >= MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
