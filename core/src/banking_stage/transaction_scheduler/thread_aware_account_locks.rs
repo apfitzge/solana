@@ -47,6 +47,10 @@ pub(crate) struct ThreadAwareAccountLocks {
     /// Read Locks - multiple threads can hold a read lock at a time.
     ///     Contains thread-set for easily checking which threads are scheduled.
     locks: HashMap<Pubkey, AccountLocks>,
+    /// Number of unique accounts locked (read, write, or both) by each thread.
+    /// This can be used to limit the number of accounts locked by a thread.
+    /// This is not currently used.
+    thread_lock_counts: [usize; MAX_THREADS],
 }
 
 impl ThreadAwareAccountLocks {
@@ -61,6 +65,7 @@ impl ThreadAwareAccountLocks {
         Self {
             num_threads,
             locks: HashMap::new(),
+            thread_lock_counts: [0; MAX_THREADS],
         }
     }
 
@@ -103,6 +108,12 @@ impl ThreadAwareAccountLocks {
         for account in read_account_locks {
             self.read_unlock_account(account, thread_id);
         }
+    }
+
+    /// Returns the number of unique accounts locks (read + write) by the given thread.
+    #[allow(dead_code)]
+    pub(crate) fn get_locks_for_thread(&self, thread_id: ThreadId) -> usize {
+        self.thread_lock_counts[thread_id]
     }
 
     /// Returns `ThreadSet` that the given accounts can be scheduled on.
@@ -215,12 +226,14 @@ impl ThreadAwareAccountLocks {
             read_locks,
         } = entry;
 
+        let mut lock_already_held_by_thread = false;
         if let Some(read_locks) = read_locks {
             assert_eq!(
                 read_locks.thread_set.only_one_contained(),
                 Some(thread_id),
                 "outstanding read lock must be on same thread"
             );
+            lock_already_held_by_thread = read_locks.thread_set.contains(thread_id);
         }
 
         if let Some(write_locks) = write_locks {
@@ -229,12 +242,15 @@ impl ThreadAwareAccountLocks {
                 "outstanding write lock must be on same thread"
             );
             write_locks.lock_count += 1;
+            lock_already_held_by_thread = true;
         } else {
             *write_locks = Some(AccountWriteLocks {
                 thread_id,
                 lock_count: 1,
             });
         }
+
+        self.thread_lock_counts[thread_id] += usize::from(!lock_already_held_by_thread);
     }
 
     /// Unlocks the given `account` for writing on `thread_id`.
@@ -261,9 +277,13 @@ impl ThreadAwareAccountLocks {
         write_locks.lock_count -= 1;
         if write_locks.lock_count == 0 {
             *maybe_write_locks = None;
-            if read_locks.is_none() {
+            let lock_no_longer_held_by_thread = if let Some(read_locks) = read_locks {
+                !read_locks.thread_set.contains(thread_id)
+            } else {
                 entry.remove();
-            }
+                true
+            };
+            self.thread_lock_counts[thread_id] -= usize::from(lock_no_longer_held_by_thread);
         }
     }
 
@@ -275,15 +295,18 @@ impl ThreadAwareAccountLocks {
             read_locks,
         } = self.locks.entry(*account).or_default();
 
+        let mut lock_already_held_by_thread = false;
         if let Some(write_locks) = write_locks {
             assert_eq!(
                 write_locks.thread_id, thread_id,
                 "outstanding write lock must be on same thread"
             );
+            lock_already_held_by_thread = true;
         }
 
         match read_locks {
             Some(read_locks) => {
+                lock_already_held_by_thread |= read_locks.thread_set.contains(thread_id);
                 read_locks.thread_set.insert(thread_id);
                 read_locks.lock_counts[thread_id] += 1;
             }
@@ -296,6 +319,8 @@ impl ThreadAwareAccountLocks {
                 });
             }
         }
+
+        self.thread_lock_counts[thread_id] += usize::from(!lock_already_held_by_thread);
     }
 
     /// Unlocks the given `account` for reading on `thread_id`.
@@ -322,6 +347,10 @@ impl ThreadAwareAccountLocks {
         read_locks.lock_counts[thread_id] -= 1;
         if read_locks.lock_counts[thread_id] == 0 {
             read_locks.thread_set.remove(thread_id);
+
+            let lock_no_longer_held_by_thread =
+                !read_locks.thread_set.contains(thread_id) && write_locks.is_none();
+            self.thread_lock_counts[thread_id] -= usize::from(lock_no_longer_held_by_thread);
             if read_locks.thread_set.is_empty() {
                 *maybe_read_locks = None;
                 if write_locks.is_none() {
@@ -467,6 +496,8 @@ mod tests {
             ),
             None
         );
+        assert_eq!(locks.get_locks_for_thread(2), 1);
+        assert_eq!(locks.get_locks_for_thread(3), 1);
     }
 
     #[test]
@@ -485,6 +516,7 @@ mod tests {
             ),
             Some(3)
         );
+        assert_eq!(locks.get_locks_for_thread(3), 2);
     }
 
     #[test]
@@ -504,6 +536,7 @@ mod tests {
             ),
             Some(1)
         );
+        assert_eq!(locks.get_locks_for_thread(0), 1);
     }
 
     #[test]
@@ -520,6 +553,7 @@ mod tests {
             ),
             Some(0)
         );
+        assert_eq!(locks.get_locks_for_thread(0), 2);
     }
 
     #[test]
@@ -735,5 +769,54 @@ mod tests {
     fn test_thread_set_any_max() {
         let any_threads = ThreadSet::any(MAX_THREADS);
         assert_eq!(any_threads.num_threads(), MAX_THREADS as u32);
+    }
+
+    #[test]
+    fn test_get_locks_for_thread() {
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+
+        // Check pk1 write lock not double counted
+        locks.write_lock_account(&pk1, 0);
+        locks.write_lock_account(&pk1, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 1);
+
+        // Check read lock not double counted
+        locks.read_lock_account(&pk1, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 1);
+
+        // New read lock is counted
+        locks.read_lock_account(&pk2, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 2);
+
+        // Write lock removed, but pk1 is still locked (write + read)
+        locks.write_unlock_account(&pk1, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 2);
+
+        // pk1 still had outstanding read lock
+        locks.write_unlock_account(&pk1, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 2);
+
+        // only pk2 read lock remains
+        locks.read_unlock_account(&pk1, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 1);
+
+        // all locks removed
+        locks.read_unlock_account(&pk2, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 0);
+
+        // add read and write lock
+        locks.read_lock_account(&pk1, 0);
+        locks.write_lock_account(&pk1, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 1);
+
+        // remove read lock first
+        locks.read_unlock_account(&pk1, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 1);
+
+        // remove the write lock
+        locks.write_unlock_account(&pk1, 0);
+        assert_eq!(locks.get_locks_for_thread(0), 0);
     }
 }
