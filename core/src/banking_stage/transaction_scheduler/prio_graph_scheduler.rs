@@ -21,6 +21,8 @@ use {
         transaction::SanitizedTransaction,
     },
 };
+
+const THREAD_TX_LIMIT: usize = 64 * 8; // 64 txs per batch, 8 batches
 const THREAD_CU_LIMIT: u64 = 64 * 4 * 50_000; // 64 txs per batch, 50k cus per tx, 4 batches
 const THREAD_ACCOUNT_LOCK_LIMIT: usize = 64 * 4 * 4; // 64 txs per batch, 4 locks per tx, 4 batches
 
@@ -72,10 +74,10 @@ impl PrioGraphScheduler {
         let num_threads = self.consume_work_senders.len();
         let mut schedulable_threads = ThreadSet::any(num_threads);
         for thread_id in 0..num_threads {
-            if self.account_locks.get_locks_for_thread(thread_id) >= THREAD_ACCOUNT_LOCK_LIMIT {
-                schedulable_threads.remove(thread_id);
-            }
-            if self.in_flight_tracker.cus_in_flight_per_thread()[thread_id] >= THREAD_CU_LIMIT {
+            if self.in_flight_tracker.num_in_flight_per_thread()[thread_id] >= THREAD_TX_LIMIT
+                || self.in_flight_tracker.cus_in_flight_per_thread()[thread_id] >= THREAD_CU_LIMIT
+                || self.account_locks.get_locks_for_thread(thread_id) >= THREAD_ACCOUNT_LOCK_LIMIT
+            {
                 schedulable_threads.remove(thread_id);
             }
         }
@@ -228,9 +230,11 @@ impl PrioGraphScheduler {
                     saturating_add_assign!(num_sent, self.send_batch(&mut batches, thread_id)?);
                 }
 
-                // If the thread has too many queued CUs, or has too many locks,
+                // If the thread has too many queued txs, CUs, or has too many locks,
                 // remove it from the schedulable set.
-                if self.in_flight_tracker.cus_in_flight_per_thread()[thread_id] >= THREAD_CU_LIMIT
+                if self.in_flight_tracker.num_in_flight_per_thread()[thread_id] >= THREAD_TX_LIMIT
+                    || self.in_flight_tracker.cus_in_flight_per_thread()[thread_id]
+                        >= THREAD_CU_LIMIT
                     || self.account_locks.get_locks_for_thread(thread_id)
                         >= THREAD_ACCOUNT_LOCK_LIMIT
                 {
