@@ -49,7 +49,7 @@ impl From<CostTrackerError> for TransactionError {
     }
 }
 
-#[derive(AbiExample, Debug)]
+#[derive(Debug)]
 pub struct CostTracker {
     account_cost_limit: u64,
     block_cost_limit: u64,
@@ -92,6 +92,13 @@ impl Default for CostTracker {
             in_flight_transaction_count: 0,
             transaction_cost_histogram: Histogram::new(),
         }
+    }
+}
+
+#[cfg(RUSTC_WITH_SPECIALIZATION)]
+impl solana_frozen_abi::abi_example::AbiExample for CostTracker {
+    fn example() -> Self {
+        Self::default()
     }
 }
 
