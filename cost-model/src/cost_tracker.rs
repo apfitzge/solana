@@ -161,6 +161,11 @@ impl CostTracker {
         let _ = self.transaction_cost_histogram.increment(transaction_cost);
     }
 
+    pub fn record_unadjusted_cost(&mut self, tx_cost: &TransactionCost) {
+        let transaction_cost = tx_cost.sum();
+        let _ = self.transaction_cost_histogram.increment(transaction_cost);
+    }
+
     pub fn remove(&mut self, tx_cost: &TransactionCost) {
         self.remove_transaction_cost(tx_cost);
     }

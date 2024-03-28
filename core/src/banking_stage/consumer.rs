@@ -528,6 +528,12 @@ impl Consumer {
                 commit_transactions_result.as_ref().ok(),
                 bank,
             );
+        } else {
+            QosService::record_unadjusted_costs(
+                transaction_qos_cost_results.iter(),
+                commit_transactions_result.as_ref().ok(),
+                bank,
+            )
         }
 
         retryable_transaction_indexes
