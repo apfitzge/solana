@@ -10,6 +10,7 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+histogram = { workspace = true }
 lazy_static = { workspace = true }
 log = { workspace = true }
 solana-address-lookup-table-program = { workspace = true }
