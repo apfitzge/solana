@@ -519,21 +519,21 @@ impl Consumer {
         // once feature `apply_cost_tracker_during_replay` is activated, leader shall no longer
         // adjust block with executed cost (a behavior more inline with bankless leader), it
         // should use requested, or default `compute_unit_limit` as transaction's execution cost.
-        if !bank
+        if bank
             .feature_set
             .is_active(&feature_set::apply_cost_tracker_during_replay::id())
         {
-            QosService::update_costs(
+            QosService::record_unadjusted_costs(
                 transaction_qos_cost_results.iter(),
                 commit_transactions_result.as_ref().ok(),
                 bank,
             );
         } else {
-            QosService::record_unadjusted_costs(
+            QosService::update_costs(
                 transaction_qos_cost_results.iter(),
                 commit_transactions_result.as_ref().ok(),
                 bank,
-            )
+            );
         }
 
         retryable_transaction_indexes
