@@ -150,26 +150,26 @@ impl PrioGraphScheduler {
             while let Some(id) = prio_graph.pop() {
                 unblock_this_batch.push(id);
 
-                // Should always be in the container, during initial testing phase panic.
-                // Later, we can replace with a continue in case this does happen.
-                let Some(transaction_state) = container.get_mut_transaction_state(&id.id) else {
-                    panic!("transaction state must exist")
-                };
-
-                let maybe_schedule_info = try_schedule_transaction(
-                    transaction_state,
-                    &pre_lock_filter,
-                    &mut blocking_locks,
-                    &mut self.account_locks,
-                    num_threads,
-                    |thread_set| {
-                        Self::select_thread(
-                            thread_set,
-                            &batches.transactions,
-                            self.in_flight_tracker.num_in_flight_per_thread(),
+                let Some(maybe_schedule_info) =
+                    container.with_mut_transaction_state(&id.id, |transaction_state| {
+                        try_schedule_transaction(
+                            transaction_state,
+                            &pre_lock_filter,
+                            &mut blocking_locks,
+                            &mut self.account_locks,
+                            num_threads,
+                            |thread_set| {
+                                Self::select_thread(
+                                    thread_set,
+                                    &batches.transactions,
+                                    self.in_flight_tracker.num_in_flight_per_thread(),
+                                )
+                            },
                         )
-                    },
-                );
+                    })
+                else {
+                    panic!("transaction state must exist");
+                };
 
                 match maybe_schedule_info {
                     Err(TransactionSchedulingError::Filtered) => {

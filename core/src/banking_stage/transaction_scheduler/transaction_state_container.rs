@@ -62,12 +62,13 @@ impl TransactionStateContainer {
         self.priority_queue.pop_max()
     }
 
-    /// Get mutable transaction state by id.
-    pub(crate) fn get_mut_transaction_state(
+    /// Perform operation with mutable access.
+    pub(crate) fn with_mut_transaction_state<R>(
         &mut self,
         id: &TransactionId,
-    ) -> Option<&mut TransactionState> {
-        self.id_to_transaction_state.get_mut(id)
+        f: impl FnOnce(&mut TransactionState) -> R,
+    ) -> Option<R> {
+        self.id_to_transaction_state.get_mut(id).map(f)
     }
 
     /// Get reference to `SanitizedTransactionTTL` by id.
@@ -105,11 +106,14 @@ impl TransactionStateContainer {
         transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL,
     ) {
-        let transaction_state = self
-            .get_mut_transaction_state(&transaction_id)
-            .expect("transaction must exist");
-        let priority_id = TransactionPriorityId::new(transaction_state.priority(), transaction_id);
-        transaction_state.transition_to_unprocessed(transaction_ttl);
+        let Some(priority_id) =
+            self.with_mut_transaction_state(&transaction_id, |transaction_state| {
+                transaction_state.transition_to_unprocessed(transaction_ttl);
+                TransactionPriorityId::new(transaction_state.priority(), transaction_id)
+            })
+        else {
+            panic!("transaction must exist");
+        };
         self.push_id_into_queue(priority_id);
     }
 
@@ -222,16 +226,20 @@ mod tests {
     }
 
     #[test]
-    fn test_get_mut_transaction_state() {
+    fn test_with_mut_transaction_state() {
         let mut container = TransactionStateContainer::with_capacity(5);
         push_to_container(&mut container, 5);
 
         let existing_id = 3;
         let non_existing_id = 7;
-        assert!(container.get_mut_transaction_state(&existing_id).is_some());
-        assert!(container.get_mut_transaction_state(&existing_id).is_some());
         assert!(container
-            .get_mut_transaction_state(&non_existing_id)
+            .with_mut_transaction_state(&existing_id, |_| ())
+            .is_some());
+        assert!(container
+            .with_mut_transaction_state(&existing_id, |_| ())
+            .is_some());
+        assert!(container
+            .with_mut_transaction_state(&non_existing_id, |_| ())
             .is_none());
     }
 }
