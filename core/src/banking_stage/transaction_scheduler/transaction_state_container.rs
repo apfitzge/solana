@@ -4,8 +4,8 @@ use {
         transaction_state::{SanitizedTransactionTTL, TransactionState},
     },
     crate::banking_stage::scheduler_messages::TransactionId,
+    crossbeam_skiplist::SkipSet,
     itertools::MinMaxResult,
-    min_max_heap::MinMaxHeap,
     valet::Valet,
 };
 
@@ -35,14 +35,16 @@ use {
 /// The container maintains a fixed capacity. If the queue is full when pushing
 /// a new transaction, the lowest priority transaction will be dropped.
 pub(crate) struct TransactionStateContainer {
-    priority_queue: MinMaxHeap<TransactionPriorityId>,
+    capacity: usize,
+    priority_queue: SkipSet<TransactionPriorityId>,
     id_to_transaction_state: Valet<TransactionState>,
 }
 
 impl TransactionStateContainer {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
-            priority_queue: MinMaxHeap::with_capacity(capacity),
+            capacity,
+            priority_queue: SkipSet::new(),
             id_to_transaction_state: Valet::with_capacity(capacity),
         }
     }
@@ -54,12 +56,12 @@ impl TransactionStateContainer {
 
     /// Returns the remaining capacity of the queue
     pub(crate) fn remaining_queue_capacity(&self) -> usize {
-        self.priority_queue.capacity() - self.priority_queue.len()
+        self.capacity - self.priority_queue.len()
     }
 
     /// Get the top transaction id in the priority queue.
     pub(crate) fn pop(&mut self) -> Option<TransactionPriorityId> {
-        self.priority_queue.pop_max()
+        self.priority_queue.pop_back().map(|entry| *entry.value())
     }
 
     /// Perform operation with mutable access.
@@ -124,11 +126,16 @@ impl TransactionStateContainer {
     /// Returns `true` if a packet was dropped due to capacity limits.
     pub(crate) fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
         if self.remaining_queue_capacity() == 0 {
-            let popped_id = self.priority_queue.push_pop_min(priority_id);
-            self.remove_by_id(&popped_id.id);
-            true
+            self.priority_queue.insert(priority_id);
+            match self.priority_queue.pop_front().map(|entry| *entry.value()) {
+                Some(popped_id) => {
+                    self.remove_by_id(&popped_id.id);
+                    true
+                }
+                None => false,
+            }
         } else {
-            self.priority_queue.push(priority_id);
+            self.priority_queue.insert(priority_id);
             false
         }
     }
@@ -141,8 +148,8 @@ impl TransactionStateContainer {
     }
 
     pub(crate) fn get_min_max_priority(&self) -> MinMaxResult<u64> {
-        match self.priority_queue.peek_min() {
-            Some(min) => match self.priority_queue.peek_max() {
+        match self.priority_queue.front() {
+            Some(min) => match self.priority_queue.back() {
                 Some(max) => MinMaxResult::MinMax(min.priority, max.priority),
                 None => MinMaxResult::OneElement(min.priority),
             },

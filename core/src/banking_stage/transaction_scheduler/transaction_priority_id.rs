@@ -20,7 +20,9 @@ impl TransactionPriorityId {
 
 impl Ord for TransactionPriorityId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| self.id.cmp(&other.id))
     }
 }
 
