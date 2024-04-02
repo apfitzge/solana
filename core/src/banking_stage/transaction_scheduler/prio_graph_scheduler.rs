@@ -563,7 +563,7 @@ mod tests {
         for (index, (from_keypair, to_pubkeys, lamports, compute_unit_price)) in
             tx_infos.into_iter().enumerate()
         {
-            let id = TransactionId::new(index as u64);
+            let id = TransactionId::new(index);
             let transaction = prioritized_tranfers(
                 from_keypair.borrow(),
                 to_pubkeys,
