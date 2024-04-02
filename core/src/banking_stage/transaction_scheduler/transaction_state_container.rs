@@ -60,13 +60,13 @@ impl TransactionStateContainer {
     }
 
     /// Get the top transaction id in the priority queue.
-    pub(crate) fn pop(&mut self) -> Option<TransactionPriorityId> {
+    pub(crate) fn pop(&self) -> Option<TransactionPriorityId> {
         self.priority_queue.pop_back().map(|entry| *entry.value())
     }
 
     /// Perform operation with mutable access.
     pub(crate) fn with_mut_transaction_state<R>(
-        &mut self,
+        &self,
         id: TransactionId,
         f: impl FnOnce(&mut TransactionState) -> R,
     ) -> Option<R> {
@@ -87,7 +87,7 @@ impl TransactionStateContainer {
     /// Insert a new transaction into the container's queues and maps.
     /// Returns `true` if a packet was dropped due to capacity limits.
     pub(crate) fn insert_new_transaction(
-        &mut self,
+        &self,
         transaction_ttl: SanitizedTransactionTTL,
         priority: u64,
         cost: u64,
@@ -106,7 +106,7 @@ impl TransactionStateContainer {
     /// Retries a transaction - inserts transaction back into map (but not packet).
     /// This transitions the transaction to `Unprocessed` state.
     pub(crate) fn retry_transaction(
-        &mut self,
+        &self,
         transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL,
     ) {
@@ -124,7 +124,7 @@ impl TransactionStateContainer {
     /// Pushes a transaction id into the priority queue. If the queue is full, the lowest priority
     /// transaction will be dropped (removed from the queue and map).
     /// Returns `true` if a packet was dropped due to capacity limits.
-    pub(crate) fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
+    pub(crate) fn push_id_into_queue(&self, priority_id: TransactionPriorityId) -> bool {
         if self.remaining_queue_capacity() == 0 {
             self.priority_queue.insert(priority_id);
             match self.priority_queue.pop_front().map(|entry| *entry.value()) {
@@ -141,7 +141,7 @@ impl TransactionStateContainer {
     }
 
     /// Remove transaction by id.
-    pub(crate) fn remove_by_id(&mut self, id: &TransactionId) {
+    pub(crate) fn remove_by_id(&self, id: &TransactionId) {
         self.id_to_transaction_state
             .take(*id)
             .expect("transaction must exist");
@@ -199,7 +199,7 @@ mod tests {
         (transaction_ttl, priority, TEST_TRANSACTION_COST)
     }
 
-    fn push_to_container(container: &mut TransactionStateContainer, num: usize) {
+    fn push_to_container(container: &TransactionStateContainer, num: usize) {
         for id in 0..num {
             let priority = id as u64;
             let (transaction_ttl, priority, cost) = test_transaction(priority);
@@ -209,17 +209,17 @@ mod tests {
 
     #[test]
     fn test_is_empty() {
-        let mut container = TransactionStateContainer::with_capacity(1);
+        let container = TransactionStateContainer::with_capacity(1);
         assert!(container.is_empty());
 
-        push_to_container(&mut container, 1);
+        push_to_container(&container, 1);
         assert!(!container.is_empty());
     }
 
     #[test]
     fn test_priority_queue_capacity() {
-        let mut container = TransactionStateContainer::with_capacity(1);
-        push_to_container(&mut container, 5);
+        let container = TransactionStateContainer::with_capacity(1);
+        push_to_container(&container, 5);
 
         assert_eq!(container.priority_queue.len(), 1);
         assert_eq!(container.id_to_transaction_state.len(), 1);
@@ -227,8 +227,8 @@ mod tests {
 
     #[test]
     fn test_with_mut_transaction_state() {
-        let mut container = TransactionStateContainer::with_capacity(5);
-        push_to_container(&mut container, 5);
+        let container = TransactionStateContainer::with_capacity(5);
+        push_to_container(&container, 5);
 
         let existing_id = 3;
         let non_existing_id = 7;
