@@ -11,6 +11,6 @@ impl TransactionIdGenerator {
     pub fn next(&mut self) -> TransactionId {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        TransactionId::new(id)
+        id
     }
 }

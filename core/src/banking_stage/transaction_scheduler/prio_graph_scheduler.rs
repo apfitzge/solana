@@ -498,18 +498,6 @@ mod tests {
         std::borrow::Borrow,
     };
 
-    macro_rules! txid {
-        ($value:expr) => {
-            TransactionId::new($value)
-        };
-    }
-
-    macro_rules! txids {
-        ([$($element:expr),*]) => {
-            vec![ $(txid!($element)),* ]
-        };
-    }
-
     fn create_test_frame(
         num_threads: usize,
     ) -> (
@@ -563,7 +551,7 @@ mod tests {
         for (index, (from_keypair, to_pubkeys, lamports, compute_unit_price)) in
             tx_infos.into_iter().enumerate()
         {
-            let id = TransactionId::new(index);
+            let id = index;
             let transaction = prioritized_tranfers(
                 from_keypair.borrow(),
                 to_pubkeys,
@@ -631,7 +619,7 @@ mod tests {
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
-        assert_eq!(collect_work(&work_receivers[0]).1, vec![txids!([1, 0])]);
+        assert_eq!(collect_work(&work_receivers[0]).1, vec![[1, 0]]);
     }
 
     #[test]
@@ -648,10 +636,7 @@ mod tests {
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
-        assert_eq!(
-            collect_work(&work_receivers[0]).1,
-            vec![txids!([1]), txids!([0])]
-        );
+        assert_eq!(collect_work(&work_receivers[0]).1, vec![[1], [0]]);
     }
 
     #[test]
@@ -690,8 +675,8 @@ mod tests {
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 4);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
-        assert_eq!(collect_work(&work_receivers[0]).1, [txids!([3, 1])]);
-        assert_eq!(collect_work(&work_receivers[1]).1, [txids!([2, 0])]);
+        assert_eq!(collect_work(&work_receivers[0]).1, [[3, 1]]);
+        assert_eq!(collect_work(&work_receivers[1]).1, [[2, 0]]);
     }
 
     #[test]
@@ -732,11 +717,8 @@ mod tests {
         assert_eq!(scheduling_summary.num_scheduled, 4);
         assert_eq!(scheduling_summary.num_unschedulable, 2);
         let (thread_0_work, thread_0_ids) = collect_work(&work_receivers[0]);
-        assert_eq!(thread_0_ids, [txids!([0]), txids!([2])]);
-        assert_eq!(
-            collect_work(&work_receivers[1]).1,
-            [txids!([1]), txids!([3])]
-        );
+        assert_eq!(thread_0_ids, [[0], [2]]);
+        assert_eq!(collect_work(&work_receivers[1]).1, [[1], [3]]);
 
         // Cannot schedule even on next pass because of lock conflicts
         let scheduling_summary = scheduler
@@ -759,10 +741,7 @@ mod tests {
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
 
-        assert_eq!(
-            collect_work(&work_receivers[1]).1,
-            [txids!([4]), txids!([5])]
-        );
+        assert_eq!(collect_work(&work_receivers[1]).1, [[4], [5]]);
     }
 
     #[test]
@@ -784,9 +763,6 @@ mod tests {
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
-        assert_eq!(
-            collect_work(&work_receivers[0]).1,
-            vec![txids!([2]), txids!([0])]
-        );
+        assert_eq!(collect_work(&work_receivers[0]).1, vec![[2], [0]]);
     }
 }

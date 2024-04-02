@@ -86,7 +86,6 @@ mod tests {
         super::*,
         crate::banking_stage::{
             immutable_deserialized_packet::ImmutableDeserializedPacket,
-            scheduler_messages::TransactionId,
             tests::{create_slow_genesis_config, new_test_cluster_info, simulate_poh},
         },
         crossbeam_channel::unbounded,
@@ -201,8 +200,8 @@ mod tests {
             system_transaction::transfer(mint_keypair, &pubkey2, 2, genesis_config.hash()),
         ];
 
-        let id1 = TransactionId::new(1);
-        let id2 = TransactionId::new(0);
+        let id1 = 1;
+        let id2 = 0;
 
         let packets = to_packet_batches(&txs, 2);
         assert_eq!(packets.len(), 1);
