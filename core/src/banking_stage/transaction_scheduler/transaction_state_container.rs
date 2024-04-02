@@ -6,7 +6,7 @@ use {
     crate::banking_stage::scheduler_messages::TransactionId,
     itertools::MinMaxResult,
     min_max_heap::MinMaxHeap,
-    std::collections::HashMap,
+    valet::Valet,
 };
 
 /// This structure will hold `TransactionState` for the entirety of a
@@ -36,14 +36,14 @@ use {
 /// a new transaction, the lowest priority transaction will be dropped.
 pub(crate) struct TransactionStateContainer {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
-    id_to_transaction_state: HashMap<TransactionId, TransactionState>,
+    id_to_transaction_state: Valet<TransactionState>,
 }
 
 impl TransactionStateContainer {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),
-            id_to_transaction_state: HashMap::with_capacity(capacity),
+            id_to_transaction_state: Valet::with_capacity(capacity),
         }
     }
 
@@ -65,37 +65,39 @@ impl TransactionStateContainer {
     /// Perform operation with mutable access.
     pub(crate) fn with_mut_transaction_state<R>(
         &mut self,
-        id: &TransactionId,
+        id: TransactionId,
         f: impl FnOnce(&mut TransactionState) -> R,
     ) -> Option<R> {
-        self.id_to_transaction_state.get_mut(id).map(f)
+        self.id_to_transaction_state.with_mut(id, f).ok()
     }
 
-    /// Get reference to `SanitizedTransactionTTL` by id.
-    /// Panics if the transaction does not exist.
-    pub(crate) fn get_transaction_ttl(
+    pub(crate) fn batched_with_ref<const SIZE: usize, M, R>(
         &self,
-        id: &TransactionId,
-    ) -> Option<&SanitizedTransactionTTL> {
+        ids: &[TransactionId],
+        m: impl Fn(&TransactionState) -> &M,
+        f: impl FnOnce(&[&M]) -> R,
+    ) -> Option<R> {
         self.id_to_transaction_state
-            .get(id)
-            .map(|state| state.transaction_ttl())
+            .batched_with_ref::<SIZE, M, R>(ids, m, f)
+            .ok()
     }
 
     /// Insert a new transaction into the container's queues and maps.
     /// Returns `true` if a packet was dropped due to capacity limits.
     pub(crate) fn insert_new_transaction(
         &mut self,
-        transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL,
         priority: u64,
         cost: u64,
     ) -> bool {
+        let Ok(transaction_id) = self.id_to_transaction_state.insert(TransactionState::new(
+            transaction_ttl,
+            priority,
+            cost,
+        )) else {
+            return false;
+        };
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
-        self.id_to_transaction_state.insert(
-            transaction_id,
-            TransactionState::new(transaction_ttl, priority, cost),
-        );
         self.push_id_into_queue(priority_id)
     }
 
@@ -107,7 +109,7 @@ impl TransactionStateContainer {
         transaction_ttl: SanitizedTransactionTTL,
     ) {
         let Some(priority_id) =
-            self.with_mut_transaction_state(&transaction_id, |transaction_state| {
+            self.with_mut_transaction_state(transaction_id, |transaction_state| {
                 transaction_state.transition_to_unprocessed(transaction_ttl);
                 TransactionPriorityId::new(transaction_state.priority(), transaction_id)
             })
@@ -134,7 +136,7 @@ impl TransactionStateContainer {
     /// Remove transaction by id.
     pub(crate) fn remove_by_id(&mut self, id: &TransactionId) {
         self.id_to_transaction_state
-            .remove(id)
+            .take(*id)
             .expect("transaction must exist");
     }
 
@@ -194,7 +196,7 @@ mod tests {
         for id in 0..num {
             let priority = id as u64;
             let (transaction_ttl, priority, cost) = test_transaction(priority);
-            container.insert_new_transaction(id, transaction_ttl, priority, cost);
+            container.insert_new_transaction(transaction_ttl, priority, cost);
         }
     }
 
@@ -214,15 +216,6 @@ mod tests {
 
         assert_eq!(container.priority_queue.len(), 1);
         assert_eq!(container.id_to_transaction_state.len(), 1);
-        assert_eq!(
-            container
-                .id_to_transaction_state
-                .iter()
-                .map(|ts| ts.1.priority())
-                .next()
-                .unwrap(),
-            4
-        );
     }
 
     #[test]
@@ -233,13 +226,13 @@ mod tests {
         let existing_id = 3;
         let non_existing_id = 7;
         assert!(container
-            .with_mut_transaction_state(&existing_id, |_| ())
+            .with_mut_transaction_state(existing_id, |_| ())
             .is_some());
         assert!(container
-            .with_mut_transaction_state(&existing_id, |_| ())
+            .with_mut_transaction_state(existing_id, |_| ())
             .is_some());
         assert!(container
-            .with_mut_transaction_state(&non_existing_id, |_| ())
+            .with_mut_transaction_state(non_existing_id, |_| ())
             .is_none());
     }
 }

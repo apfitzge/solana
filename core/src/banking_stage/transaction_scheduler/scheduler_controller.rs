@@ -8,7 +8,6 @@ use {
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
         },
-        transaction_id_generator::TransactionIdGenerator,
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
@@ -49,8 +48,6 @@ pub(crate) struct SchedulerController {
     /// Packet/Transaction ingress.
     packet_receiver: PacketDeserializer,
     bank_forks: Arc<RwLock<BankForks>>,
-    /// Generates unique IDs for incoming transactions.
-    transaction_id_generator: TransactionIdGenerator,
     /// Container for transaction state.
     /// Shared resource between `packet_receiver` and `scheduler`.
     container: TransactionStateContainer,
@@ -80,7 +77,6 @@ impl SchedulerController {
             decision_maker,
             packet_receiver: packet_deserializer,
             bank_forks,
-            transaction_id_generator: TransactionIdGenerator::default(),
             container: TransactionStateContainer::with_capacity(TOTAL_BUFFERED_PACKETS),
             scheduler,
             leader_detection_metrics: SchedulerLeaderDetectionMetrics::default(),
@@ -253,23 +249,22 @@ impl SchedulerController {
         let mut num_dropped_on_age_and_status: usize = 0;
         for chunk in transaction_ids.chunks(CHUNK_SIZE) {
             let lock_results = vec![Ok(()); chunk.len()];
-            let sanitized_txs: Vec<_> = chunk
-                .iter()
-                .map(|id| {
-                    &self
-                        .container
-                        .get_transaction_ttl(&id.id)
-                        .expect("transaction must exist")
-                        .transaction
-                })
-                .collect();
-
-            let check_results = bank.check_transactions(
-                &sanitized_txs,
-                &lock_results,
-                MAX_PROCESSING_AGE,
-                &mut error_counters,
-            );
+            let ids: Vec<_> = chunk.iter().map(|id| id.id).collect();
+            let check_results = self
+                .container
+                .batched_with_ref::<CHUNK_SIZE, _, _>(
+                    &ids,
+                    |transaction_state| &transaction_state.transaction_ttl().transaction,
+                    |transactions| {
+                        bank.check_transactions(
+                            transactions,
+                            &lock_results,
+                            MAX_PROCESSING_AGE,
+                            &mut error_counters,
+                        )
+                    },
+                )
+                .expect("transactions must exist");
 
             for ((result, _nonce, _lamports), id) in check_results.into_iter().zip(chunk.iter()) {
                 if result.is_err() {
@@ -416,7 +411,6 @@ impl SchedulerController {
                 .filter(|(_, check_result)| check_result.0.is_ok())
             {
                 saturating_add_assign!(post_transaction_check_count, 1);
-                let transaction_id = self.transaction_id_generator.next();
 
                 let (priority, cost) =
                     Self::calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
@@ -425,12 +419,10 @@ impl SchedulerController {
                     max_age_slot: last_slot_in_epoch,
                 };
 
-                if self.container.insert_new_transaction(
-                    transaction_id,
-                    transaction_ttl,
-                    priority,
-                    cost,
-                ) {
+                if self
+                    .container
+                    .insert_new_transaction(transaction_ttl, priority, cost)
+                {
                     saturating_add_assign!(num_dropped_on_capacity, 1);
                 }
                 saturating_add_assign!(num_buffered, 1);
