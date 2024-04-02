@@ -6026,6 +6026,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "trees",
+ "valet",
 ]
 
 [[package]]
@@ -8872,6 +8873,11 @@ name = "utf8-width"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cf7d77f457ef8dfa11e4cd5933c5ddb5dc52a94664071951219a97710f0a32b"
+
+[[package]]
+name = "valet"
+version = "0.1.0"
+source = "git+https://github.com/apfitzge/valet.git?rev=db9554e495600bafb121743f7b839995e9dbabe3#db9554e495600bafb121743f7b839995e9dbabe3"
 
 [[package]]
 name = "valuable"

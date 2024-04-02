@@ -81,6 +81,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 trees = { workspace = true }
+valet = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
