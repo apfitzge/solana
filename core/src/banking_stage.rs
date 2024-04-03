@@ -20,7 +20,7 @@ use {
             consume_worker::ConsumeWorker,
             packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
-                prio_graph_scheduler::PrioGraphScheduler,
+                prio_graph_scheduler::PrioGraphScheduler, sanitizing_worker::SanitizingWorker,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
             },
         },
@@ -42,7 +42,7 @@ use {
     std::{
         cmp, env,
         sync::{
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
         },
         thread::{self, Builder, JoinHandle},
@@ -582,18 +582,29 @@ impl BankingStage {
             )
         }
 
+        // Exit signal for scheduler
+        let exit = Arc::new(AtomicBool::new(false));
+        let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
+        let scheduler_controller = SchedulerController::new(
+            exit.clone(),
+            decision_maker.clone(),
+            bank_forks.clone(),
+            scheduler,
+            worker_metrics,
+        );
+
+        let packet_deserializer = PacketDeserializer::new(non_vote_receiver, bank_forks.clone());
+        let container = scheduler_controller.container();
+        let sanitizing_worker = SanitizingWorker::new(
+            exit.clone(),
+            decision_maker.clone(),
+            packet_deserializer,
+            bank_forks,
+            container,
+        );
+
         // Spawn the central scheduler thread
         bank_thread_hdls.push({
-            let packet_deserializer =
-                PacketDeserializer::new(non_vote_receiver, bank_forks.clone());
-            let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
-            let scheduler_controller = SchedulerController::new(
-                decision_maker.clone(),
-                packet_deserializer,
-                bank_forks,
-                scheduler,
-                worker_metrics,
-            );
             Builder::new()
                 .name("solBnkTxSched".to_string())
                 .spawn(move || match scheduler_controller.run() {
@@ -605,6 +616,17 @@ impl BankingStage {
                 })
                 .unwrap()
         });
+
+        // Spawn receiving threads
+        for id in 0..1 {
+            let sanitizing_worker = sanitizing_worker.clone();
+            bank_thread_hdls.push(
+                Builder::new()
+                    .name(format!("solBnkTxSnty{id:02}"))
+                    .spawn(move || sanitizing_worker.run())
+                    .unwrap(),
+            );
+        }
 
         Self { bank_thread_hdls }
     }
