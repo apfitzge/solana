@@ -353,6 +353,10 @@ impl SchedulerController {
         let mut priority_calculation_us = 0;
         let mut insert_time_us = 0;
         let mut total_us = 0;
+        let mut loop_1_us = 0;
+        let mut loop_1_inner_us = 0;
+        let mut loop_2_us = 0;
+        let mut loop_2_inner_us = 0;
         let mut batch_us = 0;
         let mut packet_count = 0;
 
@@ -372,49 +376,57 @@ impl SchedulerController {
                         allocation_time_us += allocate_time.end_as_us();
 
                         // Sanitize packets, only keeping those that are sanitized correctly.
-                        for packet in packet_batch {
-                            if let Ok(packet) = ImmutableDeserializedPacket::new(packet.clone()) {
-                                let (sanitized_transaction, us) = measure_us!({
-                                    packet.build_sanitized_transaction(
-                                        feature_set,
-                                        bank.vote_only_bank(),
-                                        bank.as_ref(),
-                                    )
-                                });
-                                sanitize_time_us += us;
-                                let Some(sanitized_transaction) = sanitized_transaction else {
-                                    continue;
-                                };
+                        let (_, us) = measure_us!({
+                            for packet in packet_batch {
+                                let inner_time = Measure::start("inner");
+                                if let Ok(packet) = ImmutableDeserializedPacket::new(packet.clone())
+                                {
+                                    let (sanitized_transaction, us) = measure_us!({
+                                        packet.build_sanitized_transaction(
+                                            feature_set,
+                                            bank.vote_only_bank(),
+                                            bank.as_ref(),
+                                        )
+                                    });
+                                    sanitize_time_us += us;
+                                    let Some(sanitized_transaction) = sanitized_transaction else {
+                                        continue;
+                                    };
 
-                                let (invalid_account_locks, us) = measure_us!({
-                                    SanitizedTransaction::validate_account_locks(
-                                        sanitized_transaction.message(),
-                                        transaction_account_lock_limit,
-                                    )
-                                    .is_err()
-                                });
-                                validate_account_locks_us += us;
-                                if invalid_account_locks {
-                                    continue;
+                                    let (invalid_account_locks, us) = measure_us!({
+                                        SanitizedTransaction::validate_account_locks(
+                                            sanitized_transaction.message(),
+                                            transaction_account_lock_limit,
+                                        )
+                                        .is_err()
+                                    });
+                                    validate_account_locks_us += us;
+                                    if invalid_account_locks {
+                                        continue;
+                                    }
+
+                                    let (compute_budget_limits, us) =
+                                        measure_us!(process_compute_budget_instructions(
+                                            sanitized_transaction
+                                                .message()
+                                                .program_instructions_iter(),
+                                        ));
+                                    process_compute_budget_us += us;
+                                    let Ok(compute_budget_limits) = compute_budget_limits else {
+                                        continue;
+                                    };
+
+                                    let push_time = Measure::start("push");
+                                    arced_packets.push(Arc::new(packet));
+                                    sanitized_transactions.push(sanitized_transaction);
+                                    fee_budget_limits
+                                        .push(FeeBudgetLimits::from(compute_budget_limits));
+                                    pushing_us += push_time.end_as_us();
                                 }
-
-                                let (compute_budget_limits, us) =
-                                    measure_us!(process_compute_budget_instructions(
-                                        sanitized_transaction.message().program_instructions_iter(),
-                                    ));
-                                process_compute_budget_us += us;
-                                let Ok(compute_budget_limits) = compute_budget_limits else {
-                                    continue;
-                                };
-
-                                let push_time = Measure::start("push");
-                                arced_packets.push(Arc::new(packet));
-                                sanitized_transactions.push(sanitized_transaction);
-                                fee_budget_limits
-                                    .push(FeeBudgetLimits::from(compute_budget_limits));
-                                pushing_us += push_time.end_as_us();
+                                loop_1_inner_us += inner_time.end_as_us();
                             }
-                        }
+                        });
+                        loop_1_us += us;
 
                         // Process batch of SanitizedTransactions. Filtering before processing.
                         let (check_results, us) = measure_us!(bank.check_transactions(
@@ -428,36 +440,42 @@ impl SchedulerController {
                         let (sanitized_transactions_iter, us) =
                             measure_us!(sanitized_transactions.into_iter().enumerate());
                         into_iter_us += us;
-                        for (idx, transaction) in sanitized_transactions_iter {
-                            if check_results[idx].0.is_err() {
-                                continue;
-                            }
+                        let (_, us) = measure_us!({
+                            for (idx, transaction) in sanitized_transactions_iter {
+                                let inner_time = Measure::start("inner");
+                                if check_results[idx].0.is_err() {
+                                    loop_2_inner_us += inner_time.end_as_us();
+                                    continue;
+                                }
 
-                            let (transaction_id, us) =
-                                measure_us!(self.transaction_id_generator.next());
-                            id_gen_us += us;
+                                let (transaction_id, us) =
+                                    measure_us!(self.transaction_id_generator.next());
+                                id_gen_us += us;
 
-                            let ((priority, cost), us) =
-                                measure_us!(Self::calculate_priority_and_cost(
-                                    &transaction,
-                                    &fee_budget_limits[idx],
-                                    &bank,
+                                let ((priority, cost), us) =
+                                    measure_us!(Self::calculate_priority_and_cost(
+                                        &transaction,
+                                        &fee_budget_limits[idx],
+                                        &bank,
+                                    ));
+
+                                priority_calculation_us += us;
+                                let transaction_ttl = SanitizedTransactionTTL {
+                                    transaction,
+                                    max_age_slot: last_slot_in_epoch,
+                                };
+
+                                let (_, us) = measure_us!(self.container.insert_new_transaction(
+                                    transaction_id,
+                                    transaction_ttl,
+                                    priority,
+                                    cost,
                                 ));
-
-                            priority_calculation_us += us;
-                            let transaction_ttl = SanitizedTransactionTTL {
-                                transaction,
-                                max_age_slot: last_slot_in_epoch,
-                            };
-
-                            let (_, us) = measure_us!(self.container.insert_new_transaction(
-                                transaction_id,
-                                transaction_ttl,
-                                priority,
-                                cost,
-                            ));
-                            insert_time_us += us;
-                        }
+                                insert_time_us += us;
+                                loop_2_inner_us += inner_time.end_as_us();
+                            }
+                        });
+                        loop_2_us += us;
                         batch_us += batch_time.end_as_us();
                     }
                     packet_count < recv_limit
@@ -486,6 +504,10 @@ impl SchedulerController {
             ("priority_calculation_us", priority_calculation_us, i64),
             ("insert_time_us", insert_time_us, i64),
             ("total_us", total_us, i64),
+            ("loop_1_us", loop_1_us, i64),
+            ("loop_1_inner_us", loop_1_inner_us, i64),
+            ("loop_2_us", loop_2_us, i64),
+            ("loop_2_inner_us", loop_2_inner_us, i64),
             ("batch_us", batch_us, i64),
             ("packet_count", packet_count, i64),
         );
