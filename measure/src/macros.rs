@@ -84,7 +84,9 @@ macro_rules! measure {
 macro_rules! measure_us {
     ($val:expr) => {{
         let start = std::time::Instant::now();
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
         let result = $val;
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
         (result, solana_sdk::timing::duration_as_us(&start.elapsed()))
     }};
 }
