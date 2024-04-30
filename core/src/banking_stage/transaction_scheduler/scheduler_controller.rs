@@ -422,12 +422,13 @@ impl SchedulerController {
                         ));
                         check_us += us;
 
-                        for ((transaction, fee_budget_limits), _) in sanitized_transactions
-                            .into_iter()
-                            .zip(fee_budget_limits)
-                            .zip(check_results)
-                            .filter(|(_, check_result)| check_result.0.is_ok())
-                        {
+                        let (sanitized_transactions_iter, into_iter_time) =
+                            measure_us!(sanitized_transactions.into_iter().enumerate());
+                        for (idx, transaction) in sanitized_transactions_iter {
+                            if check_results[idx].0.is_err() {
+                                continue;
+                            }
+
                             let (transaction_id, us) =
                                 measure_us!(self.transaction_id_generator.next());
                             id_gen_us += us;
@@ -435,9 +436,10 @@ impl SchedulerController {
                             let ((priority, cost), us) =
                                 measure_us!(Self::calculate_priority_and_cost(
                                     &transaction,
-                                    &fee_budget_limits,
+                                    &fee_budget_limits[idx],
                                     &bank,
                                 ));
+
                             priority_calculation_us += us;
                             let transaction_ttl = SanitizedTransactionTTL {
                                 transaction,
