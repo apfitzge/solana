@@ -7,6 +7,7 @@ use {
         sigverify::SigverifyTracerPacketStats,
     },
     crossbeam_channel::RecvTimeoutError,
+    solana_measure::measure_us,
     solana_perf::packet::PacketBatch,
     solana_runtime::bank_forks::BankForks,
     std::{
@@ -25,6 +26,11 @@ pub struct ReceivePacketResults {
     pub passed_sigverify_count: u64,
     /// Number of packets failing sigverify
     pub failed_sigverify_count: u64,
+}
+
+pub struct ReceiveAndProcessPacketsSummary {
+    pub recv_time_us: u64,
+    pub handle_time_us: u64,
 }
 
 pub struct PacketDeserializer {
@@ -52,21 +58,37 @@ impl PacketDeserializer {
         mut packet_batch_handler: impl FnMut(
             Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>,
         ) -> bool,
-    ) -> Result<(), RecvTimeoutError> {
+    ) -> Result<ReceiveAndProcessPacketsSummary, RecvTimeoutError> {
         let start = Instant::now();
-        let message = self.packet_batch_receiver.recv_timeout(timeout)?;
-        if !packet_batch_handler(message) {
-            return Ok(());
+        let (message, mut recv_time_us) =
+            measure_us!(self.packet_batch_receiver.recv_timeout(timeout)?);
+
+        let (continue_recv, mut handle_time_us) = measure_us!(packet_batch_handler(message));
+        if !continue_recv {
+            return Ok(ReceiveAndProcessPacketsSummary {
+                recv_time_us,
+                handle_time_us,
+            });
         }
         while start.elapsed() < timeout {
-            let Ok(message) = self.packet_batch_receiver.try_recv() else {
+            let (message, try_recv_time_us) = measure_us!(self.packet_batch_receiver.try_recv());
+            recv_time_us += try_recv_time_us;
+            let Ok(message) = message else {
                 break;
             };
-            if !packet_batch_handler(message) {
-                return Ok(());
+
+            let (continue_recv, message_handle_time_us) =
+                measure_us!(packet_batch_handler(message));
+            handle_time_us += message_handle_time_us;
+            if !continue_recv {
+                break;
             }
         }
-        Ok(())
+
+        Ok(ReceiveAndProcessPacketsSummary {
+            recv_time_us,
+            handle_time_us,
+        })
     }
 
     /// Handles receiving packet batches from sigverify and returns a vector of deserialized packets

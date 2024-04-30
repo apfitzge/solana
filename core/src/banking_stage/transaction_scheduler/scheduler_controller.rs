@@ -435,7 +435,14 @@ impl SchedulerController {
         };
 
         match packet_receive_result {
-            Ok(_) | Err(RecvTimeoutError::Timeout) => true,
+            Ok(summary) => {
+                self.timing_metrics.update(|timing_metrics| {
+                    timing_metrics.receive_time_us += summary.recv_time_us;
+                    timing_metrics.buffer_time_us += summary.handle_time_us;
+                });
+                true
+            }
+            Err(RecvTimeoutError::Timeout) => true,
             Err(RecvTimeoutError::Disconnected) => false,
         }
     }
