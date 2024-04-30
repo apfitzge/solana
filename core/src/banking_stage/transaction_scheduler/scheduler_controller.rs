@@ -348,6 +348,7 @@ impl SchedulerController {
         let mut process_compute_budget_us = 0;
         let mut pushing_us = 0;
         let mut check_us = 0;
+        let mut into_iter_us = 0;
         let mut id_gen_us = 0;
         let mut priority_calculation_us = 0;
         let mut insert_time_us = 0;
@@ -422,8 +423,9 @@ impl SchedulerController {
                         ));
                         check_us += us;
 
-                        let (sanitized_transactions_iter, into_iter_time) =
+                        let (sanitized_transactions_iter, us) =
                             measure_us!(sanitized_transactions.into_iter().enumerate());
+                        into_iter_us += us;
                         for (idx, transaction) in sanitized_transactions_iter {
                             if check_results[idx].0.is_err() {
                                 continue;
@@ -476,6 +478,7 @@ impl SchedulerController {
             ("process_compute_budget_us", process_compute_budget_us, i64),
             ("pushing_us", pushing_us, i64),
             ("check_us", check_us, i64),
+            ("into_iter_us", into_iter_us, i64),
             ("id_gen_us", id_gen_us, i64),
             ("priority_calculation_us", priority_calculation_us, i64),
             ("insert_time_us", insert_time_us, i64),
