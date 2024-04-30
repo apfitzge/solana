@@ -343,6 +343,8 @@ impl SchedulerController {
         let feature_set = &bank.feature_set;
 
         let mut allocation_time_us = 0;
+        let mut packet_clone_us = 0;
+        let mut immutable_packet_conversion_us = 0;
         let mut sanitize_time_us = 0;
         let mut validate_account_locks_us = 0;
         let mut process_compute_budget_us = 0;
@@ -351,6 +353,7 @@ impl SchedulerController {
         let mut into_iter_us = 0;
         let mut id_gen_us = 0;
         let mut priority_calculation_us = 0;
+        let mut tx_move_us = 0;
         let mut insert_time_us = 0;
         let mut total_us = 0;
         let mut loop_1_us = 0;
@@ -379,8 +382,13 @@ impl SchedulerController {
                         let (_, us) = measure_us!({
                             for packet in packet_batch {
                                 let inner_time = Measure::start("inner");
-                                if let Ok(packet) = ImmutableDeserializedPacket::new(packet.clone())
-                                {
+                                let (packet, us) = measure_us!(packet.clone());
+                                packet_clone_us += us;
+                                let (packet, us) =
+                                    measure_us!(ImmutableDeserializedPacket::new(packet));
+                                immutable_packet_conversion_us += us;
+
+                                if let Ok(packet) = packet {
                                     let (sanitized_transaction, us) = measure_us!({
                                         packet.build_sanitized_transaction(
                                             feature_set,
@@ -460,10 +468,12 @@ impl SchedulerController {
                                     ));
 
                                 priority_calculation_us += us;
-                                let transaction_ttl = SanitizedTransactionTTL {
+
+                                let (transaction_ttl, us) = measure_us!(SanitizedTransactionTTL {
                                     transaction,
                                     max_age_slot: last_slot_in_epoch,
-                                };
+                                });
+                                tx_move_us += us;
 
                                 let (_, us) = measure_us!(self.container.insert_new_transaction(
                                     transaction_id,
@@ -494,6 +504,12 @@ impl SchedulerController {
         datapoint_info!(
             "scheduler-receive-and-buffer-packets",
             ("allocation_time_us", allocation_time_us, i64),
+            ("packet_clone_us", packet_clone_us, i64),
+            (
+                "immutable_packet_conversion_us",
+                immutable_packet_conversion_us,
+                i64
+            ),
             ("sanitize_time_us", sanitize_time_us, i64),
             ("validate_account_locks_us", validate_account_locks_us, i64),
             ("process_compute_budget_us", process_compute_budget_us, i64),
@@ -502,6 +518,7 @@ impl SchedulerController {
             ("into_iter_us", into_iter_us, i64),
             ("id_gen_us", id_gen_us, i64),
             ("priority_calculation_us", priority_calculation_us, i64),
+            ("tx_move_us", tx_move_us, i64),
             ("insert_time_us", insert_time_us, i64),
             ("total_us", total_us, i64),
             ("loop_1_us", loop_1_us, i64),
