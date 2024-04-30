@@ -65,6 +65,13 @@ impl PacketDeserializer {
 
         let (continue_recv, mut handle_time_us) = measure_us!(packet_batch_handler(message));
         if !continue_recv {
+            if std::thread::current().name().unwrap() == "solBnkTxSched" {
+                datapoint_info!(
+                    "built-up-packets",
+                    ("count", self.packet_batch_receiver.len(), i64)
+                );
+            }
+
             return Ok(ReceiveAndProcessPacketsSummary {
                 recv_time_us,
                 handle_time_us,
@@ -83,6 +90,13 @@ impl PacketDeserializer {
             if !continue_recv {
                 break;
             }
+        }
+
+        if std::thread::current().name().unwrap() == "solBnkTxSched" {
+            datapoint_info!(
+                "built-up-packets",
+                ("count", self.packet_batch_receiver.len(), i64)
+            );
         }
 
         Ok(ReceiveAndProcessPacketsSummary {

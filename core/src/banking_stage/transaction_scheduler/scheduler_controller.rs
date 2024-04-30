@@ -25,7 +25,7 @@ use {
     },
     crossbeam_channel::RecvTimeoutError,
     solana_cost_model::cost_model::CostModel,
-    solana_measure::measure_us,
+    solana_measure::{measure::Measure, measure_us},
     solana_perf::packet::{PacketBatch, PACKETS_PER_BATCH},
     solana_program_runtime::compute_budget_processor::process_compute_budget_instructions,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
@@ -342,6 +342,17 @@ impl SchedulerController {
         let transaction_account_lock_limit = bank.get_transaction_account_lock_limit();
         let feature_set = &bank.feature_set;
 
+        let mut allocation_time_us = 0;
+        let mut sanitize_time_us = 0;
+        let mut validate_account_locks_us = 0;
+        let mut process_compute_budget_us = 0;
+        let mut pushing_us = 0;
+        let mut check_us = 0;
+        let mut id_gen_us = 0;
+        let mut priority_calculation_us = 0;
+        let mut insert_time_us = 0;
+        let mut total_us = 0;
+
         let packet_receive_result = if should_buffer {
             let lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
             let mut error_counts = TransactionErrorMetrics::default();
@@ -350,53 +361,66 @@ impl SchedulerController {
                 |message: Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>| {
                     for packet_batch in &message.0 {
                         // Clear vectors before starting new batch
+                        let allocate_time = Measure::start("allocate_time");
                         let mut arced_packets = Vec::with_capacity(PACKETS_PER_BATCH);
                         let mut sanitized_transactions = Vec::with_capacity(PACKETS_PER_BATCH);
                         let mut fee_budget_limits = Vec::with_capacity(PACKETS_PER_BATCH);
                         packet_count += packet_batch.len();
+                        allocation_time_us += allocate_time.end_as_us();
 
                         // Sanitize packets, only keeping those that are sanitized correctly.
                         for packet in packet_batch {
                             if let Ok(packet) = ImmutableDeserializedPacket::new(packet.clone()) {
-                                let Some(sanitized_transaction) = packet
-                                    .build_sanitized_transaction(
+                                let (sanitized_transaction, us) = measure_us!({
+                                    packet.build_sanitized_transaction(
                                         feature_set,
                                         bank.vote_only_bank(),
                                         bank.as_ref(),
                                     )
-                                else {
+                                });
+                                sanitize_time_us += us;
+                                let Some(sanitized_transaction) = sanitized_transaction else {
                                     continue;
                                 };
 
-                                if SanitizedTransaction::validate_account_locks(
-                                    sanitized_transaction.message(),
-                                    transaction_account_lock_limit,
-                                )
-                                .is_err()
-                                {
+                                let (invalid_account_locks, us) = measure_us!({
+                                    SanitizedTransaction::validate_account_locks(
+                                        sanitized_transaction.message(),
+                                        transaction_account_lock_limit,
+                                    )
+                                    .is_err()
+                                });
+                                validate_account_locks_us += us;
+                                if invalid_account_locks {
                                     continue;
                                 }
 
-                                let Ok(compute_budget_limits) = process_compute_budget_instructions(
-                                    sanitized_transaction.message().program_instructions_iter(),
-                                ) else {
+                                let (compute_budget_limits, us) =
+                                    measure_us!(process_compute_budget_instructions(
+                                        sanitized_transaction.message().program_instructions_iter(),
+                                    ));
+                                process_compute_budget_us += us;
+                                let Ok(compute_budget_limits) = compute_budget_limits else {
                                     continue;
                                 };
 
+                                let push_time = Measure::start("push");
                                 arced_packets.push(Arc::new(packet));
                                 sanitized_transactions.push(sanitized_transaction);
                                 fee_budget_limits
                                     .push(FeeBudgetLimits::from(compute_budget_limits));
+                                pushing_us += push_time.end_as_us();
                             }
                         }
 
                         // Process batch of SanitizedTransactions. Filtering before processing.
-                        let check_results = bank.check_transactions(
+                        let (check_results, us) = measure_us!(bank.check_transactions(
                             &sanitized_transactions,
                             &lock_results[..sanitized_transactions.len()],
                             MAX_PROCESSING_AGE,
                             &mut error_counts,
-                        );
+                        ));
+                        check_us += us;
 
                         for ((transaction, fee_budget_limits), _) in sanitized_transactions
                             .into_iter()
@@ -404,36 +428,57 @@ impl SchedulerController {
                             .zip(check_results)
                             .filter(|(_, check_result)| check_result.0.is_ok())
                         {
-                            let transaction_id = self.transaction_id_generator.next();
+                            let (transaction_id, us) =
+                                measure_us!(self.transaction_id_generator.next());
+                            id_gen_us += us;
 
-                            let (priority, cost) = Self::calculate_priority_and_cost(
-                                &transaction,
-                                &fee_budget_limits,
-                                &bank,
-                            );
+                            let ((priority, cost), us) =
+                                measure_us!(Self::calculate_priority_and_cost(
+                                    &transaction,
+                                    &fee_budget_limits,
+                                    &bank,
+                                ));
+                            priority_calculation_us += us;
                             let transaction_ttl = SanitizedTransactionTTL {
                                 transaction,
                                 max_age_slot: last_slot_in_epoch,
                             };
 
-                            self.container.insert_new_transaction(
+                            let (_, us) = measure_us!(self.container.insert_new_transaction(
                                 transaction_id,
                                 transaction_ttl,
                                 priority,
                                 cost,
-                            );
+                            ));
+                            insert_time_us += us;
                         }
                     }
                     packet_count < recv_limit
                 };
-            self.packet_receiver
-                .receive_and_process_packets(recv_timeout, message_handler)
+            let (res, us) = measure_us!(self
+                .packet_receiver
+                .receive_and_process_packets(recv_timeout, message_handler));
+            total_us = us;
+            res
         } else {
             let message_handler = |_message| true; // do nothing, just drop them
             self.packet_receiver
                 .receive_and_process_packets(recv_timeout, message_handler)
         };
 
+        datapoint_info!(
+            "scheduler-receive-and-buffer-packets",
+            ("allocation_time_us", allocation_time_us, i64),
+            ("sanitize_time_us", sanitize_time_us, i64),
+            ("validate_account_locks_us", validate_account_locks_us, i64),
+            ("process_compute_budget_us", process_compute_budget_us, i64),
+            ("pushing_us", pushing_us, i64),
+            ("check_us", check_us, i64),
+            ("id_gen_us", id_gen_us, i64),
+            ("priority_calculation_us", priority_calculation_us, i64),
+            ("insert_time_us", insert_time_us, i64),
+            ("total_us", total_us, i64),
+        );
         match packet_receive_result {
             Ok(summary) => {
                 self.timing_metrics.update(|timing_metrics| {
