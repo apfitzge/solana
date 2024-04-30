@@ -12,17 +12,21 @@ use {
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
-    crate::banking_stage::{
-        consume_worker::ConsumeWorkerMetrics,
-        consumer::Consumer,
-        decision_maker::{BufferedPacketsDecision, DecisionMaker},
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
-        packet_deserializer::PacketDeserializer,
-        TOTAL_BUFFERED_PACKETS,
+    crate::{
+        banking_stage::{
+            consume_worker::ConsumeWorkerMetrics,
+            consumer::Consumer,
+            decision_maker::{BufferedPacketsDecision, DecisionMaker},
+            immutable_deserialized_packet::ImmutableDeserializedPacket,
+            packet_deserializer::PacketDeserializer,
+            TOTAL_BUFFERED_PACKETS,
+        },
+        sigverify::SigverifyTracerPacketStats,
     },
     crossbeam_channel::RecvTimeoutError,
     solana_cost_model::cost_model::CostModel,
     solana_measure::measure_us,
+    solana_perf::packet::{PacketBatch, PACKETS_PER_BATCH},
     solana_program_runtime::compute_budget_processor::process_compute_budget_instructions,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_sdk::{
@@ -333,45 +337,110 @@ impl SchedulerController {
             }
         };
 
-        let (received_packet_results, receive_time_us) = measure_us!(self
-            .packet_receiver
-            .receive_packets(recv_timeout, recv_limit, |_| true));
+        let bank = self.bank_forks.read().unwrap().working_bank();
+        let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
+        let transaction_account_lock_limit = bank.get_transaction_account_lock_limit();
+        let feature_set = &bank.feature_set;
 
-        self.timing_metrics.update(|timing_metrics| {
-            saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
-        });
+        let packet_receive_result = if should_buffer {
+            let lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
+            let mut error_counts = TransactionErrorMetrics::default();
+            let mut packet_count = 0;
+            let message_handler =
+                |message: Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>| {
+                    for packet_batch in &message.0 {
+                        // Clear vectors before starting new batch
+                        let mut arced_packets = Vec::with_capacity(PACKETS_PER_BATCH);
+                        let mut sanitized_transactions = Vec::with_capacity(PACKETS_PER_BATCH);
+                        let mut fee_budget_limits = Vec::with_capacity(PACKETS_PER_BATCH);
+                        packet_count += packet_batch.len();
 
-        match received_packet_results {
-            Ok(receive_packet_results) => {
-                let num_received_packets = receive_packet_results.deserialized_packets.len();
+                        // Sanitize packets, only keeping those that are sanitized correctly.
+                        for packet in packet_batch {
+                            if let Ok(packet) = ImmutableDeserializedPacket::new(packet.clone()) {
+                                let Some(sanitized_transaction) = packet
+                                    .build_sanitized_transaction(
+                                        feature_set,
+                                        bank.vote_only_bank(),
+                                        bank.as_ref(),
+                                    )
+                                else {
+                                    continue;
+                                };
 
-                self.count_metrics.update(|count_metrics| {
-                    saturating_add_assign!(count_metrics.num_received, num_received_packets);
-                });
+                                if SanitizedTransaction::validate_account_locks(
+                                    sanitized_transaction.message(),
+                                    transaction_account_lock_limit,
+                                )
+                                .is_err()
+                                {
+                                    continue;
+                                }
 
-                if should_buffer {
-                    let (_, buffer_time_us) = measure_us!(
-                        self.buffer_packets(receive_packet_results.deserialized_packets)
-                    );
-                    self.timing_metrics.update(|timing_metrics| {
-                        saturating_add_assign!(timing_metrics.buffer_time_us, buffer_time_us);
-                    });
-                } else {
-                    self.count_metrics.update(|count_metrics| {
-                        saturating_add_assign!(
-                            count_metrics.num_dropped_on_receive,
-                            num_received_packets
+                                let Ok(compute_budget_limits) = process_compute_budget_instructions(
+                                    sanitized_transaction.message().program_instructions_iter(),
+                                ) else {
+                                    continue;
+                                };
+
+                                arced_packets.push(Arc::new(packet));
+                                sanitized_transactions.push(sanitized_transaction);
+                                fee_budget_limits
+                                    .push(FeeBudgetLimits::from(compute_budget_limits));
+                            }
+                        }
+
+                        // Process batch of SanitizedTransactions. Filtering before processing.
+                        let check_results = bank.check_transactions(
+                            &sanitized_transactions,
+                            &lock_results[..sanitized_transactions.len()],
+                            MAX_PROCESSING_AGE,
+                            &mut error_counts,
                         );
-                    });
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return false,
-        }
 
-        true
+                        for ((transaction, fee_budget_limits), _) in sanitized_transactions
+                            .into_iter()
+                            .zip(fee_budget_limits)
+                            .zip(check_results)
+                            .filter(|(_, check_result)| check_result.0.is_ok())
+                        {
+                            let transaction_id = self.transaction_id_generator.next();
+
+                            let (priority, cost) = Self::calculate_priority_and_cost(
+                                &transaction,
+                                &fee_budget_limits,
+                                &bank,
+                            );
+                            let transaction_ttl = SanitizedTransactionTTL {
+                                transaction,
+                                max_age_slot: last_slot_in_epoch,
+                            };
+
+                            self.container.insert_new_transaction(
+                                transaction_id,
+                                transaction_ttl,
+                                priority,
+                                cost,
+                            );
+                        }
+                    }
+                    packet_count < recv_limit
+                };
+            self.packet_receiver
+                .receive_and_process_packets(recv_timeout, message_handler)
+        } else {
+            let message_handler = |_message| true; // do nothing, just drop them
+            self.packet_receiver
+                .receive_and_process_packets(recv_timeout, message_handler)
+        };
+
+        match packet_receive_result {
+            Ok(_) | Err(RecvTimeoutError::Timeout) => true,
+            Err(RecvTimeoutError::Disconnected) => false,
+        }
     }
 
+    #[allow(dead_code)]
     fn buffer_packets(&mut self, packets: Vec<ImmutableDeserializedPacket>) {
         // Sanitize packets, generate IDs, and insert into the container.
         let bank = self.bank_forks.read().unwrap().working_bank();

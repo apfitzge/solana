@@ -45,6 +45,30 @@ impl PacketDeserializer {
         }
     }
 
+    /// Receive and process packets as they come in, if any, with a timeout.
+    pub fn receive_and_process_packets(
+        &self,
+        timeout: Duration,
+        mut packet_batch_handler: impl FnMut(
+            Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>,
+        ) -> bool,
+    ) -> Result<(), RecvTimeoutError> {
+        let start = Instant::now();
+        let message = self.packet_batch_receiver.recv_timeout(timeout)?;
+        if !packet_batch_handler(message) {
+            return Ok(());
+        }
+        while start.elapsed() < timeout {
+            let Ok(message) = self.packet_batch_receiver.try_recv() else {
+                break;
+            };
+            if !packet_batch_handler(message) {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     /// Handles receiving packet batches from sigverify and returns a vector of deserialized packets
     pub fn receive_packets(
         &self,
