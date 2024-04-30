@@ -398,6 +398,7 @@ impl SchedulerController {
                                     });
                                     sanitize_time_us += us;
                                     let Some(sanitized_transaction) = sanitized_transaction else {
+                                        loop_1_inner_us += inner_time.end_as_us();
                                         continue;
                                     };
 
@@ -410,6 +411,7 @@ impl SchedulerController {
                                     });
                                     validate_account_locks_us += us;
                                     if invalid_account_locks {
+                                        loop_1_inner_us += inner_time.end_as_us();
                                         continue;
                                     }
 
@@ -421,6 +423,7 @@ impl SchedulerController {
                                         ));
                                     process_compute_budget_us += us;
                                     let Ok(compute_budget_limits) = compute_budget_limits else {
+                                        loop_1_inner_us += inner_time.end_as_us();
                                         continue;
                                     };
 
