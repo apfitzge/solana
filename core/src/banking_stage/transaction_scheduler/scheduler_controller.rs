@@ -22,7 +22,7 @@ use {
     },
     crossbeam_channel::RecvTimeoutError,
     solana_cost_model::cost_model::CostModel,
-    solana_measure::measure_us,
+    solana_measure::{measure::Measure, measure_us},
     solana_program_runtime::compute_budget_processor::process_compute_budget_instructions,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_sdk::{
@@ -373,46 +373,80 @@ impl SchedulerController {
     }
 
     fn buffer_packets(&mut self, packets: Vec<ImmutableDeserializedPacket>) {
+        let total_time = Measure::start("buffer_packets");
         // Sanitize packets, generate IDs, and insert into the container.
+        let mut setup_time = Measure::start("setup");
         let bank = self.bank_forks.read().unwrap().working_bank();
         let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
         let transaction_account_lock_limit = bank.get_transaction_account_lock_limit();
         let feature_set = &bank.feature_set;
         let vote_only = bank.vote_only_bank();
+        setup_time.stop();
+
+        let mut sanitize_time_us = 0;
+        let mut validate_account_locks_us = 0;
+        let mut process_compute_budget_instructions_us = 0;
+        let mut total_unzip_us = 0;
+        let mut check_transactions_us = 0;
+        let mut id_gen_us = 0;
+        let mut calculate_priority_us = 0;
+        let mut insert_us = 0;
+        let mut metrics_time_us = 0;
+        let mut secondary_loop_us = 0;
+        let mut secondary_loop_contents_us = 0;
 
         const CHUNK_SIZE: usize = 128;
         let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
         let mut error_counts = TransactionErrorMetrics::default();
+        let mut chunk_time = Measure::start("chunks");
         for chunk in packets.chunks(CHUNK_SIZE) {
             let mut post_sanitization_count: usize = 0;
-            let (transactions, fee_budget_limits_vec): (Vec<_>, Vec<_>) = chunk
-                .iter()
-                .filter_map(|packet| {
-                    packet.build_sanitized_transaction(feature_set, vote_only, bank.as_ref())
-                })
-                .inspect(|_| saturating_add_assign!(post_sanitization_count, 1))
-                .filter(|tx| {
-                    SanitizedTransaction::validate_account_locks(
-                        tx.message(),
-                        transaction_account_lock_limit,
-                    )
-                    .is_ok()
-                })
-                .filter_map(|tx| {
-                    process_compute_budget_instructions(tx.message().program_instructions_iter())
-                        .map(|compute_budget| (tx, compute_budget.into()))
-                        .ok()
-                })
-                .unzip();
+            let ((transactions, fee_budget_limits_vec), unzip_us): ((Vec<_>, Vec<_>), u64) =
+                measure_us!(chunk
+                    .iter()
+                    .filter_map(|packet| {
+                        let (map, us) = measure_us!(packet.build_sanitized_transaction(
+                            feature_set,
+                            vote_only,
+                            bank.as_ref()
+                        ));
+                        sanitize_time_us += us;
+                        map
+                    })
+                    .inspect(|_| saturating_add_assign!(post_sanitization_count, 1))
+                    .filter(|tx| {
+                        let (filter, us) =
+                            measure_us!(SanitizedTransaction::validate_account_locks(
+                                tx.message(),
+                                transaction_account_lock_limit,
+                            )
+                            .is_ok());
+                        validate_account_locks_us += us;
+                        filter
+                    })
+                    .filter_map(|tx| {
+                        let (compute_budget, us) =
+                            measure_us!(process_compute_budget_instructions(
+                                tx.message().program_instructions_iter()
+                            )
+                            .map(|compute_budget| (tx, compute_budget.into()))
+                            .ok());
+                        process_compute_budget_instructions_us += us;
+                        compute_budget
+                    })
+                    .unzip());
+            total_unzip_us += unzip_us;
 
-            let check_results = bank.check_transactions(
+            let (check_results, check_us) = measure_us!(bank.check_transactions(
                 &transactions,
                 &lock_results[..transactions.len()],
                 MAX_PROCESSING_AGE,
                 &mut error_counts,
-            );
+            ));
+            check_transactions_us += check_us;
             let post_lock_validation_count = transactions.len();
 
+            let secondary_loop_time = Measure::start("secondary_loop");
             let mut post_transaction_check_count: usize = 0;
             let mut num_dropped_on_capacity: usize = 0;
             let mut num_buffered: usize = 0;
@@ -422,54 +456,94 @@ impl SchedulerController {
                 .zip(check_results)
                 .filter(|(_, check_result)| check_result.0.is_ok())
             {
+                let loop_contents_us = Measure::start("secondary_loop_contents");
                 saturating_add_assign!(post_transaction_check_count, 1);
-                let transaction_id = self.transaction_id_generator.next();
+                let (transaction_id, us) = measure_us!(self.transaction_id_generator.next());
+                id_gen_us += us;
 
-                let (priority, cost) =
-                    Self::calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
+                let ((priority, cost), priority_us) = measure_us!(
+                    Self::calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank)
+                );
+                calculate_priority_us += priority_us;
                 let transaction_ttl = SanitizedTransactionTTL {
                     transaction,
                     max_age_slot: last_slot_in_epoch,
                 };
 
-                if self.container.insert_new_transaction(
+                let (inserted, us) = measure_us!(self.container.insert_new_transaction(
                     transaction_id,
                     transaction_ttl,
                     priority,
                     cost,
-                ) {
+                ));
+                insert_us += us;
+
+                if inserted {
                     saturating_add_assign!(num_dropped_on_capacity, 1);
                 }
                 saturating_add_assign!(num_buffered, 1);
+                secondary_loop_contents_us += loop_contents_us.end_as_us();
             }
+            secondary_loop_us += secondary_loop_time.end_as_us();
 
             // Update metrics for transactions that were dropped.
-            let num_dropped_on_sanitization = chunk.len().saturating_sub(post_sanitization_count);
-            let num_dropped_on_lock_validation =
-                post_sanitization_count.saturating_sub(post_lock_validation_count);
-            let num_dropped_on_transaction_checks =
-                post_lock_validation_count.saturating_sub(post_transaction_check_count);
+            let (_, us) = measure_us!({
+                let num_dropped_on_sanitization =
+                    chunk.len().saturating_sub(post_sanitization_count);
+                let num_dropped_on_lock_validation =
+                    post_sanitization_count.saturating_sub(post_lock_validation_count);
+                let num_dropped_on_transaction_checks =
+                    post_lock_validation_count.saturating_sub(post_transaction_check_count);
 
-            self.count_metrics.update(|count_metrics| {
-                saturating_add_assign!(
-                    count_metrics.num_dropped_on_capacity,
-                    num_dropped_on_capacity
-                );
-                saturating_add_assign!(count_metrics.num_buffered, num_buffered);
-                saturating_add_assign!(
-                    count_metrics.num_dropped_on_sanitization,
-                    num_dropped_on_sanitization
-                );
-                saturating_add_assign!(
-                    count_metrics.num_dropped_on_validate_locks,
-                    num_dropped_on_lock_validation
-                );
-                saturating_add_assign!(
-                    count_metrics.num_dropped_on_receive_transaction_checks,
-                    num_dropped_on_transaction_checks
-                );
+                self.count_metrics.update(|count_metrics| {
+                    saturating_add_assign!(
+                        count_metrics.num_dropped_on_capacity,
+                        num_dropped_on_capacity
+                    );
+                    saturating_add_assign!(count_metrics.num_buffered, num_buffered);
+                    saturating_add_assign!(
+                        count_metrics.num_dropped_on_sanitization,
+                        num_dropped_on_sanitization
+                    );
+                    saturating_add_assign!(
+                        count_metrics.num_dropped_on_validate_locks,
+                        num_dropped_on_lock_validation
+                    );
+                    saturating_add_assign!(
+                        count_metrics.num_dropped_on_receive_transaction_checks,
+                        num_dropped_on_transaction_checks
+                    );
+                })
             });
+            metrics_time_us += us;
         }
+        chunk_time.stop();
+
+        datapoint_info!(
+            "scheduler-buffer-packet-details",
+            ("sanitize_time_us", sanitize_time_us, i64),
+            ("validate_account_locks_us", validate_account_locks_us, i64),
+            (
+                "process_compute_budget_instructions_us",
+                process_compute_budget_instructions_us,
+                i64
+            ),
+            ("total_unzip_us", total_unzip_us, i64),
+            ("check_transactions_us", check_transactions_us, i64),
+            ("id_gen_us", id_gen_us, i64),
+            ("calculate_priority_us", calculate_priority_us, i64),
+            ("insert_us", insert_us, i64),
+            ("metrics_time_us", metrics_time_us, i64),
+            ("setup_time_us", setup_time.as_us(), i64),
+            ("secondary_loop_us", secondary_loop_us, i64),
+            (
+                "secondary_loop_contents_us",
+                secondary_loop_contents_us,
+                i64
+            ),
+            ("chunk_time_us", chunk_time.as_us(), i64),
+            ("total_time_us", total_time.end_as_us(), i64),
+        );
     }
 
     /// Calculate priority and cost for a transaction:
