@@ -353,14 +353,16 @@ impl SchedulerController {
         let mut priority_calculation_us = 0;
         let mut insert_time_us = 0;
         let mut total_us = 0;
+        let mut batch_us = 0;
+        let mut packet_count = 0;
 
         let packet_receive_result = if should_buffer {
             let lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
             let mut error_counts = TransactionErrorMetrics::default();
-            let mut packet_count = 0;
             let message_handler =
                 |message: Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>| {
                     for packet_batch in &message.0 {
+                        let batch_time = Measure::start("batch_time");
                         // Clear vectors before starting new batch
                         let allocate_time = Measure::start("allocate_time");
                         let mut arced_packets = Vec::with_capacity(PACKETS_PER_BATCH);
@@ -456,6 +458,7 @@ impl SchedulerController {
                             ));
                             insert_time_us += us;
                         }
+                        batch_us += batch_time.end_as_us();
                     }
                     packet_count < recv_limit
                 };
@@ -483,6 +486,8 @@ impl SchedulerController {
             ("priority_calculation_us", priority_calculation_us, i64),
             ("insert_time_us", insert_time_us, i64),
             ("total_us", total_us, i64),
+            ("batch_us", batch_us, i64),
+            ("packet_count", packet_count, i64),
         );
         match packet_receive_result {
             Ok(summary) => {
