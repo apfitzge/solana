@@ -425,24 +425,33 @@ impl SchedulerController {
     /// Returns whether the packet receiver is still connected.
     fn receive_and_buffer_packets(&mut self, decision: &BufferedPacketsDecision) -> bool {
         let remaining_queue_capacity = self.container.remaining_queue_capacity();
-
         const MAX_PACKET_RECEIVE_TIME: Duration = Duration::from_millis(100);
-        let recv_timeout = match decision {
+        const DEFAULT_PACKET_RECEIVE_COUNT: usize = 25_000;
+        let (recv_timeout, recv_limit) = match decision {
             BufferedPacketsDecision::Consume(_) => {
-                if self.container.is_empty() {
-                    MAX_PACKET_RECEIVE_TIME
-                } else {
-                    Duration::ZERO
-                }
+                const MAX_PACKET_RECEIVE_TIME_NO_BUFFER: Duration = Duration::from_micros(100);
+                const MAX_PACKET_RECEIVE_COUNT: usize = 5_000;
+                (
+                    if self.container.is_empty() {
+                        MAX_PACKET_RECEIVE_TIME
+                    } else {
+                        MAX_PACKET_RECEIVE_TIME_NO_BUFFER
+                    },
+                    remaining_queue_capacity.min(MAX_PACKET_RECEIVE_COUNT),
+                )
             }
-            BufferedPacketsDecision::Forward
-            | BufferedPacketsDecision::ForwardAndHold
-            | BufferedPacketsDecision::Hold => MAX_PACKET_RECEIVE_TIME,
+
+            BufferedPacketsDecision::Forward => {
+                (MAX_PACKET_RECEIVE_TIME, DEFAULT_PACKET_RECEIVE_COUNT)
+            }
+            BufferedPacketsDecision::ForwardAndHold | BufferedPacketsDecision::Hold => {
+                (MAX_PACKET_RECEIVE_TIME, DEFAULT_PACKET_RECEIVE_COUNT)
+            }
         };
 
         let (received_packet_results, receive_time_us) = measure_us!(self
             .packet_receiver
-            .receive_packets(recv_timeout, remaining_queue_capacity, |_| true));
+            .receive_packets(recv_timeout, recv_limit, |_| true));
 
         self.timing_metrics.update(|timing_metrics| {
             saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
