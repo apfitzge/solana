@@ -1,5 +1,6 @@
 use {
     solana_cost_model::block_cost_limits::BUILT_IN_INSTRUCTION_COSTS,
+    solana_measure::measure_us,
     solana_perf::packet::Packet,
     solana_runtime::compute_budget_details::{ComputeBudgetDetails, GetComputeBudgetDetails},
     solana_sdk::{
@@ -47,10 +48,13 @@ pub struct ImmutableDeserializedPacket {
 
 impl ImmutableDeserializedPacket {
     pub fn new(packet: Packet) -> Result<Self, DeserializedPacketError> {
-        let versioned_transaction: VersionedTransaction = packet.deserialize_slice(..)?;
-        let sanitized_transaction = SanitizedVersionedTransaction::try_from(versioned_transaction)?;
-        let message_bytes = packet_message(&packet)?;
-        let message_hash = Message::hash_raw_message(message_bytes);
+        let (versioned_transaction, deserialize_us): (VersionedTransaction, _) =
+            measure_us!(packet.deserialize_slice(..)?);
+        let (sanitized_transaction, svt_us) = measure_us!(SanitizedVersionedTransaction::try_from(
+            versioned_transaction
+        )?);
+        let (message_bytes, message_us) = measure_us!(packet_message(&packet)?);
+        let (message_hash, hash_us) = measure_us!(Message::hash_raw_message(message_bytes));
         let is_simple_vote = packet.meta().is_simple_vote_tx();
 
         // drop transaction if prioritization fails.
@@ -61,6 +65,14 @@ impl ImmutableDeserializedPacket {
         // set compute unit price to zero for vote transactions
         if is_simple_vote {
             compute_budget_details.compute_unit_price = 0;
+        } else {
+            datapoint_info!(
+                "immutable_packet_times",
+                ("deserialize_us", deserialize_us, i64),
+                ("svt_us", svt_us, i64),
+                ("message_us", message_us, i64),
+                ("hash_us", hash_us, i64),
+            );
         };
 
         Ok(Self {
