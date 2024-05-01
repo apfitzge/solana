@@ -46,7 +46,7 @@ pub type TxOffset = PinnedVec<u32>;
 type TxOffsets = (TxOffset, TxOffset, TxOffset, TxOffset, Vec<Vec<u32>>);
 
 #[derive(Debug, PartialEq, Eq)]
-struct PacketOffsets {
+pub struct PacketOffsets {
     pub sig_len: u32,
     pub sig_start: u32,
     pub msg_start: u32,
@@ -184,8 +184,7 @@ pub fn count_discarded_packets(batches: &[PacketBatch]) -> usize {
         .sum()
 }
 
-// internal function to be unit-tested; should be used only by get_packet_offsets
-fn do_get_packet_offsets(
+pub fn do_get_packet_offsets(
     packet: &Packet,
     current_offset: usize,
 ) -> Result<PacketOffsets, PacketError> {

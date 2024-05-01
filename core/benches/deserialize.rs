@@ -88,7 +88,7 @@ fn bench_deserialize(bencher: &mut Bencher, tx_type: TransactionType) {
             let sanitized_transaction =
                 SanitizedVersionedTransaction::try_from(versioned_transaction).unwrap();
 
-            let message_bytes = packet_message(&packet).unwrap();
+            let message_bytes = packet_message(packet).unwrap();
             let message_hash = Message::hash_raw_message(message_bytes);
             let is_simple_vote_tx = packet.meta().is_simple_vote_tx();
 
