@@ -424,7 +424,6 @@ impl SchedulerController {
 
     /// Returns whether the packet receiver is still connected.
     fn receive_and_buffer_packets(&mut self, decision: &BufferedPacketsDecision) -> bool {
-        let remaining_queue_capacity = self.container.remaining_queue_capacity();
         const MAX_PACKET_RECEIVE_TIME: Duration = Duration::from_millis(100);
         const DEFAULT_PACKET_RECEIVE_COUNT: usize = 25_000;
         let (recv_timeout, recv_limit) = match decision {
@@ -437,7 +436,7 @@ impl SchedulerController {
                     } else {
                         MAX_PACKET_RECEIVE_TIME_NO_BUFFER
                     },
-                    remaining_queue_capacity.min(MAX_PACKET_RECEIVE_COUNT),
+                    MAX_PACKET_RECEIVE_COUNT,
                 )
             }
 
