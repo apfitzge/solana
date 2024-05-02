@@ -7,6 +7,7 @@ use {
         packet::Packet,
         pubkey::Pubkey,
         short_vec::decode_shortu16_len,
+        signature::Signature,
     },
 };
 
@@ -191,5 +192,38 @@ impl TransactionView {
             address_lookups_offset: address_lookups_offset as u16,
             address_lookups_len: address_lookups_len as u16,
         })
+    }
+
+    pub fn signatures(&self) -> &[Signature] {
+        let start = self.signature_offset as usize;
+
+        // Cast as a slice
+        unsafe {
+            core::slice::from_raw_parts(
+                self.packet.data(start).expect("data exists") as *const _ as *const Signature,
+                usize::from(self.signature_len),
+            )
+        }
+    }
+
+    pub fn recent_blockhash(&self) -> &Hash {
+        unsafe {
+            &*(self
+                .packet
+                .data(self.recent_blockhash_offset as usize)
+                .expect("data exists") as *const _ as *const Hash)
+        }
+    }
+
+    pub fn static_account_keys(&self) -> &[Pubkey] {
+        let start = self.static_accounts_offset as usize;
+
+        // Cast as a slice
+        unsafe {
+            core::slice::from_raw_parts(
+                self.packet.data(start).expect("data exists") as *const _ as *const Pubkey,
+                usize::from(self.static_accounts_len),
+            )
+        }
     }
 }
