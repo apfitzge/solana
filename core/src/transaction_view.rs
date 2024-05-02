@@ -1,10 +1,9 @@
 use {
     solana_perf::sigverify::{do_get_packet_offsets, PacketOffsets},
     solana_sdk::{
-        address_lookup_table::instruction,
-        blake3::Hash,
+        hash::Hash,
         message::{MessageHeader, MESSAGE_VERSION_PREFIX},
-        packet::{Packet, PACKET_DATA_SIZE},
+        packet::Packet,
         pubkey::Pubkey,
         short_vec::decode_shortu16_len,
         signature::Signature,
@@ -71,7 +70,7 @@ pub struct TransactionView {
 }
 
 impl TransactionView {
-    pub fn try_new(packet: Packet) -> Option<Self> {
+    pub fn try_new(packet: &Packet) -> Option<Self> {
         // Get the offsets of the packet data
         let PacketOffsets {
             sig_len: signature_len,
@@ -84,7 +83,7 @@ impl TransactionView {
         // Copy the packet data into the buffer
         let packet_len = packet.meta().size;
         let mut buffer = [0u8; MAX_TRASACTION_SIZE];
-        buffer[..PACKET_DATA_SIZE].copy_from_slice(packet.data(..)?);
+        buffer[..packet_len].copy_from_slice(packet.data(..)?);
 
         // Get the transaction version. Only need to load a single byte at the
         // start of the message.
@@ -135,12 +134,12 @@ impl TransactionView {
             // u8 for program index
             current_offset = current_offset.checked_add(core::mem::size_of::<u8>())?;
             // u16 for accounts len
-            let (accounts_indices_len, bytes) =
+            let (accounts_indexes_len, bytes) =
                 decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
             current_offset = current_offset.checked_add(bytes)?;
-            let accounts_indices_offset = current_offset;
-            current_offset = accounts_indices_offset.checked_add(
-                usize::from(accounts_indices_len).checked_mul(core::mem::size_of::<u8>())?,
+            let accounts_indexes_offset = current_offset;
+            current_offset = accounts_indexes_offset.checked_add(
+                usize::from(accounts_indexes_len).checked_mul(core::mem::size_of::<u8>())?,
             )?;
             // u16 for data len
             let (data_len, bytes) = decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
@@ -162,22 +161,22 @@ impl TransactionView {
                 for _ in 0..address_lookups_len {
                     // Pubkey for address
                     current_offset = current_offset.checked_add(core::mem::size_of::<Pubkey>())?;
-                    // u16 for length of writable_indices
-                    let (writable_indices_len, bytes) =
+                    // u16 for length of writable_indexes
+                    let (writable_indexes_len, bytes) =
                         decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
                     current_offset = current_offset.checked_add(bytes)?;
-                    let writable_indices_offset = current_offset;
-                    current_offset = writable_indices_offset.checked_add(
-                        usize::from(writable_indices_len).checked_mul(core::mem::size_of::<u8>())?,
+                    let writable_indexes_offset = current_offset;
+                    current_offset = writable_indexes_offset.checked_add(
+                        usize::from(writable_indexes_len).checked_mul(core::mem::size_of::<u8>())?,
                     )?;
 
-                    // u16 for length of readonly_indices
-                    let (readonly_indices_len, bytes) =
+                    // u16 for length of readonly_indexes
+                    let (readonly_indexes_len, bytes) =
                         decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
                     current_offset = current_offset.checked_add(bytes)?;
-                    let readonly_indices_offset = current_offset;
-                    current_offset = readonly_indices_offset.checked_add(
-                        usize::from(readonly_indices_len).checked_mul(core::mem::size_of::<u8>())?,
+                    let readonly_indexes_offset = current_offset;
+                    current_offset = readonly_indexes_offset.checked_add(
+                        usize::from(readonly_indexes_len).checked_mul(core::mem::size_of::<u8>())?,
                     )?;
                 }
                 (address_lookups_len, address_lookups_offset)
@@ -232,5 +231,238 @@ impl TransactionView {
                 usize::from(self.static_accounts_len),
             )
         }
+    }
+
+    pub fn instructions<'a>(&'a self) -> impl Iterator<Item = Instruction<'a>> {
+        InstructionIterator {
+            buffer: &self.buffer,
+            current_offset: self.instructions_offset as usize,
+            instruction_count: usize::from(self.instructions_len),
+            current_count: 0,
+        }
+    }
+
+    pub fn address_lookups<'a>(&'a self) -> impl Iterator<Item = AddressLookupEntry<'a>> {
+        AddressLookupIterator {
+            buffer: &self.buffer,
+            current_offset: self.address_lookups_offset as usize,
+            address_lookup_count: usize::from(self.address_lookups_len),
+            current_count: 0,
+        }
+    }
+}
+
+struct InstructionIterator<'a> {
+    buffer: &'a [u8],
+    current_offset: usize,
+    instruction_count: usize,
+    current_count: usize,
+}
+
+impl<'a> Iterator for InstructionIterator<'a> {
+    type Item = Instruction<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_count >= self.instruction_count {
+            return None;
+        }
+        // u8 for program index
+        let program_id_index = self.buffer[self.current_offset];
+        self.current_offset = self
+            .current_offset
+            .checked_add(core::mem::size_of::<u8>())?;
+        // u16 for accounts len
+        let (accounts_indexes_len, bytes) =
+            decode_shortu16_len(&self.buffer[self.current_offset..]).ok()?;
+        self.current_offset = self.current_offset.checked_add(bytes)?;
+        let accounts_indexes_offset = self.current_offset;
+        let accounts_indexes = &self.buffer
+            [accounts_indexes_offset..accounts_indexes_offset + usize::from(accounts_indexes_len)];
+        self.current_offset = accounts_indexes_offset.checked_add(
+            usize::from(accounts_indexes_len).checked_mul(core::mem::size_of::<u8>())?,
+        )?;
+        // u16 for data len
+        let (data_len, bytes) = decode_shortu16_len(&self.buffer[self.current_offset..]).ok()?;
+        self.current_offset = self.current_offset.checked_add(bytes)?;
+        let data = &self.buffer[self.current_offset..self.current_offset + usize::from(data_len)];
+        self.current_offset = self.current_offset.checked_add(usize::from(data_len))?;
+
+        self.current_count += 1;
+
+        Some(Instruction {
+            program_id_index,
+            accounts_indexes,
+            data,
+        })
+    }
+}
+
+pub struct Instruction<'a> {
+    pub program_id_index: u8,
+    pub accounts_indexes: &'a [u8],
+    pub data: &'a [u8],
+}
+
+struct AddressLookupIterator<'a> {
+    buffer: &'a [u8],
+    current_offset: usize,
+    address_lookup_count: usize,
+    current_count: usize,
+}
+
+impl<'a> Iterator for AddressLookupIterator<'a> {
+    type Item = AddressLookupEntry<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_count >= self.address_lookup_count {
+            return None;
+        }
+        // Pubkey for address
+        let account_key =
+            unsafe { &*(&self.buffer[self.current_offset] as *const _ as *const Pubkey) };
+        self.current_offset = self
+            .current_offset
+            .checked_add(core::mem::size_of::<Pubkey>())?;
+        // u16 for length of writable_indexes
+        let (writable_indexes_len, bytes) =
+            decode_shortu16_len(&self.buffer[self.current_offset..]).ok()?;
+        self.current_offset = self.current_offset.checked_add(bytes)?;
+        let writable_indexes_offset = self.current_offset;
+        let writable_indexes = &self.buffer
+            [writable_indexes_offset..writable_indexes_offset + usize::from(writable_indexes_len)];
+        self.current_offset = writable_indexes_offset.checked_add(
+            usize::from(writable_indexes_len).checked_mul(core::mem::size_of::<u8>())?,
+        )?;
+        // u16 for length of readonly_indexes
+        let (readonly_indexes_len, bytes) =
+            decode_shortu16_len(&self.buffer[self.current_offset..]).ok()?;
+        self.current_offset = self.current_offset.checked_add(bytes)?;
+        let readonly_indexes_offset = self.current_offset;
+        let readonly_indexes = &self.buffer
+            [readonly_indexes_offset..readonly_indexes_offset + usize::from(readonly_indexes_len)];
+        self.current_offset = readonly_indexes_offset.checked_add(
+            usize::from(readonly_indexes_len).checked_mul(core::mem::size_of::<u8>())?,
+        )?;
+
+        self.current_count += 1;
+
+        Some(AddressLookupEntry {
+            account_key,
+            writable_indexes,
+            readonly_indexes,
+        })
+    }
+}
+
+pub struct AddressLookupEntry<'a> {
+    pub account_key: &'a Pubkey,
+    pub writable_indexes: &'a [u8],
+    pub readonly_indexes: &'a [u8],
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        solana_sdk::{
+            message::Message,
+            signature::Keypair,
+            signer::Signer,
+            system_instruction, system_transaction,
+            transaction::{Transaction, VersionedTransaction},
+        },
+    };
+
+    fn compare_view_to_transaction(transaction: &VersionedTransaction, view: &TransactionView) {
+        // Compare signatures
+        assert_eq!(view.signatures(), transaction.signatures);
+
+        // Compare static account keys
+        assert_eq!(
+            view.static_account_keys(),
+            transaction.message.static_account_keys()
+        );
+
+        // Compare recent blockhash
+        assert_eq!(
+            view.recent_blockhash(),
+            transaction.message.recent_blockhash()
+        );
+
+        // Compare instructions
+        let mut instruction_view_iter = view.instructions();
+        for instruction in transaction.message.instructions() {
+            let instruction_view = instruction_view_iter.next().unwrap();
+            assert_eq!(
+                instruction.program_id_index,
+                instruction_view.program_id_index
+            );
+            assert_eq!(instruction.accounts, instruction_view.accounts_indexes);
+            assert_eq!(instruction.data, instruction_view.data);
+        }
+        assert!(instruction_view_iter.next().is_none());
+
+        // Compare address lookup tables if they exist
+        if let Some(address_lookup_tables) = transaction.message.address_table_lookups() {
+            let mut address_lookup_iter = view.address_lookups();
+            for address_lookup_table in address_lookup_tables {
+                let address_lookup_view = address_lookup_iter.next().unwrap();
+                assert_eq!(
+                    address_lookup_table.account_key,
+                    *address_lookup_view.account_key
+                );
+                assert_eq!(
+                    address_lookup_table.writable_indexes,
+                    address_lookup_view.writable_indexes
+                );
+                assert_eq!(
+                    address_lookup_table.readonly_indexes,
+                    address_lookup_view.readonly_indexes
+                );
+            }
+            assert!(address_lookup_iter.next().is_none());
+        } else {
+            assert_eq!(view.address_lookups().count(), 0); // ensure this function is correct if not present
+        }
+    }
+
+    #[test]
+    fn test_transaction_view_simple() {
+        let mut packet = Packet::default();
+        assert!(TransactionView::try_new(&packet).is_none());
+
+        let keypair = Keypair::new();
+        let pubkey = Pubkey::new_unique();
+        let recent_blockhash = Hash::new_unique();
+        let transaction = system_transaction::transfer(&keypair, &pubkey, 1, recent_blockhash);
+        let transaction = VersionedTransaction::from(transaction);
+
+        packet.populate_packet(None, &transaction).unwrap();
+
+        let transaction_view = TransactionView::try_new(&packet).unwrap();
+        compare_view_to_transaction(&transaction, &transaction_view);
+    }
+
+    #[test]
+    fn test_transaction_view_multiple_instructions() {
+        let mut packet = Packet::default();
+        assert!(TransactionView::try_new(&packet).is_none());
+
+        let keypair = Keypair::new();
+        let pubkey = Pubkey::new_unique();
+        let recent_blockhash = Hash::new_unique();
+        let ixs = vec![
+            system_instruction::transfer(&keypair.pubkey(), &pubkey, 1),
+            system_instruction::transfer(&keypair.pubkey(), &Pubkey::new_unique(), 1),
+        ];
+
+        let message = Message::new(&ixs, Some(&keypair.pubkey()));
+        let transaction = Transaction::new(&[&keypair], message, recent_blockhash);
+        let transaction = VersionedTransaction::from(transaction);
+
+        packet.populate_packet(None, &transaction).unwrap();
+
+        let transaction_view = TransactionView::try_new(&packet).unwrap();
+        compare_view_to_transaction(&transaction, &transaction_view);
     }
 }
