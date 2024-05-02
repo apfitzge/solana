@@ -4,12 +4,14 @@ use {
         address_lookup_table::instruction,
         blake3::Hash,
         message::{MessageHeader, MESSAGE_VERSION_PREFIX},
-        packet::Packet,
+        packet::{Packet, PACKET_DATA_SIZE},
         pubkey::Pubkey,
         short_vec::decode_shortu16_len,
         signature::Signature,
     },
 };
+
+const MAX_TRASACTION_SIZE: usize = 4096; // not sure this is actually true
 
 #[repr(u8)]
 pub enum TransactionVersion {
@@ -25,7 +27,9 @@ pub enum TransactionVersion {
 /// This view struct allows calling code to access information
 /// about the transaction without needing to do slow deserialization.
 pub struct TransactionView {
-    packet: Packet,
+    buffer: [u8; MAX_TRASACTION_SIZE],
+    /// The packet length.
+    packet_len: u16,
     /// The number of signatures.
     signature_len: u16,
     /// Offset of signature in the packet.
@@ -76,6 +80,11 @@ impl TransactionView {
             pubkey_start: _static_accounts_offset,
             pubkey_len: _static_accounts_len,
         } = do_get_packet_offsets(&packet, 0).ok()?;
+
+        // Copy the packet data into the buffer
+        let packet_len = packet.meta().size;
+        let mut buffer = [0u8; MAX_TRASACTION_SIZE];
+        buffer[..PACKET_DATA_SIZE].copy_from_slice(packet.data(..)?);
 
         // Get the transaction version. Only need to load a single byte at the
         // start of the message.
@@ -176,7 +185,8 @@ impl TransactionView {
         };
 
         Some(Self {
-            packet,
+            buffer,
+            packet_len: packet_len as u16,
             signature_len: signature_len as u16,
             signature_offset: signature_offset as u16,
             num_required_signatures,
@@ -200,7 +210,7 @@ impl TransactionView {
         // Cast as a slice
         unsafe {
             core::slice::from_raw_parts(
-                self.packet.data(start).expect("data exists") as *const _ as *const Signature,
+                &self.buffer[start] as *const _ as *const Signature,
                 usize::from(self.signature_len),
             )
         }
@@ -208,10 +218,7 @@ impl TransactionView {
 
     pub fn recent_blockhash(&self) -> &Hash {
         unsafe {
-            &*(self
-                .packet
-                .data(self.recent_blockhash_offset as usize)
-                .expect("data exists") as *const _ as *const Hash)
+            &*(&self.buffer[self.recent_blockhash_offset as usize] as *const _ as *const Hash)
         }
     }
 
@@ -221,7 +228,7 @@ impl TransactionView {
         // Cast as a slice
         unsafe {
             core::slice::from_raw_parts(
-                self.packet.data(start).expect("data exists") as *const _ as *const Pubkey,
+                &self.buffer[start] as *const _ as *const Pubkey,
                 usize::from(self.static_accounts_len),
             )
         }
