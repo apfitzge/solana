@@ -1,10 +1,12 @@
 use {
     solana_perf::sigverify::{do_get_packet_offsets, PacketOffsets},
     solana_sdk::{
+        address_lookup_table::instruction,
         blake3::Hash,
         message::{MessageHeader, MESSAGE_VERSION_PREFIX},
         packet::Packet,
         pubkey::Pubkey,
+        short_vec::decode_shortu16_len,
     },
 };
 
@@ -57,10 +59,10 @@ pub struct TransactionView {
     instructions_offset: u16,
 
     /// Length of the address lookup entries in the packet.
-    address_offsets_len: u16,
+    address_lookups_len: u16,
     /// Offset of the address lookup entries in the packet.
     /// This is **not** a slice, as the entry size is not known.
-    address_offsets_offset: u16,
+    address_lookups_offset: u16,
 }
 
 impl TransactionView {
@@ -87,8 +89,9 @@ impl TransactionView {
             (TransactionVersion::Legacy, message_offset)
         };
 
-        // Read message header.
         let mut current_offset = usize::try_from(message_header_offset).ok()?;
+
+        // Read message header.
         let message_header_offset = current_offset;
         let message_header_end =
             message_header_offset.checked_add(core::mem::size_of::<MessageHeader>())?;
@@ -98,77 +101,78 @@ impl TransactionView {
         let num_readonly_unsigned_accounts = message_header_bytes[2];
         current_offset = current_offset.checked_add(core::mem::size_of::<MessageHeader>())?;
 
-        // Read the number of accounts.
-        let static_accounts_offset = current_offset.checked_add(core::mem::size_of::<u16>())?;
-        let static_accounts_len_bytes = packet.data(current_offset..static_accounts_offset)?;
-        let static_accounts_len =
-            u16::from_le_bytes([static_accounts_len_bytes[0], static_accounts_len_bytes[1]]);
-        current_offset = static_accounts_offset
-            .checked_add(usize::from(static_accounts_len) * core::mem::size_of::<Pubkey>())?;
+        // Read the number of accounts - extraordinarily confusing serialization format.
+        let (static_accounts_len, bytes_read) =
+            decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+        current_offset = current_offset.checked_add(bytes_read)?;
+        let static_accounts_offset = current_offset;
+        current_offset = static_accounts_offset.checked_add(
+            usize::try_from(static_accounts_len).ok()? * core::mem::size_of::<Pubkey>(),
+        )?;
 
         // Read the recent blockhash.
         let recent_blockhash_offset = current_offset;
         current_offset = recent_blockhash_offset.checked_add(core::mem::size_of::<Hash>())?;
 
         // Read the instructions.
-        let instructions_offset = current_offset.checked_add(core::mem::size_of::<u16>())?;
-        let instructions_len_bytes = packet.data(current_offset..instructions_offset)?;
-        let instructions_len =
-            u16::from_le_bytes([instructions_len_bytes[0], instructions_len_bytes[1]]);
-        current_offset = instructions_offset.checked_add(usize::from(instructions_len))?;
+        let (instructions_len, bytes) =
+            decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+        current_offset = current_offset.checked_add(bytes)?;
+        let instructions_offset = current_offset;
 
         // The instructions do not have a fixed size, so we actually must iterate over them.
         for _ in 0..instructions_len {
             // u8 for program index
             current_offset = current_offset.checked_add(core::mem::size_of::<u8>())?;
             // u16 for accounts len
-            let accounts_indices_offset = current_offset.checked_add(core::mem::size_of::<u16>())?;
-            let accounts_indices_len_bytes =
-                packet.data(current_offset..accounts_indices_offset)?;
-            let accounts_indices_len =
-                u16::from_le_bytes([accounts_indices_len_bytes[0], accounts_indices_len_bytes[1]]);
+            let (accounts_indices_len, bytes) =
+                decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+            current_offset = current_offset.checked_add(bytes)?;
+            let accounts_indices_offset = current_offset;
             current_offset = accounts_indices_offset.checked_add(
                 usize::from(accounts_indices_len).checked_mul(core::mem::size_of::<u8>())?,
             )?;
             // u16 for data len
-            let data_len_offset = current_offset.checked_add(core::mem::size_of::<u16>())?;
-            let data_len_bytes = packet.data(current_offset..data_len_offset)?;
-            let data_len = u16::from_le_bytes([data_len_bytes[0], data_len_bytes[1]]);
-            current_offset = data_len_offset.checked_add(usize::from(data_len))?;
+            let (data_len, bytes) = decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+            current_offset = current_offset.checked_add(bytes)?;
+            current_offset = current_offset.checked_add(usize::from(data_len))?;
         }
 
-        // After the instructions, there are address lookup entries.
-        // We must iterate over these as well since the size is not fixed.
-        let address_offsets_offset = current_offset.checked_add(core::mem::size_of::<u16>())?;
-        let address_offsets_len_bytes = packet.data(current_offset..address_offsets_offset)?;
-        let address_offsets_len =
-            u16::from_le_bytes([address_offsets_len_bytes[0], address_offsets_len_bytes[1]]);
-        current_offset = address_offsets_offset;
+        // If the transaction is a V0 transaction, there may be address lookups
+        let (address_lookups_len, address_lookups_offset) = match version {
+            TransactionVersion::Legacy => (0, 0),
+            TransactionVersion::V0 => {
+                // After the instructions, there are address lookup entries.
+                // We must iterate over these as well since the size is not fixed.
+                let (address_lookups_len, bytes) =
+                    decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+                current_offset = current_offset.checked_add(bytes)?;
+                let address_lookups_offset = current_offset;
 
-        for _ in 0..address_offsets_len {
-            // Pubkey for address
-            current_offset = current_offset.checked_add(core::mem::size_of::<Pubkey>())?;
-            // u16 for length of writable_indices
-            let writable_indices_len_offset =
-                current_offset.checked_add(core::mem::size_of::<u16>())?;
-            let writable_indices_len_bytes =
-                packet.data(current_offset..writable_indices_len_offset)?;
-            let writable_indices_len =
-                u16::from_le_bytes([writable_indices_len_bytes[0], writable_indices_len_bytes[1]]);
-            current_offset = writable_indices_len_offset.checked_add(
-                usize::from(writable_indices_len).checked_mul(core::mem::size_of::<u8>())?,
-            )?;
-            // u16 for length of readonly_indices
-            let readonly_indices_len_offset =
-                current_offset.checked_add(core::mem::size_of::<u16>())?;
-            let readonly_indices_len_bytes =
-                packet.data(current_offset..readonly_indices_len_offset)?;
-            let readonly_indices_len =
-                u16::from_le_bytes([readonly_indices_len_bytes[0], readonly_indices_len_bytes[1]]);
-            current_offset = readonly_indices_len_offset.checked_add(
-                usize::from(readonly_indices_len).checked_mul(core::mem::size_of::<u8>())?,
-            )?;
-        }
+                for _ in 0..address_lookups_len {
+                    // Pubkey for address
+                    current_offset = current_offset.checked_add(core::mem::size_of::<Pubkey>())?;
+                    // u16 for length of writable_indices
+                    let (writable_indices_len, bytes) =
+                        decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+                    current_offset = current_offset.checked_add(bytes)?;
+                    let writable_indices_offset = current_offset;
+                    current_offset = writable_indices_offset.checked_add(
+                        usize::from(writable_indices_len).checked_mul(core::mem::size_of::<u8>())?,
+                    )?;
+
+                    // u16 for length of readonly_indices
+                    let (readonly_indices_len, bytes) =
+                        decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+                    current_offset = current_offset.checked_add(bytes)?;
+                    let readonly_indices_offset = current_offset;
+                    current_offset = readonly_indices_offset.checked_add(
+                        usize::from(readonly_indices_len).checked_mul(core::mem::size_of::<u8>())?,
+                    )?;
+                }
+                (address_lookups_len, address_lookups_offset)
+            }
+        };
 
         Some(Self {
             packet,
@@ -180,12 +184,12 @@ impl TransactionView {
             version,
             message_offset: message_offset as u16,
             static_accounts_offset: static_accounts_offset as u16,
-            static_accounts_len,
+            static_accounts_len: static_accounts_len as u16,
             recent_blockhash_offset: recent_blockhash_offset as u16,
             instructions_offset: instructions_offset as u16,
-            instructions_len,
-            address_offsets_offset: address_offsets_offset as u16,
-            address_offsets_len,
+            instructions_len: instructions_len as u16,
+            address_lookups_offset: address_lookups_offset as u16,
+            address_lookups_len: address_lookups_len as u16,
         })
     }
 }
