@@ -87,13 +87,20 @@ fn bench_deserialize(bencher: &mut Bencher, tx_type: TransactionType) {
     bencher.iter(|| {
         let packet_batch = packet_batch_iterator.next().unwrap();
         for (idx, packet) in packet_batch.iter().enumerate() {
-            // let versioned_transaction: VersionedTransaction = test::black_box(packet.clone())
-            //     .deserialize_slice(..)
-            //     .unwrap();
-            // let _transaction_view = TransactionView::try_new(test::black_box(&packet)).unwrap();
+            // let _ = SanitizedVersionedTransaction::try_new(
+            //     test::black_box(packet.clone())
+            //         .deserialize_slice::<VersionedTransaction, _>(..)
+            //         .unwrap(),
+            // )
+            // .unwrap();
+
+            // let mut transaction_view = TransactionView::try_new(test::black_box(&packet)).unwrap();
+            // transaction_view.sanitize().unwrap();
+
             transaction_views[idx]
                 .populate_from(test::black_box(packet))
                 .unwrap();
+            transaction_views[idx].sanitize().unwrap();
         }
     });
 }

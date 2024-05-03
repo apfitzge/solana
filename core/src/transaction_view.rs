@@ -600,7 +600,8 @@ mod tests {
 
         packet.populate_packet(None, &transaction).unwrap();
 
-        let transaction_view = TransactionView::try_new(&packet).unwrap();
+        let mut transaction_view = TransactionView::try_new(&packet).unwrap();
+        transaction_view.sanitize().unwrap();
         compare_view_to_transaction(&transaction, &transaction_view);
     }
 
@@ -623,7 +624,8 @@ mod tests {
 
         packet.populate_packet(None, &transaction).unwrap();
 
-        let transaction_view = TransactionView::try_new(&packet).unwrap();
+        let mut transaction_view = TransactionView::try_new(&packet).unwrap();
+        transaction_view.sanitize().unwrap();
         compare_view_to_transaction(&transaction, &transaction_view);
     }
 }
