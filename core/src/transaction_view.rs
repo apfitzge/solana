@@ -1,6 +1,6 @@
 use solana_sdk::{
     hash::Hash, message::MESSAGE_VERSION_PREFIX, packet::Packet, pubkey::Pubkey,
-    short_vec::decode_shortu16_len, signature::Signature,
+    sanitize::SanitizeError, short_vec::decode_shortu16_len, signature::Signature,
 };
 
 const MAX_TRASACTION_SIZE: usize = 4096; // not sure this is actually true
@@ -269,6 +269,113 @@ impl TransactionView {
             address_lookup_count: usize::from(self.address_lookups_len),
             current_count: 0,
         }
+    }
+
+    pub fn sanitize(&mut self) -> Result<(), SanitizeError> {
+        self.sanitize_signatures()?;
+        self.sanitize_message()?;
+
+        self.status = TransactionStatus::Sanitized;
+        Ok(())
+    }
+
+    fn sanitize_signatures(&self) -> Result<(), SanitizeError> {
+        let num_required_signatures = usize::from(self.num_required_signatures);
+        match num_required_signatures.cmp(&usize::from(self.signature_len)) {
+            core::cmp::Ordering::Greater => Err(SanitizeError::IndexOutOfBounds),
+            core::cmp::Ordering::Less => Err(SanitizeError::InvalidValue),
+            core::cmp::Ordering::Equal => Ok(()),
+        }?;
+
+        // Signatures are verified before message keys are loaded so all signers
+        // must correspond to static account keys.
+        if self.signature_len > self.static_accounts_len {
+            return Err(SanitizeError::IndexOutOfBounds);
+        }
+
+        Ok(())
+    }
+
+    fn sanitize_message(&self) -> Result<(), SanitizeError> {
+        if usize::from(self.num_required_signatures)
+            .saturating_add(usize::from(self.num_readonly_unsigned_accounts))
+            > usize::from(self.static_accounts_len)
+        {
+            return Err(SanitizeError::IndexOutOfBounds);
+        }
+
+        // there should be at least 1 RW fee-payer account.
+        if self.num_readonly_signed_accounts >= self.num_required_signatures {
+            return Err(SanitizeError::InvalidValue);
+        }
+
+        let num_dynamic_account_keys = {
+            let mut total_lookup_keys: usize = 0;
+            for lookup in self.address_lookups() {
+                let num_lookup_indexes = lookup
+                    .writable_indexes
+                    .len()
+                    .saturating_add(lookup.readonly_indexes.len());
+
+                // each lookup table must be used to load at least one account
+                if num_lookup_indexes == 0 {
+                    return Err(SanitizeError::InvalidValue);
+                }
+
+                total_lookup_keys = total_lookup_keys.saturating_add(num_lookup_indexes);
+            }
+            total_lookup_keys
+        };
+
+        // this is redundant with the above sanitization checks which require that:
+        // 1) the header describes at least 1 RW account
+        // 2) the header doesn't describe more account keys than the number of account keys
+        if self.static_accounts_len == 0 {
+            return Err(SanitizeError::InvalidValue);
+        }
+
+        // the combined number of static and dynamic account keys must be <= 256
+        // since account indices are encoded as `u8`
+        // Note that this is different from the per-transaction account load cap
+        // as defined in `Bank::get_transaction_account_lock_limit`
+        let total_account_keys =
+            usize::from(self.static_accounts_len).saturating_add(num_dynamic_account_keys);
+        if total_account_keys > 256 {
+            return Err(SanitizeError::IndexOutOfBounds);
+        }
+
+        // `expect` is safe because of earlier check that
+        // `num_static_account_keys` is non-zero
+        let max_account_ix = total_account_keys
+            .checked_sub(1)
+            .expect("message doesn't contain any account keys");
+
+        // reject program ids loaded from lookup tables so that
+        // static analysis on program instructions can be performed
+        // without loading on-chain data from a bank
+        let max_program_id_ix =
+            // `expect` is safe because of earlier check that
+            // `num_static_account_keys` is non-zero
+            usize::from(self.static_accounts_len)
+                .checked_sub(1)
+                .expect("message doesn't contain any static account keys");
+
+        for instruction in self.instructions() {
+            if usize::from(instruction.program_id_index) > max_program_id_ix {
+                return Err(SanitizeError::IndexOutOfBounds);
+            }
+            // A program cannot be a payer.
+            if instruction.program_id_index == 0 {
+                return Err(SanitizeError::IndexOutOfBounds);
+            }
+            for account_index in instruction.accounts_indexes {
+                if usize::from(*account_index) > max_account_ix {
+                    return Err(SanitizeError::IndexOutOfBounds);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
