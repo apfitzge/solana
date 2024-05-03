@@ -10,7 +10,7 @@ use {
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
-    crate::banking_stage::{
+    crate::{banking_stage::{
         consume_worker::ConsumeWorkerMetrics,
         consumer::Consumer,
         decision_maker::{BufferedPacketsDecision, DecisionMaker},
@@ -19,7 +19,7 @@ use {
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         packet_deserializer::PacketDeserializer,
         ForwardOption, TOTAL_BUFFERED_PACKETS,
-    },
+    }, banking_trace::BankingPacketBatch},
     crossbeam_channel::RecvTimeoutError,
     solana_cost_model::cost_model::CostModel,
     solana_measure::measure_us,
@@ -34,8 +34,7 @@ use {
     },
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
-        sync::{Arc, RwLock},
-        time::{Duration, Instant},
+        num, sync::{Arc, RwLock}, time::{Duration, Instant}
     },
 };
 
@@ -151,149 +150,197 @@ impl SchedulerController {
             | BufferedPacketsDecision::Hold => MAX_PACKET_RECEIVE_TIME,
         };
 
-        let (received_packet_results, receive_time_us) = measure_us!(self
+        let (receive_result, receive_time_us) = measure_us!(self
             .packet_receiver
-            .receive_packets(recv_timeout, remaining_queue_capacity, |_| true));
+            .receive_until(recv_timeout, remaining_queue_capacity));
 
         self.timing_metrics.update(|timing_metrics| {
             saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
         });
 
-        match received_packet_results {
-            Ok(receive_packet_results) => {
-                let num_received_packets = receive_packet_results.deserialized_packets.len();
-
+        match receive_result {
+            Ok((count, messages)) => {
                 self.count_metrics.update(|count_metrics| {
-                    saturating_add_assign!(count_metrics.num_received, num_received_packets);
+                    saturating_add_assign!(count_metrics.num_received, count);
                 });
 
                 let (_, buffer_time_us) =
-                    measure_us!(self.buffer_packets(receive_packet_results.deserialized_packets));
+                    measure_us!(self.buffer_packets(messages));
                 self.timing_metrics.update(|timing_metrics| {
                     saturating_add_assign!(timing_metrics.buffer_time_us, buffer_time_us);
                 });
+
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return false,
         }
 
         true
+
+        // let (received_packet_results, receive_time_us) = measure_us!(self
+        //     .packet_receiver
+        //     .receive_packets(recv_timeout, remaining_queue_capacity, |_| true));
+
+        // self.timing_metrics.update(|timing_metrics| {
+        //     saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
+        // });
+
+        // match received_packet_results {
+        //     Ok(receive_packet_results) => {
+        //         let num_received_packets = receive_packet_results.deserialized_packets.len();
+
+        //         self.count_metrics.update(|count_metrics| {
+        //             saturating_add_assign!(count_metrics.num_received, num_received_packets);
+        //         });
+
+        //         let (_, buffer_time_us) =
+        //             measure_us!(self.buffer_packets(receive_packet_results.deserialized_packets));
+        //         self.timing_metrics.update(|timing_metrics| {
+        //             saturating_add_assign!(timing_metrics.buffer_time_us, buffer_time_us);
+        //         });
+        //     }
+        //     Err(RecvTimeoutError::Timeout) => {}
+        //     Err(RecvTimeoutError::Disconnected) => return false,
+        // }
+
+        true
     }
 
-    fn buffer_packets(&mut self, packets: Vec<ImmutableDeserializedPacket>) {
-        // Convert to Arcs
-        let packets: Vec<_> = packets.into_iter().map(Arc::new).collect();
-        // Sanitize packets, generate IDs, and insert into the container.
-        let bank = self.bank_forks.read().unwrap().working_bank();
-        let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
-        let transaction_account_lock_limit = bank.get_transaction_account_lock_limit();
-        let feature_set = &bank.feature_set;
-        let vote_only = bank.vote_only_bank();
-
-        const CHUNK_SIZE: usize = 128;
-        let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
-        let mut error_counts = TransactionErrorMetrics::default();
-        for chunk in packets.chunks(CHUNK_SIZE) {
-            let mut post_sanitization_count: usize = 0;
-
-            let mut arc_packets = Vec::with_capacity(chunk.len());
-            let mut transactions = Vec::with_capacity(chunk.len());
-            let mut fee_budget_limits_vec = Vec::with_capacity(chunk.len());
-
-            chunk
-                .iter()
-                .filter_map(|packet| {
-                    packet
-                        .build_sanitized_transaction(
-                            feature_set,
-                            vote_only,
-                            bank.as_ref(),
-                            bank.get_reserved_account_keys(),
-                        )
-                        .map(|tx| (packet.clone(), tx))
-                })
-                .inspect(|_| saturating_add_assign!(post_sanitization_count, 1))
-                .filter(|(_packet, tx)| {
-                    SanitizedTransaction::validate_account_locks(
-                        tx.message(),
-                        transaction_account_lock_limit,
-                    )
-                    .is_ok()
-                })
-                .filter_map(|(packet, tx)| {
-                    process_compute_budget_instructions(tx.message().program_instructions_iter())
-                        .map(|compute_budget| (packet, tx, compute_budget.into()))
-                        .ok()
-                })
-                .for_each(|(packet, tx, fee_budget_limits)| {
-                    arc_packets.push(packet);
-                    transactions.push(tx);
-                    fee_budget_limits_vec.push(fee_budget_limits);
-                });
-
-            let check_results = bank.check_transactions(
-                &transactions,
-                &lock_results[..transactions.len()],
-                MAX_PROCESSING_AGE,
-                &mut error_counts,
-            );
-            let post_lock_validation_count = transactions.len();
-
-            let mut post_transaction_check_count: usize = 0;
-            let mut num_dropped_on_capacity: usize = 0;
-            let mut num_buffered: usize = 0;
-            for (((packet, transaction), fee_budget_limits), _) in arc_packets
-                .into_iter()
-                .zip(transactions)
-                .zip(fee_budget_limits_vec)
-                .zip(check_results)
-                .filter(|(_, check_result)| check_result.0.is_ok())
-            {
-                saturating_add_assign!(post_transaction_check_count, 1);
-
-                let (priority, cost) =
-                    Self::calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
-                let transaction_ttl = SanitizedTransactionTTL {
-                    transaction,
-                    max_age_slot: last_slot_in_epoch,
-                };
-
-                if self
-                    .container
-                    .insert_new_transaction(transaction_ttl, packet, priority, cost)
-                {
-                    saturating_add_assign!(num_dropped_on_capacity, 1);
+    fn buffer_packets(&mut self, messages: Vec<BankingPacketBatch>) {
+        let mut num_buffered = 0;
+        let mut num_dropped = 0;
+        for message in messages {
+            for packet_batch in &message.0 {
+                for packet in packet_batch.into_iter() {
+                    if self.container.insert_new_packet(packet) {
+                        num_buffered += 1;
+                    } else {
+                        num_dropped += 1;
+                    }
                 }
-                saturating_add_assign!(num_buffered, 1);
             }
-
-            // Update metrics for transactions that were dropped.
-            let num_dropped_on_sanitization = chunk.len().saturating_sub(post_sanitization_count);
-            let num_dropped_on_lock_validation =
-                post_sanitization_count.saturating_sub(post_lock_validation_count);
-            let num_dropped_on_transaction_checks =
-                post_lock_validation_count.saturating_sub(post_transaction_check_count);
-
-            self.count_metrics.update(|count_metrics| {
-                saturating_add_assign!(
-                    count_metrics.num_dropped_on_capacity,
-                    num_dropped_on_capacity
-                );
-                saturating_add_assign!(count_metrics.num_buffered, num_buffered);
-                saturating_add_assign!(
-                    count_metrics.num_dropped_on_sanitization,
-                    num_dropped_on_sanitization
-                );
-                saturating_add_assign!(
-                    count_metrics.num_dropped_on_validate_locks,
-                    num_dropped_on_lock_validation
-                );
-                saturating_add_assign!(
-                    count_metrics.num_dropped_on_receive_transaction_checks,
-                    num_dropped_on_transaction_checks
-                );
-            });
         }
+
+        self.count_metrics.update(|count_metrics| {
+            saturating_add_assign!(count_metrics.num_buffered, num_buffered);
+            saturating_add_assign!(count_metrics.num_dropped_on_capacity, num_dropped);
+        });
+
+
+
+        // // Convert to Arcs
+        // let packets: Vec<_> = packets.into_iter().map(Arc::new).collect();
+        // // Sanitize packets, generate IDs, and insert into the container.
+        // let bank = self.bank_forks.read().unwrap().working_bank();
+        // let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
+        // let transaction_account_lock_limit = bank.get_transaction_account_lock_limit();
+        // let feature_set = &bank.feature_set;
+        // let vote_only = bank.vote_only_bank();
+
+        // const CHUNK_SIZE: usize = 128;
+        // let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
+        // let mut error_counts = TransactionErrorMetrics::default();
+        // for chunk in packets.chunks(CHUNK_SIZE) {
+        //     let mut post_sanitization_count: usize = 0;
+
+        //     let mut arc_packets = Vec::with_capacity(chunk.len());
+        //     let mut transactions = Vec::with_capacity(chunk.len());
+        //     let mut fee_budget_limits_vec = Vec::with_capacity(chunk.len());
+
+        //     chunk
+        //         .iter()
+        //         .filter_map(|packet| {
+        //             packet
+        //                 .build_sanitized_transaction(
+        //                     feature_set,
+        //                     vote_only,
+        //                     bank.as_ref(),
+        //                     bank.get_reserved_account_keys(),
+        //                 )
+        //                 .map(|tx| (packet.clone(), tx))
+        //         })
+        //         .inspect(|_| saturating_add_assign!(post_sanitization_count, 1))
+        //         .filter(|(_packet, tx)| {
+        //             SanitizedTransaction::validate_account_locks(
+        //                 tx.message(),
+        //                 transaction_account_lock_limit,
+        //             )
+        //             .is_ok()
+        //         })
+        //         .filter_map(|(packet, tx)| {
+        //             process_compute_budget_instructions(tx.message().program_instructions_iter())
+        //                 .map(|compute_budget| (packet, tx, compute_budget.into()))
+        //                 .ok()
+        //         })
+        //         .for_each(|(packet, tx, fee_budget_limits)| {
+        //             arc_packets.push(packet);
+        //             transactions.push(tx);
+        //             fee_budget_limits_vec.push(fee_budget_limits);
+        //         });
+
+        //     let check_results = bank.check_transactions(
+        //         &transactions,
+        //         &lock_results[..transactions.len()],
+        //         MAX_PROCESSING_AGE,
+        //         &mut error_counts,
+        //     );
+        //     let post_lock_validation_count = transactions.len();
+
+        //     let mut post_transaction_check_count: usize = 0;
+        //     let mut num_dropped_on_capacity: usize = 0;
+        //     let mut num_buffered: usize = 0;
+        //     for (((packet, transaction), fee_budget_limits), _) in arc_packets
+        //         .into_iter()
+        //         .zip(transactions)
+        //         .zip(fee_budget_limits_vec)
+        //         .zip(check_results)
+        //         .filter(|(_, check_result)| check_result.0.is_ok())
+        //     {
+        //         saturating_add_assign!(post_transaction_check_count, 1);
+
+        //         let (priority, cost) =
+        //             Self::calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
+        //         let transaction_ttl = SanitizedTransactionTTL {
+        //             transaction,
+        //             max_age_slot: last_slot_in_epoch,
+        //         };
+
+        //         if self
+        //             .container
+        //             .insert_new_transaction(transaction_ttl, packet, priority, cost)
+        //         {
+        //             saturating_add_assign!(num_dropped_on_capacity, 1);
+        //         }
+        //         saturating_add_assign!(num_buffered, 1);
+        //     }
+
+        //     // Update metrics for transactions that were dropped.
+        //     let num_dropped_on_sanitization = chunk.len().saturating_sub(post_sanitization_count);
+        //     let num_dropped_on_lock_validation =
+        //         post_sanitization_count.saturating_sub(post_lock_validation_count);
+        //     let num_dropped_on_transaction_checks =
+        //         post_lock_validation_count.saturating_sub(post_transaction_check_count);
+
+        //     self.count_metrics.update(|count_metrics| {
+        //         saturating_add_assign!(
+        //             count_metrics.num_dropped_on_capacity,
+        //             num_dropped_on_capacity
+        //         );
+        //         saturating_add_assign!(count_metrics.num_buffered, num_buffered);
+        //         saturating_add_assign!(
+        //             count_metrics.num_dropped_on_sanitization,
+        //             num_dropped_on_sanitization
+        //         );
+        //         saturating_add_assign!(
+        //             count_metrics.num_dropped_on_validate_locks,
+        //             num_dropped_on_lock_validation
+        //         );
+        //         saturating_add_assign!(
+        //             count_metrics.num_dropped_on_receive_transaction_checks,
+        //             num_dropped_on_transaction_checks
+        //         );
+        //     });
+        // }
     }
 
     /// Calculate priority and cost for a transaction:

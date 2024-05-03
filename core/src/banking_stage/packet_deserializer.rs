@@ -117,7 +117,7 @@ impl PacketDeserializer {
     }
 
     /// Receives packet batches from sigverify stage with a timeout
-    fn receive_until(
+    pub fn receive_until(
         &self,
         recv_timeout: Duration,
         packet_count_upperbound: usize,

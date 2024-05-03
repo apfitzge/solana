@@ -3,12 +3,16 @@ use {
         transaction_priority_id::TransactionPriorityId,
         transaction_state::{SanitizedTransactionTTL, TransactionState},
     },
-    crate::banking_stage::{
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
-        scheduler_messages::TransactionId,
+    crate::{
+        banking_stage::{
+            immutable_deserialized_packet::ImmutableDeserializedPacket,
+            scheduler_messages::TransactionId,
+        },
+        transaction_view::TransactionView,
     },
     itertools::MinMaxResult,
     min_max_heap::MinMaxHeap,
+    solana_sdk::packet::Packet,
     std::{collections::HashMap, sync::Arc},
     valet::Valet,
 };
@@ -40,7 +44,7 @@ use {
 /// a new transaction, the lowest priority transaction will be dropped.
 pub(crate) struct TransactionStateContainer {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
-    id_to_transaction_state: Valet<TransactionState>,
+    id_to_transaction_state: Valet<TransactionView>,
 }
 
 impl TransactionStateContainer {
@@ -66,27 +70,48 @@ impl TransactionStateContainer {
         self.priority_queue.pop_max()
     }
 
-    /// Insert a new transaction into the container's queues and maps.
-    /// Returns `true` if a packet was dropped due to capacity limits.
-    pub(crate) fn insert_new_transaction(
-        &mut self,
-        transaction_ttl: SanitizedTransactionTTL,
-        packet: Arc<ImmutableDeserializedPacket>,
-        priority: u64,
-        cost: u64,
-    ) -> bool {
-        let transaction_id = self
+    /// Insert a packet
+    pub(crate) fn insert_new_packet(&mut self, packet: &Packet) -> bool {
+        let transaction_id = self.id_to_transaction_state.get_free_index().unwrap();
+        let inserted = self
             .id_to_transaction_state
-            .insert(TransactionState::new(
-                transaction_ttl,
-                packet,
-                priority,
-                cost,
-            ))
-            .unwrap_or_else(|_| panic!("womp"));
+            .with_mut(transaction_id, |transaction_view| {
+                transaction_view.populate_from(packet);
+                transaction_view.sanitize();
+            })
+            .is_ok();
+
+        // Ignore priority for now - all packets are equal in test case.
+        // Priority = reward / cost
+        // cost = 720 + 150 + 150 + 300 = 1320
+        // reward = 2500
+        // priority = 2500 / 1320 => 1
+        let priority = 1;
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
         self.push_id_into_queue(priority_id)
     }
+
+    // /// Insert a new transaction into the container's queues and maps.
+    // /// Returns `true` if a packet was dropped due to capacity limits.
+    // pub(crate) fn insert_new_transaction(
+    //     &mut self,
+    //     transaction_ttl: SanitizedTransactionTTL,
+    //     packet: Arc<ImmutableDeserializedPacket>,
+    //     priority: u64,
+    //     cost: u64,
+    // ) -> bool {
+    //     let transaction_id = self
+    //         .id_to_transaction_state
+    //         .insert(TransactionState::new(
+    //             transaction_ttl,
+    //             packet,
+    //             priority,
+    //             cost,
+    //         ))
+    //         .unwrap_or_else(|_| panic!("womp"));
+    //     let priority_id = TransactionPriorityId::new(priority, transaction_id);
+    //     self.push_id_into_queue(priority_id)
+    // }
 
     /// Pushes a transaction id into the priority queue. If the queue is full, the lowest priority
     /// transaction will be dropped (removed from the queue and map).
@@ -104,7 +129,8 @@ impl TransactionStateContainer {
 
     /// Remove transaction by id.
     pub(crate) fn remove_by_id(&mut self, id: &TransactionId) {
-        self.id_to_transaction_state.take(*id).unwrap();
+        // release index - does not clear it out
+        self.id_to_transaction_state.release(*id).unwrap();
     }
 
     pub(crate) fn get_min_max_priority(&self) -> MinMaxResult<u64> {
