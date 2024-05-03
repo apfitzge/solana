@@ -71,8 +71,8 @@ pub struct TransactionView {
     address_lookups_offset: u16,
 }
 
-impl TransactionView {
-    pub fn new() -> Self {
+impl Default for TransactionView {
+    fn default() -> Self {
         Self {
             status: TransactionStatus::Uninitialized,
             buffer: [0; MAX_TRASACTION_SIZE],
@@ -93,9 +93,26 @@ impl TransactionView {
             address_lookups_offset: 0,
         }
     }
+}
 
+impl TransactionView {
     /// Return None if the packet is not a transaction.
     pub fn populate_from(&mut self, packet: &Packet) -> Option<()> {
+        // The "deserialization" strategy here only works if the internal types
+        // of the transaction are aligned on the same boundaries as the packet
+        // data. The packet data has no alignment guarantees, which means all
+        // internal types must be byte-aligned. This is true for all types used
+        // in the transaction, but for guarantees some static asserts should be
+        // added.
+        const _: () = assert!(core::mem::align_of::<u8>() == 1);
+        const _: () = assert!(core::mem::align_of::<Signature>() == 1);
+        const _: () = assert!(core::mem::align_of::<Pubkey>() == 1);
+        const _: () = assert!(core::mem::align_of::<Hash>() == 1);
+        // The above asserts are not necessary, but they are a good sanity
+        // check. There is one type that is not byte-aligned, and that is
+        // u16. However, because the encoding scheme uses a variable number
+        // of bytes, to be converted as a u16, it is also always byte-aligned.
+
         // Copy the packet data into the buffer
         let packet_len = packet.meta().size;
         self.buffer[..packet_len].copy_from_slice(packet.data(..)?);
@@ -181,30 +198,31 @@ impl TransactionView {
         if offset != packet_len {
             return None;
         }
+        let packet_len = u16::try_from(packet_len).ok()?;
 
         // Assign fields
         self.status = TransactionStatus::Raw;
-        self.packet_len = packet_len as u16;
-        self.signature_len = signature_len as u16;
-        self.signature_offset = signature_offset as u16;
+        self.packet_len = packet_len;
+        self.signature_len = signature_len;
+        self.signature_offset = signature_offset;
         self.num_required_signatures = num_required_signatures;
         self.num_readonly_signed_accounts = num_readonly_signed_accounts;
         self.num_readonly_unsigned_accounts = num_readonly_unsigned_accounts;
         self.version = version;
-        self.message_offset = message_offset as u16;
-        self.static_accounts_offset = static_accounts_offset as u16;
-        self.static_accounts_len = static_accounts_len as u16;
-        self.recent_blockhash_offset = recent_blockhash_offset as u16;
-        self.instructions_offset = instructions_offset as u16;
-        self.instructions_len = instructions_len as u16;
-        self.address_lookups_offset = address_lookups_offset as u16;
-        self.address_lookups_len = address_lookups_len as u16;
+        self.message_offset = message_offset;
+        self.static_accounts_offset = static_accounts_offset;
+        self.static_accounts_len = static_accounts_len;
+        self.recent_blockhash_offset = recent_blockhash_offset;
+        self.instructions_offset = instructions_offset;
+        self.instructions_len = instructions_len;
+        self.address_lookups_offset = address_lookups_offset;
+        self.address_lookups_len = address_lookups_len;
 
         Some(())
     }
 
     pub fn try_new(packet: &Packet) -> Option<Self> {
-        let mut transaction_view = Self::new();
+        let mut transaction_view = Self::default();
         transaction_view.populate_from(packet)?;
         Some(transaction_view)
     }
@@ -235,7 +253,7 @@ impl TransactionView {
         .expect("static account keys verified in construction")
     }
 
-    pub fn instructions<'a>(&'a self) -> impl Iterator<Item = Instruction<'a>> {
+    pub fn instructions(&self) -> impl Iterator<Item = Instruction> {
         InstructionIterator {
             buffer: &self.buffer[..usize::from(self.packet_len)], // all instructions are within original packet
             current_offset: self.instructions_offset as usize,
@@ -244,7 +262,7 @@ impl TransactionView {
         }
     }
 
-    pub fn address_lookups<'a>(&'a self) -> impl Iterator<Item = AddressLookupEntry<'a>> {
+    pub fn address_lookups(&self) -> impl Iterator<Item = AddressLookupEntry> {
         AddressLookupIterator {
             buffer: &self.buffer[..usize::from(self.packet_len)], // all address lookups are within original packet
             current_offset: self.address_lookups_offset as usize,
@@ -355,7 +373,7 @@ fn read_compressed_u16(buffer: &[u8], offset: &mut usize) -> Option<u16> {
     }
     let (value, bytes) = decode_shortu16_len(&buffer[*offset..]).ok()?;
     *offset += bytes;
-    Some(u16::try_from(value).ok()?)
+    u16::try_from(value).ok()
 }
 
 #[inline(always)]

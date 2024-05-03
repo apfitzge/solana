@@ -80,15 +80,18 @@ fn bench_deserialize(bencher: &mut Bencher, tx_type: TransactionType) {
     let verified: Vec<_> = to_packet_batches(&transactions, PACKETS_PER_BATCH);
 
     let mut packet_batch_iterator = verified.iter().cycle();
-    let mut transaction_view = TransactionView::new();
+    let mut transaction_view = TransactionView::default();
+    let mut transaction_views = core::iter::repeat_with(TransactionView::default)
+        .take(PACKETS_PER_BATCH)
+        .collect::<Vec<_>>();
     bencher.iter(|| {
         let packet_batch = packet_batch_iterator.next().unwrap();
-        for packet in packet_batch {
+        for (idx, packet) in packet_batch.iter().enumerate() {
             // let versioned_transaction: VersionedTransaction = test::black_box(packet.clone())
             //     .deserialize_slice(..)
             //     .unwrap();
             // let _transaction_view = TransactionView::try_new(test::black_box(&packet)).unwrap();
-            let _ = transaction_view
+            transaction_views[idx]
                 .populate_from(test::black_box(packet))
                 .unwrap();
         }
