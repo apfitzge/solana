@@ -3,12 +3,10 @@
 
 use {
     super::{
-        prio_graph_scheduler::PrioGraphScheduler,
         scheduler_error::SchedulerError,
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
         },
-        transaction_id_generator::TransactionIdGenerator,
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
@@ -48,13 +46,10 @@ pub(crate) struct SchedulerController {
     /// Packet/Transaction ingress.
     packet_receiver: PacketDeserializer,
     bank_forks: Arc<RwLock<BankForks>>,
-    /// Generates unique IDs for incoming transactions.
-    transaction_id_generator: TransactionIdGenerator,
     /// Container for transaction state.
     /// Shared resource between `packet_receiver` and `scheduler`.
     container: TransactionStateContainer,
-    /// State for scheduling and communicating with worker threads.
-    scheduler: PrioGraphScheduler,
+
     /// Metrics tracking time for leader bank detection.
     leader_detection_metrics: SchedulerLeaderDetectionMetrics,
     /// Metrics tracking counts on transactions in different states
@@ -74,7 +69,6 @@ impl SchedulerController {
         decision_maker: DecisionMaker,
         packet_deserializer: PacketDeserializer,
         bank_forks: Arc<RwLock<BankForks>>,
-        scheduler: PrioGraphScheduler,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Forwarder,
     ) -> Self {
@@ -82,9 +76,7 @@ impl SchedulerController {
             decision_maker,
             packet_receiver: packet_deserializer,
             bank_forks,
-            transaction_id_generator: TransactionIdGenerator::default(),
             container: TransactionStateContainer::with_capacity(TOTAL_BUFFERED_PACKETS),
-            scheduler,
             leader_detection_metrics: SchedulerLeaderDetectionMetrics::default(),
             count_metrics: SchedulerCountMetrics::default(),
             timing_metrics: SchedulerTimingMetrics::default(),
@@ -119,7 +111,6 @@ impl SchedulerController {
                 .maybe_report_and_reset_slot(new_leader_slot);
 
             // self.process_transactions(&decision)?;
-            self.receive_completed()?;
             if !self.receive_and_buffer_packets(&decision) {
                 break;
             }
@@ -138,25 +129,6 @@ impl SchedulerController {
                 .iter()
                 .for_each(|metrics| metrics.maybe_report_and_reset());
         }
-
-        Ok(())
-    }
-
-    /// Receives completed transactions from the workers and updates metrics.
-    fn receive_completed(&mut self) -> Result<(), SchedulerError> {
-        let ((num_transactions, num_retryable), receive_completed_time_us) =
-            measure_us!(self.scheduler.receive_completed(&mut self.container)?);
-
-        self.count_metrics.update(|count_metrics| {
-            saturating_add_assign!(count_metrics.num_finished, num_transactions);
-            saturating_add_assign!(count_metrics.num_retryable, num_retryable);
-        });
-        self.timing_metrics.update(|timing_metrics| {
-            saturating_add_assign!(
-                timing_metrics.receive_completed_time_us,
-                receive_completed_time_us
-            );
-        });
 
         Ok(())
     }
@@ -278,7 +250,6 @@ impl SchedulerController {
                 .filter(|(_, check_result)| check_result.0.is_ok())
             {
                 saturating_add_assign!(post_transaction_check_count, 1);
-                let transaction_id = self.transaction_id_generator.next();
 
                 let (priority, cost) =
                     Self::calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
@@ -287,13 +258,10 @@ impl SchedulerController {
                     max_age_slot: last_slot_in_epoch,
                 };
 
-                if self.container.insert_new_transaction(
-                    transaction_id,
-                    transaction_ttl,
-                    packet,
-                    priority,
-                    cost,
-                ) {
+                if self
+                    .container
+                    .insert_new_transaction(transaction_ttl, packet, priority, cost)
+                {
                     saturating_add_assign!(num_dropped_on_capacity, 1);
                 }
                 saturating_add_assign!(num_buffered, 1);

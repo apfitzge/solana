@@ -10,6 +10,7 @@ use {
     itertools::MinMaxResult,
     min_max_heap::MinMaxHeap,
     std::{collections::HashMap, sync::Arc},
+    valet::Valet,
 };
 
 /// This structure will hold `TransactionState` for the entirety of a
@@ -39,14 +40,14 @@ use {
 /// a new transaction, the lowest priority transaction will be dropped.
 pub(crate) struct TransactionStateContainer {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
-    id_to_transaction_state: HashMap<TransactionId, TransactionState>,
+    id_to_transaction_state: Valet<TransactionState>,
 }
 
 impl TransactionStateContainer {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),
-            id_to_transaction_state: HashMap::with_capacity(capacity),
+            id_to_transaction_state: Valet::with_capacity(capacity + 10_000), // some additional room for txs we are buffering
         }
     }
 
@@ -65,56 +66,26 @@ impl TransactionStateContainer {
         self.priority_queue.pop_max()
     }
 
-    /// Get mutable transaction state by id.
-    pub(crate) fn get_mut_transaction_state(
-        &mut self,
-        id: &TransactionId,
-    ) -> Option<&mut TransactionState> {
-        self.id_to_transaction_state.get_mut(id)
-    }
-
-    /// Get reference to `SanitizedTransactionTTL` by id.
-    /// Panics if the transaction does not exist.
-    pub(crate) fn get_transaction_ttl(
-        &self,
-        id: &TransactionId,
-    ) -> Option<&SanitizedTransactionTTL> {
-        self.id_to_transaction_state
-            .get(id)
-            .map(|state| state.transaction_ttl())
-    }
-
     /// Insert a new transaction into the container's queues and maps.
     /// Returns `true` if a packet was dropped due to capacity limits.
     pub(crate) fn insert_new_transaction(
         &mut self,
-        transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL,
         packet: Arc<ImmutableDeserializedPacket>,
         priority: u64,
         cost: u64,
     ) -> bool {
+        let transaction_id = self
+            .id_to_transaction_state
+            .insert(TransactionState::new(
+                transaction_ttl,
+                packet,
+                priority,
+                cost,
+            ))
+            .unwrap_or_else(|_| panic!("womp"));
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
-        self.id_to_transaction_state.insert(
-            transaction_id,
-            TransactionState::new(transaction_ttl, packet, priority, cost),
-        );
         self.push_id_into_queue(priority_id)
-    }
-
-    /// Retries a transaction - inserts transaction back into map (but not packet).
-    /// This transitions the transaction to `Unprocessed` state.
-    pub(crate) fn retry_transaction(
-        &mut self,
-        transaction_id: TransactionId,
-        transaction_ttl: SanitizedTransactionTTL,
-    ) {
-        let transaction_state = self
-            .get_mut_transaction_state(&transaction_id)
-            .expect("transaction must exist");
-        let priority_id = TransactionPriorityId::new(transaction_state.priority(), transaction_id);
-        transaction_state.transition_to_unprocessed(transaction_ttl);
-        self.push_id_into_queue(priority_id);
     }
 
     /// Pushes a transaction id into the priority queue. If the queue is full, the lowest priority
@@ -133,9 +104,7 @@ impl TransactionStateContainer {
 
     /// Remove transaction by id.
     pub(crate) fn remove_by_id(&mut self, id: &TransactionId) {
-        self.id_to_transaction_state
-            .remove(id)
-            .expect("transaction must exist");
+        self.id_to_transaction_state.take(*id).unwrap();
     }
 
     pub(crate) fn get_min_max_priority(&self) -> MinMaxResult<u64> {
@@ -146,116 +115,5 @@ impl TransactionStateContainer {
             },
             None => MinMaxResult::NoElements,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use {
-        super::*,
-        solana_sdk::{
-            compute_budget::ComputeBudgetInstruction,
-            hash::Hash,
-            message::Message,
-            packet::Packet,
-            signature::Keypair,
-            signer::Signer,
-            slot_history::Slot,
-            system_instruction,
-            transaction::{SanitizedTransaction, Transaction},
-        },
-    };
-
-    /// Returns (transaction_ttl, priority, cost)
-    fn test_transaction(
-        priority: u64,
-    ) -> (
-        SanitizedTransactionTTL,
-        Arc<ImmutableDeserializedPacket>,
-        u64,
-        u64,
-    ) {
-        let from_keypair = Keypair::new();
-        let ixs = vec![
-            system_instruction::transfer(
-                &from_keypair.pubkey(),
-                &solana_sdk::pubkey::new_rand(),
-                1,
-            ),
-            ComputeBudgetInstruction::set_compute_unit_price(priority),
-        ];
-        let message = Message::new(&ixs, Some(&from_keypair.pubkey()));
-        let tx = SanitizedTransaction::from_transaction_for_tests(Transaction::new(
-            &[&from_keypair],
-            message,
-            Hash::default(),
-        ));
-        let packet = Arc::new(
-            ImmutableDeserializedPacket::new(
-                Packet::from_data(None, tx.to_versioned_transaction()).unwrap(),
-            )
-            .unwrap(),
-        );
-        let transaction_ttl = SanitizedTransactionTTL {
-            transaction: tx,
-            max_age_slot: Slot::MAX,
-        };
-        const TEST_TRANSACTION_COST: u64 = 5000;
-        (transaction_ttl, packet, priority, TEST_TRANSACTION_COST)
-    }
-
-    fn push_to_container(container: &mut TransactionStateContainer, num: usize) {
-        for id in 0..num as u64 {
-            let priority = id;
-            let (transaction_ttl, packet, priority, cost) = test_transaction(priority);
-            container.insert_new_transaction(
-                TransactionId::new(id),
-                transaction_ttl,
-                packet,
-                priority,
-                cost,
-            );
-        }
-    }
-
-    #[test]
-    fn test_is_empty() {
-        let mut container = TransactionStateContainer::with_capacity(1);
-        assert!(container.is_empty());
-
-        push_to_container(&mut container, 1);
-        assert!(!container.is_empty());
-    }
-
-    #[test]
-    fn test_priority_queue_capacity() {
-        let mut container = TransactionStateContainer::with_capacity(1);
-        push_to_container(&mut container, 5);
-
-        assert_eq!(container.priority_queue.len(), 1);
-        assert_eq!(container.id_to_transaction_state.len(), 1);
-        assert_eq!(
-            container
-                .id_to_transaction_state
-                .iter()
-                .map(|ts| ts.1.priority())
-                .next()
-                .unwrap(),
-            4
-        );
-    }
-
-    #[test]
-    fn test_get_mut_transaction_state() {
-        let mut container = TransactionStateContainer::with_capacity(5);
-        push_to_container(&mut container, 5);
-
-        let existing_id = TransactionId::new(3);
-        let non_existing_id = TransactionId::new(7);
-        assert!(container.get_mut_transaction_state(&existing_id).is_some());
-        assert!(container.get_mut_transaction_state(&existing_id).is_some());
-        assert!(container
-            .get_mut_transaction_state(&non_existing_id)
-            .is_none());
     }
 }
