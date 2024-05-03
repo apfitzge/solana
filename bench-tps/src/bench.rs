@@ -1123,15 +1123,15 @@ pub fn generate_and_fund_keypairs<T: 'static + BenchTpsClient + Send + Sync + ?S
 
     info!("Creating {} keypairs...", keypair_count);
     let (mut keypairs, extra) = generate_keypairs(funding_key, keypair_count as u64);
-    fund_keypairs(
-        client,
-        funding_key,
-        &keypairs,
-        extra,
-        lamports_per_account,
-        skip_tx_account_data_size,
-        enable_padding,
-    )?;
+    // fund_keypairs(
+    //     client,
+    //     funding_key,
+    //     &keypairs,
+    //     extra,
+    //     lamports_per_account,
+    //     skip_tx_account_data_size,
+    //     enable_padding,
+    // )?;
 
     // 'generate_keypairs' generates extra keys to be able to have size-aligned funding batches for fund_keys.
     keypairs.truncate(keypair_count);
