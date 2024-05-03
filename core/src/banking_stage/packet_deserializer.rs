@@ -29,7 +29,7 @@ pub struct ReceivePacketResults {
 
 pub struct PacketDeserializer {
     /// Receiver for packet batches from sigverify stage
-    packet_batch_receiver: BankingPacketReceiver,
+    pub packet_batch_receiver: BankingPacketReceiver,
     /// Provides working bank for deserializer to check feature activation
     bank_forks: Arc<RwLock<BankForks>>,
 }

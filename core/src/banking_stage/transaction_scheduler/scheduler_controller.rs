@@ -147,7 +147,7 @@ impl SchedulerController {
                 if self.container.is_empty() {
                     MAX_PACKET_RECEIVE_TIME
                 } else {
-                    Duration::ZERO
+                    Duration::from_micros(5_000)
                 }
             }
             BufferedPacketsDecision::Forward
@@ -155,28 +155,58 @@ impl SchedulerController {
             | BufferedPacketsDecision::Hold => MAX_PACKET_RECEIVE_TIME,
         };
 
-        let (receive_result, receive_time_us) = measure_us!(self
+        let now = Instant::now();
+        let (maybe_message, mut recv_time_us) = measure_us!(self
             .packet_receiver
-            .receive_until(recv_timeout, remaining_queue_capacity));
+            .packet_batch_receiver
+            .recv_timeout(recv_timeout));
+
+        if let Ok(message) = maybe_message {
+            let (_, mut buffer_us) = measure_us!(self.buffer_packet_batch(message));
+
+            while now.elapsed() < recv_timeout {
+                let (maybe_message, inner_recv_us) =
+                    measure_us!(self.packet_receiver.packet_batch_receiver.try_recv());
+                recv_time_us += inner_recv_us;
+
+                if let Ok(message) = maybe_message {
+                    let (_, inner_buffer_time_us) = measure_us!(self.buffer_packet_batch(message));
+                    buffer_us += inner_buffer_time_us;
+                } else {
+                    break;
+                }
+            }
+
+            self.timing_metrics.update(|timing_metrics| {
+                saturating_add_assign!(timing_metrics.buffer_time_us, buffer_us);
+            });
+        }
 
         self.timing_metrics.update(|timing_metrics| {
-            saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
+            saturating_add_assign!(timing_metrics.receive_time_us, recv_time_us);
         });
 
-        match receive_result {
-            Ok((count, messages)) => {
-                self.count_metrics.update(|count_metrics| {
-                    saturating_add_assign!(count_metrics.num_received, count);
-                });
+        // let (receive_result, receive_time_us) =
+        //     measure_us!(self.packet_receiver.receive_until(recv_timeout, 100_000));
 
-                let (_, buffer_time_us) = measure_us!(self.buffer_packets(messages));
-                self.timing_metrics.update(|timing_metrics| {
-                    saturating_add_assign!(timing_metrics.buffer_time_us, buffer_time_us);
-                });
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return false,
-        }
+        // self.timing_metrics.update(|timing_metrics| {
+        //     saturating_add_assign!(timing_metrics.receive_time_us, receive_time_us);
+        // });
+
+        // match receive_result {
+        //     Ok((count, messages)) => {
+        //         self.count_metrics.update(|count_metrics| {
+        //             saturating_add_assign!(count_metrics.num_received, count);
+        //         });
+
+        //         let (_, buffer_time_us) = measure_us!(self.buffer_packets(messages));
+        //         self.timing_metrics.update(|timing_metrics| {
+        //             saturating_add_assign!(timing_metrics.buffer_time_us, buffer_time_us);
+        //         });
+        //     }
+        //     Err(RecvTimeoutError::Timeout) => {}
+        //     Err(RecvTimeoutError::Disconnected) => return false,
+        // }
 
         true
 
@@ -207,6 +237,25 @@ impl SchedulerController {
         // }
 
         // true
+    }
+
+    fn buffer_packet_batch(&mut self, message: BankingPacketBatch) {
+        let mut num_buffered = 0;
+        let mut num_dropped = 0;
+        for packet_batch in &message.0 {
+            for packet in packet_batch.into_iter() {
+                if self.container.insert_new_packet(packet) {
+                    num_buffered += 1;
+                } else {
+                    num_dropped += 1;
+                }
+            }
+        }
+
+        self.count_metrics.update(|count_metrics| {
+            saturating_add_assign!(count_metrics.num_buffered, num_buffered);
+            saturating_add_assign!(count_metrics.num_dropped_on_capacity, num_dropped);
+        });
     }
 
     fn buffer_packets(&mut self, messages: Vec<BankingPacketBatch>) {
