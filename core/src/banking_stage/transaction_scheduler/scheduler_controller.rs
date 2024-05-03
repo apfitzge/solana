@@ -10,16 +10,19 @@ use {
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
-    crate::{banking_stage::{
-        consume_worker::ConsumeWorkerMetrics,
-        consumer::Consumer,
-        decision_maker::{BufferedPacketsDecision, DecisionMaker},
-        forward_packet_batches_by_accounts::ForwardPacketBatchesByAccounts,
-        forwarder::Forwarder,
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
-        packet_deserializer::PacketDeserializer,
-        ForwardOption, TOTAL_BUFFERED_PACKETS,
-    }, banking_trace::BankingPacketBatch},
+    crate::{
+        banking_stage::{
+            consume_worker::ConsumeWorkerMetrics,
+            consumer::Consumer,
+            decision_maker::{BufferedPacketsDecision, DecisionMaker},
+            forward_packet_batches_by_accounts::ForwardPacketBatchesByAccounts,
+            forwarder::Forwarder,
+            immutable_deserialized_packet::ImmutableDeserializedPacket,
+            packet_deserializer::PacketDeserializer,
+            ForwardOption, TOTAL_BUFFERED_PACKETS,
+        },
+        banking_trace::BankingPacketBatch,
+    },
     crossbeam_channel::RecvTimeoutError,
     solana_cost_model::cost_model::CostModel,
     solana_measure::measure_us,
@@ -34,7 +37,9 @@ use {
     },
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
-        num, sync::{Arc, RwLock}, time::{Duration, Instant}
+        num,
+        sync::{Arc, RwLock},
+        time::{Duration, Instant},
     },
 };
 
@@ -164,12 +169,10 @@ impl SchedulerController {
                     saturating_add_assign!(count_metrics.num_received, count);
                 });
 
-                let (_, buffer_time_us) =
-                    measure_us!(self.buffer_packets(messages));
+                let (_, buffer_time_us) = measure_us!(self.buffer_packets(messages));
                 self.timing_metrics.update(|timing_metrics| {
                     saturating_add_assign!(timing_metrics.buffer_time_us, buffer_time_us);
                 });
-
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return false,
@@ -203,7 +206,7 @@ impl SchedulerController {
         //     Err(RecvTimeoutError::Disconnected) => return false,
         // }
 
-        true
+        // true
     }
 
     fn buffer_packets(&mut self, messages: Vec<BankingPacketBatch>) {
@@ -225,8 +228,6 @@ impl SchedulerController {
             saturating_add_assign!(count_metrics.num_buffered, num_buffered);
             saturating_add_assign!(count_metrics.num_dropped_on_capacity, num_dropped);
         });
-
-
 
         // // Convert to Arcs
         // let packets: Vec<_> = packets.into_iter().map(Arc::new).collect();

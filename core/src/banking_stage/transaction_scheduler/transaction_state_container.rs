@@ -130,7 +130,7 @@ impl TransactionStateContainer {
     /// Remove transaction by id.
     pub(crate) fn remove_by_id(&mut self, id: &TransactionId) {
         // release index - does not clear it out
-        self.id_to_transaction_state.release(*id).unwrap();
+        self.id_to_transaction_state.release(*id);
     }
 
     pub(crate) fn get_min_max_priority(&self) -> MinMaxResult<u64> {
