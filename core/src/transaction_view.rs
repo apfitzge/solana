@@ -3,7 +3,7 @@ use {
     solana_sdk::{
         hash::Hash,
         message::{MessageHeader, MESSAGE_VERSION_PREFIX},
-        packet::Packet,
+        packet::{Packet, PACKET_DATA_SIZE},
         pubkey::Pubkey,
         short_vec::decode_shortu16_len,
         signature::Signature,
@@ -18,6 +18,13 @@ pub enum TransactionVersion {
     V0 = 0,
 }
 
+pub enum TransactionStatus {
+    Uninitialized,
+    Raw,
+    Sanitized,
+    AddressResolved,
+}
+
 /// Stores the raw packet and information about the transaction
 /// that is stored in this packet.
 /// This importantly, does not do any heap allocations, and all
@@ -26,6 +33,8 @@ pub enum TransactionVersion {
 /// This view struct allows calling code to access information
 /// about the transaction without needing to do slow deserialization.
 pub struct TransactionView {
+    status: TransactionStatus,
+
     buffer: [u8; MAX_TRASACTION_SIZE],
     /// The packet length.
     packet_len: u16,
@@ -70,7 +79,30 @@ pub struct TransactionView {
 }
 
 impl TransactionView {
-    pub fn try_new(packet: &Packet) -> Option<Self> {
+    pub fn new() -> Self {
+        Self {
+            status: TransactionStatus::Uninitialized,
+            buffer: [0; MAX_TRASACTION_SIZE],
+            packet_len: 0,
+            signature_len: 0,
+            signature_offset: 0,
+            num_required_signatures: 0,
+            num_readonly_signed_accounts: 0,
+            num_readonly_unsigned_accounts: 0,
+            version: TransactionVersion::Legacy,
+            message_offset: 0,
+            static_accounts_len: 0,
+            static_accounts_offset: 0,
+            recent_blockhash_offset: 0,
+            instructions_len: 0,
+            instructions_offset: 0,
+            address_lookups_len: 0,
+            address_lookups_offset: 0,
+        }
+    }
+
+    /// Return None if the packet is not a transaction.
+    pub fn populate_from(&mut self, packet: &Packet) -> Option<()> {
         // Get the offsets of the packet data
         let PacketOffsets {
             sig_len: signature_len,
@@ -82,8 +114,7 @@ impl TransactionView {
 
         // Copy the packet data into the buffer
         let packet_len = packet.meta().size;
-        let mut buffer = [0u8; MAX_TRASACTION_SIZE];
-        buffer[..packet_len].copy_from_slice(packet.data(..)?);
+        self.buffer[..packet_len].copy_from_slice(packet.data(..)?);
 
         // Get the transaction version. Only need to load a single byte at the
         // start of the message.
@@ -183,25 +214,161 @@ impl TransactionView {
             }
         };
 
-        Some(Self {
-            buffer,
-            packet_len: packet_len as u16,
-            signature_len: signature_len as u16,
-            signature_offset: signature_offset as u16,
-            num_required_signatures,
-            num_readonly_signed_accounts,
-            num_readonly_unsigned_accounts,
-            version,
-            message_offset: message_offset as u16,
-            static_accounts_offset: static_accounts_offset as u16,
-            static_accounts_len: static_accounts_len as u16,
-            recent_blockhash_offset: recent_blockhash_offset as u16,
-            instructions_offset: instructions_offset as u16,
-            instructions_len: instructions_len as u16,
-            address_lookups_offset: address_lookups_offset as u16,
-            address_lookups_len: address_lookups_len as u16,
-        })
+        // Assign fields
+        self.status = TransactionStatus::Raw;
+        self.packet_len = packet_len as u16;
+        self.signature_len = signature_len as u16;
+        self.signature_offset = signature_offset as u16;
+        self.num_required_signatures = num_required_signatures;
+        self.num_readonly_signed_accounts = num_readonly_signed_accounts;
+        self.num_readonly_unsigned_accounts = num_readonly_unsigned_accounts;
+        self.version = version;
+        self.message_offset = message_offset as u16;
+        self.static_accounts_offset = static_accounts_offset as u16;
+        self.static_accounts_len = static_accounts_len as u16;
+        self.recent_blockhash_offset = recent_blockhash_offset as u16;
+        self.instructions_offset = instructions_offset as u16;
+        self.instructions_len = instructions_len as u16;
+        self.address_lookups_offset = address_lookups_offset as u16;
+        self.address_lookups_len = address_lookups_len as u16;
+
+        Some(())
     }
+
+    // pub fn try_new(packet: &Packet) -> Option<Self> {
+    //     // Get the offsets of the packet data
+    //     let PacketOffsets {
+    //         sig_len: signature_len,
+    //         sig_start: signature_offset,
+    //         msg_start: message_offset,
+    //         pubkey_start: _static_accounts_offset,
+    //         pubkey_len: _static_accounts_len,
+    //     } = do_get_packet_offsets(&packet, 0).ok()?;
+
+    //     // Copy the packet data into the buffer
+    //     let packet_len = packet.meta().size;
+    //     let mut buffer =
+    //         unsafe { core::mem::MaybeUninit::<[u8; MAX_TRASACTION_SIZE]>::uninit().assume_init() };
+    //     buffer[..packet_len].copy_from_slice(packet.data(..)?);
+
+    //     // Get the transaction version. Only need to load a single byte at the
+    //     // start of the message.
+    //     let message_prefix = *packet.data(message_offset as usize)?;
+    //     let (version, message_header_offset) = if message_prefix & MESSAGE_VERSION_PREFIX != 0 {
+    //         let version = message_prefix & !MESSAGE_VERSION_PREFIX;
+    //         match version {
+    //             0 => (TransactionVersion::V0, message_offset.checked_add(1)?),
+    //             _ => return None,
+    //         }
+    //     } else {
+    //         (TransactionVersion::Legacy, message_offset)
+    //     };
+
+    //     let mut current_offset = usize::try_from(message_header_offset).ok()?;
+
+    //     // Read message header.
+    //     let message_header_offset = current_offset;
+    //     let message_header_end =
+    //         message_header_offset.checked_add(core::mem::size_of::<MessageHeader>())?;
+    //     let message_header_bytes = packet.data(message_header_offset..message_header_end)?;
+    //     let num_required_signatures = message_header_bytes[0];
+    //     let num_readonly_signed_accounts = message_header_bytes[1];
+    //     let num_readonly_unsigned_accounts = message_header_bytes[2];
+    //     current_offset = current_offset.checked_add(core::mem::size_of::<MessageHeader>())?;
+
+    //     // Read the number of accounts - extraordinarily confusing serialization format.
+    //     let (static_accounts_len, bytes_read) =
+    //         decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+    //     current_offset = current_offset.checked_add(bytes_read)?;
+    //     let static_accounts_offset = current_offset;
+    //     current_offset = static_accounts_offset.checked_add(
+    //         usize::try_from(static_accounts_len).ok()? * core::mem::size_of::<Pubkey>(),
+    //     )?;
+
+    //     // Read the recent blockhash.
+    //     let recent_blockhash_offset = current_offset;
+    //     current_offset = recent_blockhash_offset.checked_add(core::mem::size_of::<Hash>())?;
+
+    //     // Read the instructions.
+    //     let (instructions_len, bytes) =
+    //         decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+    //     current_offset = current_offset.checked_add(bytes)?;
+    //     let instructions_offset = current_offset;
+
+    //     // The instructions do not have a fixed size, so we actually must iterate over them.
+    //     for _ in 0..instructions_len {
+    //         // u8 for program index
+    //         current_offset = current_offset.checked_add(core::mem::size_of::<u8>())?;
+    //         // u16 for accounts len
+    //         let (accounts_indexes_len, bytes) =
+    //             decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+    //         current_offset = current_offset.checked_add(bytes)?;
+    //         let accounts_indexes_offset = current_offset;
+    //         current_offset = accounts_indexes_offset.checked_add(
+    //             usize::from(accounts_indexes_len).checked_mul(core::mem::size_of::<u8>())?,
+    //         )?;
+    //         // u16 for data len
+    //         let (data_len, bytes) = decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+    //         current_offset = current_offset.checked_add(bytes)?;
+    //         current_offset = current_offset.checked_add(usize::from(data_len))?;
+    //     }
+
+    //     // If the transaction is a V0 transaction, there may be address lookups
+    //     let (address_lookups_len, address_lookups_offset) = match version {
+    //         TransactionVersion::Legacy => (0, 0),
+    //         TransactionVersion::V0 => {
+    //             // After the instructions, there are address lookup entries.
+    //             // We must iterate over these as well since the size is not fixed.
+    //             let (address_lookups_len, bytes) =
+    //                 decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+    //             current_offset = current_offset.checked_add(bytes)?;
+    //             let address_lookups_offset = current_offset;
+
+    //             for _ in 0..address_lookups_len {
+    //                 // Pubkey for address
+    //                 current_offset = current_offset.checked_add(core::mem::size_of::<Pubkey>())?;
+    //                 // u16 for length of writable_indexes
+    //                 let (writable_indexes_len, bytes) =
+    //                     decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+    //                 current_offset = current_offset.checked_add(bytes)?;
+    //                 let writable_indexes_offset = current_offset;
+    //                 current_offset = writable_indexes_offset.checked_add(
+    //                     usize::from(writable_indexes_len).checked_mul(core::mem::size_of::<u8>())?,
+    //                 )?;
+
+    //                 // u16 for length of readonly_indexes
+    //                 let (readonly_indexes_len, bytes) =
+    //                     decode_shortu16_len(&packet.data(current_offset..)?).ok()?;
+    //                 current_offset = current_offset.checked_add(bytes)?;
+    //                 let readonly_indexes_offset = current_offset;
+    //                 current_offset = readonly_indexes_offset.checked_add(
+    //                     usize::from(readonly_indexes_len).checked_mul(core::mem::size_of::<u8>())?,
+    //                 )?;
+    //             }
+    //             (address_lookups_len, address_lookups_offset)
+    //         }
+    //     };
+
+    //     Some(Self {
+    //         status: TransactionStatus::Raw,
+    //         buffer,
+    //         packet_len: packet_len as u16,
+    //         signature_len: signature_len as u16,
+    //         signature_offset: signature_offset as u16,
+    //         num_required_signatures,
+    //         num_readonly_signed_accounts,
+    //         num_readonly_unsigned_accounts,
+    //         version,
+    //         message_offset: message_offset as u16,
+    //         static_accounts_offset: static_accounts_offset as u16,
+    //         static_accounts_len: static_accounts_len as u16,
+    //         recent_blockhash_offset: recent_blockhash_offset as u16,
+    //         instructions_offset: instructions_offset as u16,
+    //         instructions_len: instructions_len as u16,
+    //         address_lookups_offset: address_lookups_offset as u16,
+    //         address_lookups_len: address_lookups_len as u16,
+    //     })
+    // }
 
     pub fn signatures(&self) -> &[Signature] {
         let start = self.signature_offset as usize;
