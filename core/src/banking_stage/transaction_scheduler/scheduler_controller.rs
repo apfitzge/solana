@@ -340,27 +340,27 @@ impl SchedulerController {
             //     post_sanitization_count.saturating_sub(post_lock_validation_count);
             // let num_dropped_on_transaction_checks =
             //     post_lock_validation_count.saturating_sub(post_transaction_check_count);
-
-            self.count_metrics.update(|count_metrics| {
-                saturating_add_assign!(
-                    count_metrics.num_dropped_on_capacity,
-                    num_dropped_on_capacity
-                );
-                saturating_add_assign!(count_metrics.num_buffered, num_buffered);
-                // saturating_add_assign!(
-                //     count_metrics.num_dropped_on_sanitization,
-                //     num_dropped_on_sanitization
-                // );
-                // saturating_add_assign!(
-                //     count_metrics.num_dropped_on_validate_locks,
-                //     num_dropped_on_lock_validation
-                // );
-                // saturating_add_assign!(
-                //     count_metrics.num_dropped_on_receive_transaction_checks,
-                //     num_dropped_on_transaction_checks
-                // );
-            });
         }
+
+        self.count_metrics.update(|count_metrics| {
+            saturating_add_assign!(
+                count_metrics.num_dropped_on_capacity,
+                num_dropped_on_capacity
+            );
+            saturating_add_assign!(count_metrics.num_buffered, num_buffered);
+            // saturating_add_assign!(
+            //     count_metrics.num_dropped_on_sanitization,
+            //     num_dropped_on_sanitization
+            // );
+            // saturating_add_assign!(
+            //     count_metrics.num_dropped_on_validate_locks,
+            //     num_dropped_on_lock_validation
+            // );
+            // saturating_add_assign!(
+            //     count_metrics.num_dropped_on_receive_transaction_checks,
+            //     num_dropped_on_transaction_checks
+            // );
+        });
     }
 
     /// Calculate priority and cost for a transaction:
