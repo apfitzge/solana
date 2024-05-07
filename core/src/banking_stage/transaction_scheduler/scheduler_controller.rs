@@ -219,7 +219,7 @@ impl SchedulerController {
         let vote_only = bank.vote_only_bank();
 
         const CHUNK_SIZE: usize = 128;
-        let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
+        // let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
         let mut error_counts = TransactionErrorMetrics::default();
         let mut num_dropped_on_capacity: usize = 0;
         let mut num_buffered: usize = 0;
