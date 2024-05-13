@@ -1,4 +1,5 @@
 use {
+    crate::runtime_message::RuntimeMessage,
     serde::{Deserialize, Serialize},
     solana_measure::measure::Measure,
     solana_program_runtime::{
@@ -7,7 +8,6 @@ use {
     },
     solana_sdk::{
         account::WritableAccount,
-        message::SanitizedMessage,
         precompiles::is_precompile,
         saturating_add_assign,
         sysvar::instructions,
@@ -35,13 +35,13 @@ impl MessageProcessor {
     /// the call does not violate the bank's accounting rules.
     /// The accounts are committed back to the bank only if every instruction succeeds.
     pub fn process_message(
-        message: &SanitizedMessage,
+        message: &impl RuntimeMessage,
         program_indices: &[Vec<IndexOfAccount>],
         invoke_context: &mut InvokeContext,
         timings: &mut ExecuteTimings,
         accumulated_consumed_units: &mut u64,
     ) -> Result<(), TransactionError> {
-        debug_assert_eq!(program_indices.len(), message.instructions().len());
+        debug_assert_eq!(program_indices.len(), message.num_instructions());
         for (instruction_index, ((program_id, instruction), program_indices)) in message
             .program_instructions_iter()
             .zip(program_indices.iter())
@@ -98,7 +98,7 @@ impl MessageProcessor {
                         instruction_context.configure(
                             program_indices,
                             &instruction_accounts,
-                            &instruction.data,
+                            instruction.data,
                         );
                     })
                     .and_then(|_| {
@@ -109,7 +109,7 @@ impl MessageProcessor {
                 let time = Measure::start("execute_instruction");
                 let mut compute_units_consumed = 0;
                 let result = invoke_context.process_instruction(
-                    &instruction.data,
+                    instruction.data,
                     &instruction_accounts,
                     program_indices,
                     &mut compute_units_consumed,
@@ -158,7 +158,7 @@ mod tests {
             feature_set::FeatureSet,
             hash::Hash,
             instruction::{AccountMeta, Instruction, InstructionError},
-            message::{AccountKeys, Message},
+            message::{AccountKeys, Message, SanitizedMessage},
             native_loader::{self, create_loadable_account_for_test},
             pubkey::Pubkey,
             rent::Rent,

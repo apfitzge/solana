@@ -8,6 +8,7 @@ pub mod message_processor;
 pub mod nonce_info;
 pub mod program_loader;
 pub mod runtime_config;
+pub mod runtime_message;
 pub mod transaction_account_state_info;
 pub mod transaction_error_metrics;
 pub mod transaction_processing_callback;
