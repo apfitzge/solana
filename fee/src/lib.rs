@@ -1,6 +1,6 @@
 //! Fee structures.
 
-use solana_sdk::message::SanitizedMessage;
+use solana_signed_message::Message;
 
 /// A fee and its associated compute unit limit
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
@@ -110,7 +110,7 @@ impl FeeStructure {
     /// Calculate fee for `SanitizedMessage`
     pub fn calculate_fee(
         &self,
-        message: &SanitizedMessage,
+        message: &impl Message,
         lamports_per_signature: u64,
         budget_limits: &FeeBudgetLimits,
         include_loaded_account_data_size_in_fee: bool,
@@ -131,7 +131,7 @@ impl FeeStructure {
     /// Calculate fee details for `SanitizedMessage`
     pub fn calculate_fee_details(
         &self,
-        message: &SanitizedMessage,
+        message: &impl Message,
         budget_limits: &FeeBudgetLimits,
         include_loaded_account_data_size_in_fee: bool,
     ) -> FeeDetails {

@@ -130,7 +130,7 @@ pub(crate) fn load_accounts<CB: TransactionProcessingCallback>(
                 let message = tx.message();
                 let fee = if let Some(lamports_per_signature) = lamports_per_signature {
                     fee_structure.calculate_fee(
-                        message,
+                        tx,
                         *lamports_per_signature,
                         &process_compute_budget_instructions(message.program_instructions_iter())
                             .unwrap_or_default()

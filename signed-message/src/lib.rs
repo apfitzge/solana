@@ -1,14 +1,14 @@
 use solana_sdk::{
-    instruction::CompiledInstruction, pubkey::Pubkey, signature::Signature,
-    transaction::SanitizedTransaction,
+    instruction::CompiledInstruction, message::SanitizedMessage, pubkey::Pubkey,
+    signature::Signature, transaction::SanitizedTransaction,
 };
 
-pub trait SignedMessage {
-    /// Get the first signature of the message.
-    fn signature(&self) -> &Signature;
+pub trait Message {
+    /// Return the number of signatures in the message.
+    fn num_signatures(&self) -> u64;
 
-    /// Get all the signatures of the message.
-    fn signatures(&self) -> &[Signature];
+    /// Return the number of writeable accounts in the message.
+    fn num_write_locks(&self) -> u64;
 
     /// Return the number of instructions in the message.
     fn num_instructions(&self) -> usize;
@@ -27,6 +27,14 @@ pub trait SignedMessage {
     fn is_signer(&self, index: usize) -> bool;
 }
 
+pub trait SignedMessage: Message {
+    /// Get the first signature of the message.
+    fn signature(&self) -> &Signature;
+
+    /// Get all the signatures of the message.
+    fn signatures(&self) -> &[Signature];
+}
+
 /// A non-owning version of [`CompiledInstruction`] that references
 /// slices of account indexes and data
 ///
@@ -42,35 +50,74 @@ pub struct Instruction<'a> {
 }
 
 // Implement for the "reference" `SanitizedMessage` type.
-impl SignedMessage for SanitizedTransaction {
-    fn signature(&self) -> &Signature {
-        SanitizedTransaction::signature(self)
+impl Message for SanitizedMessage {
+    fn num_signatures(&self) -> u64 {
+        SanitizedMessage::num_signatures(self)
     }
 
-    fn signatures(&self) -> &[Signature] {
-        SanitizedTransaction::signatures(self)
+    fn num_write_locks(&self) -> u64 {
+        SanitizedMessage::num_write_locks(self)
     }
 
     fn num_instructions(&self) -> usize {
-        self.message().instructions().len()
+        self.instructions().len()
     }
 
     fn instructions_iter(&self) -> impl Iterator<Item = Instruction> {
-        self.message().instructions().iter().map(Instruction::from)
+        self.instructions().iter().map(Instruction::from)
     }
 
     fn program_instructions_iter(&self) -> impl Iterator<Item = (&Pubkey, Instruction)> {
-        self.message()
-            .program_instructions_iter()
+        SanitizedMessage::program_instructions_iter(self)
             .map(|(pubkey, ix)| (pubkey, Instruction::from(ix)))
     }
 
     fn is_writable(&self, index: usize) -> bool {
-        self.message().is_writable(index)
+        SanitizedMessage::is_writable(self, index)
     }
 
     fn is_signer(&self, index: usize) -> bool {
-        self.message().is_signer(index)
+        SanitizedMessage::is_signer(self, index)
+    }
+}
+
+impl Message for SanitizedTransaction {
+    fn num_signatures(&self) -> u64 {
+        Message::num_signatures(self.message())
+    }
+
+    fn num_write_locks(&self) -> u64 {
+        Message::num_write_locks(self.message())
+    }
+
+    fn num_instructions(&self) -> usize {
+        Message::num_instructions(self.message())
+    }
+
+    fn instructions_iter(&self) -> impl Iterator<Item = Instruction> {
+        Message::instructions_iter(self.message())
+    }
+
+    fn program_instructions_iter(&self) -> impl Iterator<Item = (&Pubkey, Instruction)> {
+        Message::program_instructions_iter(self.message())
+    }
+
+    fn is_writable(&self, index: usize) -> bool {
+        Message::is_writable(self.message(), index)
+    }
+
+    fn is_signer(&self, index: usize) -> bool {
+        Message::is_signer(self.message(), index)
+    }
+}
+
+impl SignedMessage for SanitizedTransaction {
+    fn signature(&self) -> &Signature {
+        self.signatures().first().unwrap()
+    }
+
+    fn signatures(&self) -> &[Signature] {
+        self.signatures()
     }
 }
 

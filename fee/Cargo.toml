@@ -10,4 +10,4 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
-solana-sdk = { workspace = true }
+solana-signed-message = { workspace = true }

@@ -1,5 +1,5 @@
 [package]
-name = "agave-signed-message"
+name = "solana-signed-message"
 documentation = "https://docs.rs/agave-signed-message"
 version = { workspace = true }
 authors = { workspace = true }
