@@ -8,6 +8,7 @@
 use {
     crate::{block_cost_limits::*, transaction_cost::*},
     log::*,
+    solana_fee::FeeStructure,
     solana_program_runtime::{
         compute_budget::DEFAULT_HEAP_COST,
         compute_budget_processor::{
@@ -19,7 +20,6 @@ use {
         borsh1::try_from_slice_unchecked,
         compute_budget::{self, ComputeBudgetInstruction},
         feature_set::{self, include_loaded_accounts_data_size_in_fee_calculation, FeatureSet},
-        fee::FeeStructure,
         instruction::CompiledInstruction,
         program_utils::limited_deserialize,
         pubkey::Pubkey,

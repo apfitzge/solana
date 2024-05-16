@@ -21,6 +21,7 @@ pub struct FeeBudgetLimits {
 }
 
 /// Information used to calculate fees
+#[deprecated]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FeeStructure {
     /// lamports per signature
@@ -66,9 +67,12 @@ impl FeeDetails {
     }
 }
 
+#[allow(deprecated)]
 pub const ACCOUNT_DATA_COST_PAGE_SIZE: u64 = 32_u64.saturating_mul(1024);
 
+#[allow(deprecated)]
 impl FeeStructure {
+    #[allow(deprecated)]
     pub fn new(
         sol_per_signature: f64,
         sol_per_write_lock: f64,
@@ -88,6 +92,7 @@ impl FeeStructure {
         }
     }
 
+    #[allow(deprecated)]
     pub fn get_max_fee(&self, num_signatures: u64, num_write_locks: u64) -> u64 {
         num_signatures
             .saturating_mul(self.lamports_per_signature)
@@ -100,6 +105,7 @@ impl FeeStructure {
             )
     }
 
+    #[allow(deprecated)]
     pub fn calculate_memory_usage_cost(
         loaded_accounts_data_size_limit: usize,
         heap_cost: u64,
@@ -112,12 +118,14 @@ impl FeeStructure {
 
     /// Backward compatibility - lamports_per_signature == 0 means to clear
     /// transaction fee to zero
+    #[allow(deprecated)]
     pub fn to_clear_transaction_fee(lamports_per_signature: u64) -> bool {
         lamports_per_signature == 0
     }
 
     /// Calculate fee for `SanitizedMessage`
     #[cfg(not(target_os = "solana"))]
+    #[allow(deprecated)]
     pub fn calculate_fee(
         &self,
         message: &SanitizedMessage,
@@ -140,6 +148,7 @@ impl FeeStructure {
 
     /// Calculate fee details for `SanitizedMessage`
     #[cfg(not(target_os = "solana"))]
+    #[allow(deprecated)]
     pub fn calculate_fee_details(
         &self,
         message: &SanitizedMessage,
@@ -186,6 +195,7 @@ impl FeeStructure {
     }
 }
 
+#[allow(deprecated)]
 impl Default for FeeStructure {
     fn default() -> Self {
         Self::new(0.000005, 0.0, vec![(1_400_000, 0.0)])
@@ -193,6 +203,7 @@ impl Default for FeeStructure {
 }
 
 #[cfg(RUSTC_WITH_SPECIALIZATION)]
+#[allow(deprecated)]
 impl ::solana_frozen_abi::abi_example::AbiExample for FeeStructure {
     fn example() -> Self {
         FeeStructure::default()
@@ -204,6 +215,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn test_calculate_memory_usage_cost() {
         let heap_cost = 99;
         const K: usize = 1024;
@@ -236,6 +248,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_total_fee_rounding() {
         // round large `f64` can lost precision, see feature gate:
         // "Removing unwanted rounding in fee calculation #34982"

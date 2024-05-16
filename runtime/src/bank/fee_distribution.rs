@@ -2,13 +2,13 @@ use {
     super::Bank,
     crate::bank::CollectorFeeDetails,
     log::{debug, warn},
+    solana_fee::FeeBudgetLimits,
     solana_sdk::{
         account::{ReadableAccount, WritableAccount},
         feature_set::{
             include_loaded_accounts_data_size_in_fee_calculation,
             remove_rounding_in_fee_calculation, reward_full_priority_fee,
         },
-        fee::FeeBudgetLimits,
         pubkey::Pubkey,
         reward_info::RewardInfo,
         reward_type::RewardType,

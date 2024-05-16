@@ -3,11 +3,11 @@ use {
         compute_budget::DEFAULT_HEAP_COST,
         prioritization_fee::{PrioritizationFeeDetails, PrioritizationFeeType},
     },
+    solana_fee::FeeBudgetLimits,
     solana_sdk::{
         borsh1::try_from_slice_unchecked,
         compute_budget::{self, ComputeBudgetInstruction},
         entrypoint::HEAP_LENGTH as MIN_HEAP_FRAME_BYTES,
-        fee::FeeBudgetLimits,
         instruction::{CompiledInstruction, InstructionError},
         pubkey::Pubkey,
         transaction::TransactionError,

@@ -7,6 +7,7 @@ use {
         transaction_processing_callback::TransactionProcessingCallback,
     },
     itertools::Itertools,
+    solana_fee::FeeStructure,
     solana_program_runtime::{
         compute_budget_processor::process_compute_budget_instructions,
         loaded_programs::{ProgramCacheEntry, ProgramCacheForTxBatch},
@@ -17,7 +18,6 @@ use {
             self, include_loaded_accounts_data_size_in_fee_calculation,
             remove_rounding_in_fee_calculation,
         },
-        fee::FeeStructure,
         message::SanitizedMessage,
         native_loader,
         nonce::State as NonceState,
@@ -462,6 +462,7 @@ mod tests {
             transaction_processing_callback::TransactionProcessingCallback,
         },
         nonce::state::Versions as NonceVersions,
+        solana_fee::FeeStructure,
         solana_program_runtime::{
             compute_budget::ComputeBudget,
             compute_budget_processor,
@@ -474,7 +475,6 @@ mod tests {
             compute_budget::ComputeBudgetInstruction,
             epoch_schedule::EpochSchedule,
             feature_set::FeatureSet,
-            fee::FeeStructure,
             hash::Hash,
             instruction::CompiledInstruction,
             message::{

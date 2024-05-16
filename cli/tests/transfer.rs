@@ -9,11 +9,11 @@ use {
     },
     solana_cli_output::{parse_sign_only_reply_string, OutputFormat},
     solana_faucet::faucet::run_local_faucet,
+    solana_fee::FeeStructure,
     solana_rpc_client::rpc_client::RpcClient,
     solana_rpc_client_nonce_utils::blockhash_query::{self, BlockhashQuery},
     solana_sdk::{
         commitment_config::CommitmentConfig,
-        fee::FeeStructure,
         native_token::sol_to_lamports,
         nonce::State as NonceState,
         pubkey::Pubkey,

@@ -23,7 +23,14 @@ humantime = { workspace = true }
 log = { workspace = true }
 num-traits = { workspace = true }
 pretty-hex = { workspace = true }
-reqwest = { workspace = true, features = ["blocking", "brotli", "deflate", "gzip", "rustls-tls", "json"] }
+reqwest = { workspace = true, features = [
+    "blocking",
+    "brotli",
+    "deflate",
+    "gzip",
+    "rustls-tls",
+    "json",
+] }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
@@ -36,6 +43,7 @@ solana-cli-output = { workspace = true }
 solana-client = { workspace = true }
 solana-config-program = { workspace = true }
 solana-faucet = { workspace = true }
+solana-fee = { workspace = true }
 solana-loader-v4-program = { workspace = true }
 solana-logger = { workspace = true }
 solana-program-runtime = { workspace = true }

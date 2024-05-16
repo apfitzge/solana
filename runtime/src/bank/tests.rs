@@ -33,6 +33,7 @@ use {
         accounts_partition::{self, PartitionIndex, RentPayingAccountsByPartition},
         ancestors::Ancestors,
     },
+    solana_fee::FeeStructure,
     solana_inline_spl::token,
     solana_logger,
     solana_program_runtime::{
@@ -63,7 +64,6 @@ use {
         epoch_schedule::{EpochSchedule, MINIMUM_SLOTS_PER_EPOCH},
         feature::{self, Feature},
         feature_set::{self, FeatureSet},
-        fee::FeeStructure,
         fee_calculator::FeeRateGovernor,
         genesis_config::{ClusterType, GenesisConfig},
         hash::{hash, Hash},
