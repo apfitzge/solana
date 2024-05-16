@@ -189,6 +189,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-signed-message"
+version = "2.0.0"
+dependencies = [
+ "solana-sdk",
+]
+
+[[package]]
 name = "agave-validator"
 version = "2.0.0"
 dependencies = [
