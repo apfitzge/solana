@@ -35,13 +35,12 @@ use {
         epoch_schedule::EpochSchedule,
         inner_instruction::{InnerInstruction, InnerInstructionsList},
         instruction::{CompiledInstruction, TRANSACTION_LEVEL_STACK_HEIGHT},
-        message::SanitizedMessage,
         pubkey::Pubkey,
         saturating_add_assign,
-        transaction::{SanitizedTransaction, TransactionError},
+        transaction::TransactionError,
         transaction_context::{ExecutionRecord, TransactionContext},
     },
-    solana_signed_message::Message,
+    solana_signed_message::{Message, SignedMessage},
     std::{
         cell::RefCell,
         collections::{hash_map::Entry, HashMap, HashSet},
@@ -179,7 +178,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
     pub fn load_and_execute_sanitized_transactions<CB: TransactionProcessingCallback>(
         &self,
         callbacks: &CB,
-        sanitized_txs: &[SanitizedTransaction],
+        sanitized_txs: &[impl SignedMessage],
         check_results: &mut [TransactionCheckResult],
         error_counters: &mut TransactionErrorMetrics,
         recording_config: ExecutionRecordingConfig,
@@ -334,7 +333,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
     /// to their usage counters, for the transactions with a valid blockhash or nonce.
     fn filter_executable_program_accounts<CB: TransactionProcessingCallback>(
         callbacks: &CB,
-        txs: &[SanitizedTransaction],
+        txs: &[impl Message],
         check_results: &mut [TransactionCheckResult],
         program_owners: &[Pubkey],
     ) -> HashMap<Pubkey, u64> {
@@ -342,8 +341,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         check_results.iter_mut().zip(txs).for_each(|etx| {
             if let ((Ok(()), _nonce, lamports_per_signature), tx) = etx {
                 if lamports_per_signature.is_some() {
-                    tx.message()
-                        .account_keys()
+                    tx.account_keys()
                         .iter()
                         .for_each(|key| match result.entry(*key) {
                             Entry::Occupied(mut entry) => {
@@ -469,7 +467,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
     fn execute_loaded_transaction<CB: TransactionProcessingCallback>(
         &self,
         callback: &CB,
-        tx: &SanitizedTransaction,
+        tx: &impl SignedMessage,
         loaded_transaction: &mut LoadedTransaction,
         compute_budget: ComputeBudget,
         durable_nonce_fee: Option<DurableNonceFee>,
@@ -483,7 +481,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
 
         fn transaction_accounts_lamports_sum(
             accounts: &[(Pubkey, AccountSharedData)],
-            message: &SanitizedMessage,
+            message: &impl Message,
         ) -> Option<u128> {
             let mut lamports_sum = 0u128;
             for i in 0..message.account_keys().len() {
@@ -494,7 +492,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         }
 
         let lamports_before_tx =
-            transaction_accounts_lamports_sum(&transaction_accounts, tx.message()).unwrap_or(0);
+            transaction_accounts_lamports_sum(&transaction_accounts, tx).unwrap_or(0);
 
         let mut transaction_context = TransactionContext::new(
             transaction_accounts,
@@ -508,7 +506,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         let pre_account_state_info = TransactionAccountStateInfo::new(
             &callback.get_rent_collector().rent,
             &transaction_context,
-            tx.message(),
+            tx,
         );
 
         let log_collector = if recording_config.enable_log_recording {
@@ -550,7 +548,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
 
         let mut process_message_time = Measure::start("process_message_time");
         let process_result = MessageProcessor::process_message(
-            tx.message(),
+            tx,
             &loaded_transaction.program_indices,
             &mut invoke_context,
             timings,
@@ -570,7 +568,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 let post_account_state_info = TransactionAccountStateInfo::new(
                     &callback.get_rent_collector().rent,
                     &transaction_context,
-                    tx.message(),
+                    tx,
                 );
                 TransactionAccountStateInfo::verify_changes(
                     &pre_account_state_info,
@@ -618,7 +616,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         } = transaction_context.into();
 
         if status.is_ok()
-            && transaction_accounts_lamports_sum(&accounts, tx.message())
+            && transaction_accounts_lamports_sum(&accounts, tx)
                 .filter(|lamports_after_tx| lamports_before_tx == *lamports_after_tx)
                 .is_none()
         {
@@ -757,7 +755,7 @@ mod tests {
             feature_set::FeatureSet,
             fee_calculator::FeeCalculator,
             hash::Hash,
-            message::{LegacyMessage, Message, MessageHeader},
+            message::{LegacyMessage, Message, MessageHeader, SanitizedMessage},
             rent_collector::RentCollector,
             rent_debits::RentDebits,
             reserved_account_keys::ReservedAccountKeys,
