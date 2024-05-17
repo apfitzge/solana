@@ -159,6 +159,7 @@ use {
         },
         transaction_context::{TransactionAccount, TransactionReturnData},
     },
+    solana_signed_message::Message,
     solana_stake_program::{
         points::{InflationPointCalculationEvent, PointValue},
         stake_state::StakeStateV2,
@@ -3126,7 +3127,7 @@ impl Bank {
 
     pub fn get_fee_for_message_with_lamports_per_signature(
         &self,
-        message: &SanitizedMessage,
+        message: &impl Message,
         lamports_per_signature: u64,
     ) -> u64 {
         self.fee_structure().calculate_fee(
@@ -3996,7 +3997,7 @@ impl Bank {
                 if !FeeStructure::to_clear_transaction_fee(lamports_per_signature) {
                     let fee_details = self.fee_structure().calculate_fee_details(
                         message,
-                        &process_compute_budget_instructions(message.program_instructions_iter())
+                        &process_compute_budget_instructions(tx.program_instructions_iter())
                             .unwrap_or_default()
                             .into(),
                         self.feature_set

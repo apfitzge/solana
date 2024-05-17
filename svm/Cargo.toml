@@ -22,6 +22,7 @@ solana-measure = { workspace = true }
 solana-metrics = { workspace = true }
 solana-program-runtime = { workspace = true }
 solana-sdk = { workspace = true }
+solana-signed-message = { workspace = true }
 solana-system-program = { workspace = true }
 
 [lib]

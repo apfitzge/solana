@@ -30,6 +30,7 @@ use {
         transaction::{self, Result, SanitizedTransaction, TransactionError},
         transaction_context::{IndexOfAccount, TransactionAccount},
     },
+    solana_signed_message::Message,
     solana_system_program::{get_system_account_kind, SystemAccountKind},
     std::num::NonZeroUsize,
 };
@@ -132,7 +133,7 @@ pub(crate) fn load_accounts<CB: TransactionProcessingCallback>(
                     fee_structure.calculate_fee(
                         tx,
                         *lamports_per_signature,
-                        &process_compute_budget_instructions(message.program_instructions_iter())
+                        &process_compute_budget_instructions(tx.program_instructions_iter())
                             .unwrap_or_default()
                             .into(),
                         feature_set
@@ -399,7 +400,7 @@ fn get_requested_loaded_accounts_data_size_limit(
     sanitized_message: &SanitizedMessage,
 ) -> Result<Option<NonZeroUsize>> {
     let compute_budget_limits =
-        process_compute_budget_instructions(sanitized_message.program_instructions_iter())
+        process_compute_budget_instructions(Message::program_instructions_iter(sanitized_message))
             .unwrap_or_default();
     // sanitize against setting size limit to zero
     NonZeroUsize::new(
@@ -479,7 +480,7 @@ mod tests {
             instruction::CompiledInstruction,
             message::{
                 v0::{LoadedAddresses, LoadedMessage},
-                LegacyMessage, Message, MessageHeader, SanitizedMessage,
+                LegacyMessage, MessageHeader, SanitizedMessage,
             },
             native_loader,
             native_token::sol_to_lamports,
@@ -567,12 +568,12 @@ mod tests {
         features
     }
 
-    fn new_sanitized_message(message: Message) -> SanitizedMessage {
+    fn new_sanitized_message(message: solana_sdk::message::Message) -> SanitizedMessage {
         SanitizedMessage::try_from_legacy_message(message, &ReservedAccountKeys::empty_key_set())
             .unwrap()
     }
 
-    fn new_unchecked_sanitized_message(message: Message) -> SanitizedMessage {
+    fn new_unchecked_sanitized_message(message: solana_sdk::message::Message) -> SanitizedMessage {
         SanitizedMessage::Legacy(LegacyMessage::new(
             message,
             &ReservedAccountKeys::empty_key_set(),
@@ -702,7 +703,7 @@ mod tests {
         let fee = FeeStructure::default().calculate_fee(
             &message,
             lamports_per_signature,
-            &process_compute_budget_instructions(message.program_instructions_iter())
+            &process_compute_budget_instructions(Message::program_instructions_iter(&message))
                 .unwrap_or_default()
                 .into(),
             false,
@@ -1152,7 +1153,7 @@ mod tests {
             let payer_keypair = Keypair::new();
             let tx = SanitizedTransaction::from_transaction_for_tests(Transaction::new(
                 &[&payer_keypair],
-                Message::new(instructions, Some(&payer_keypair.pubkey())),
+                solana_sdk::message::Message::new(instructions, Some(&payer_keypair.pubkey())),
                 Hash::default(),
             ));
             assert_eq!(
@@ -1221,7 +1222,7 @@ mod tests {
         ];
         let tx = Transaction::new(
             &[&keypair],
-            Message::new(instructions, Some(&key0)),
+            solana_sdk::message::Message::new(instructions, Some(&key0)),
             Hash::default(),
         );
 
@@ -1229,7 +1230,7 @@ mod tests {
         let fee = FeeStructure::default().calculate_fee(
             &message,
             lamports_per_signature,
-            &process_compute_budget_instructions(message.program_instructions_iter())
+            &process_compute_budget_instructions(Message::program_instructions_iter(&message))
                 .unwrap_or_default()
                 .into(),
             false,
@@ -1418,7 +1419,7 @@ mod tests {
 
     #[test]
     fn test_load_transaction_accounts_fail_to_validate_fee_payer() {
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![Pubkey::new_from_array([0; 32])],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
@@ -1454,7 +1455,7 @@ mod tests {
     #[test]
     fn test_load_transaction_accounts_native_loader() {
         let key1 = Keypair::new();
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key1.pubkey(), native_loader::id()],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
@@ -1521,7 +1522,7 @@ mod tests {
         let key1 = Keypair::new();
         let key2 = Keypair::new();
 
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key1.pubkey(), key2.pubkey()],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
@@ -1564,7 +1565,7 @@ mod tests {
         let key1 = Keypair::new();
         let key2 = Keypair::new();
 
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key1.pubkey(), key2.pubkey()],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
@@ -1606,7 +1607,7 @@ mod tests {
         let key1 = Keypair::new();
         let key2 = Keypair::new();
 
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key1.pubkey(), key2.pubkey()],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
@@ -1651,7 +1652,7 @@ mod tests {
         let key1 = Keypair::new();
         let key2 = Keypair::new();
 
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key2.pubkey(), key1.pubkey()],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
@@ -1719,7 +1720,7 @@ mod tests {
         let key1 = Keypair::new();
         let key2 = Keypair::new();
 
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key2.pubkey(), key1.pubkey()],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
@@ -1770,7 +1771,7 @@ mod tests {
         let key2 = Keypair::new();
         let key3 = Keypair::new();
 
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key2.pubkey(), key1.pubkey()],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
@@ -1829,7 +1830,7 @@ mod tests {
         let key2 = Keypair::new();
         let key3 = Keypair::new();
 
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key2.pubkey(), key1.pubkey()],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {
@@ -1909,7 +1910,7 @@ mod tests {
         let key3 = Keypair::new();
         let key4 = Keypair::new();
 
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key2.pubkey(), key1.pubkey(), key4.pubkey()],
             header: MessageHeader::default(),
             instructions: vec![
@@ -2059,7 +2060,7 @@ mod tests {
         let key3 = Keypair::new();
         let key4 = Keypair::new();
 
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![key2.pubkey(), key1.pubkey(), key4.pubkey()],
             header: MessageHeader::default(),
             instructions: vec![
@@ -2156,7 +2157,7 @@ mod tests {
     #[test]
     fn test_load_accounts_error() {
         let mock_bank = TestCallbacks::default();
-        let message = Message {
+        let message = solana_sdk::message::Message {
             account_keys: vec![Pubkey::new_from_array([0; 32])],
             header: MessageHeader::default(),
             instructions: vec![CompiledInstruction {

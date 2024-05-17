@@ -1,10 +1,10 @@
 use {
     solana_program_runtime::compute_budget_processor::process_compute_budget_instructions,
     solana_sdk::{
-        instruction::CompiledInstruction,
         pubkey::Pubkey,
         transaction::{SanitizedTransaction, SanitizedVersionedTransaction},
     },
+    solana_signed_message::{Instruction, Message},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub trait GetComputeBudgetDetails {
     ) -> Option<ComputeBudgetDetails>;
 
     fn process_compute_budget_instruction<'a>(
-        instructions: impl Iterator<Item = (&'a Pubkey, &'a CompiledInstruction)>,
+        instructions: impl Iterator<Item = (&'a Pubkey, Instruction<'a>)>,
         _round_compute_unit_price_enabled: bool,
     ) -> Option<ComputeBudgetDetails> {
         let compute_budget_limits = process_compute_budget_instructions(instructions).ok()?;
@@ -37,7 +37,9 @@ impl GetComputeBudgetDetails for SanitizedVersionedTransaction {
         round_compute_unit_price_enabled: bool,
     ) -> Option<ComputeBudgetDetails> {
         Self::process_compute_budget_instruction(
-            self.get_message().program_instructions_iter(),
+            self.get_message()
+                .program_instructions_iter()
+                .map(|(pubkey, ix)| (pubkey, Instruction::from(ix))),
             round_compute_unit_price_enabled,
         )
     }
@@ -49,7 +51,7 @@ impl GetComputeBudgetDetails for SanitizedTransaction {
         round_compute_unit_price_enabled: bool,
     ) -> Option<ComputeBudgetDetails> {
         Self::process_compute_budget_instruction(
-            self.message().program_instructions_iter(),
+            self.program_instructions_iter(),
             round_compute_unit_price_enabled,
         )
     }

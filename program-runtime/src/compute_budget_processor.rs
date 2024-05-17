@@ -8,10 +8,11 @@ use {
         borsh1::try_from_slice_unchecked,
         compute_budget::{self, ComputeBudgetInstruction},
         entrypoint::HEAP_LENGTH as MIN_HEAP_FRAME_BYTES,
-        instruction::{CompiledInstruction, InstructionError},
+        instruction::InstructionError,
         pubkey::Pubkey,
         transaction::TransactionError,
     },
+    solana_signed_message::Instruction,
 };
 
 const MAX_HEAP_FRAME_BYTES: u32 = 256 * 1024;
@@ -66,7 +67,7 @@ impl From<ComputeBudgetLimits> for FeeBudgetLimits {
 /// If succeeded, the transaction's specific limits/requests (could be default)
 /// are retrieved and returned,
 pub fn process_compute_budget_instructions<'a>(
-    instructions: impl Iterator<Item = (&'a Pubkey, &'a CompiledInstruction)>,
+    instructions: impl Iterator<Item = (&'a Pubkey, Instruction<'a>)>,
 ) -> Result<ComputeBudgetLimits, TransactionError> {
     let mut num_non_compute_budget_instructions: u32 = 0;
     let mut updated_compute_unit_limit = None;
@@ -82,7 +83,7 @@ pub fn process_compute_budget_instructions<'a>(
             );
             let duplicate_instruction_error = TransactionError::DuplicateInstruction(i as u8);
 
-            match try_from_slice_unchecked(&instruction.data) {
+            match try_from_slice_unchecked(instruction.data) {
                 Ok(ComputeBudgetInstruction::RequestHeapFrame(bytes)) => {
                     if requested_heap_size.is_some() {
                         return Err(duplicate_instruction_error);
@@ -158,13 +159,13 @@ mod tests {
         solana_sdk::{
             hash::Hash,
             instruction::Instruction,
-            message::Message,
             pubkey::Pubkey,
             signature::Keypair,
             signer::Signer,
             system_instruction::{self},
             transaction::{SanitizedTransaction, Transaction},
         },
+        solana_signed_message::Message,
     };
 
     macro_rules! test {
@@ -172,11 +173,10 @@ mod tests {
             let payer_keypair = Keypair::new();
             let tx = SanitizedTransaction::from_transaction_for_tests(Transaction::new(
                 &[&payer_keypair],
-                Message::new($instructions, Some(&payer_keypair.pubkey())),
+                solana_sdk::message::Message::new($instructions, Some(&payer_keypair.pubkey())),
                 Hash::default(),
             ));
-            let result =
-                process_compute_budget_instructions(tx.message().program_instructions_iter());
+            let result = process_compute_budget_instructions(tx.program_instructions_iter());
             assert_eq!($expected_result, result);
         };
     }
@@ -483,8 +483,7 @@ mod tests {
                 Hash::default(),
             ));
 
-        let result =
-            process_compute_budget_instructions(transaction.message().program_instructions_iter());
+        let result = process_compute_budget_instructions(transaction.program_instructions_iter());
 
         // assert process_instructions will be successful with default,
         // and the default compute_unit_limit is 2 times default: one for bpf ix, one for

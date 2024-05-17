@@ -1,6 +1,7 @@
 use {
     crate::compute_budget_processor::{self, process_compute_budget_instructions},
-    solana_sdk::{instruction::CompiledInstruction, pubkey::Pubkey, transaction::Result},
+    solana_sdk::{pubkey::Pubkey, transaction::Result},
+    solana_signed_message::Instruction,
 };
 
 #[cfg(RUSTC_WITH_SPECIALIZATION)]
@@ -179,7 +180,7 @@ impl ComputeBudget {
     }
 
     pub fn try_from_instructions<'a>(
-        instructions: impl Iterator<Item = (&'a Pubkey, &'a CompiledInstruction)>,
+        instructions: impl Iterator<Item = (&'a Pubkey, Instruction<'a>)>,
     ) -> Result<Self> {
         let compute_budget_limits = process_compute_budget_instructions(instructions)?;
         Ok(ComputeBudget {

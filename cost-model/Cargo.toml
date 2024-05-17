@@ -24,6 +24,7 @@ solana-loader-v4-program = { workspace = true }
 solana-metrics = { workspace = true }
 solana-program-runtime = { workspace = true }
 solana-sdk = { workspace = true }
+solana-signed-message = { workspace = true }
 solana-stake-program = { workspace = true }
 solana-system-program = { workspace = true }
 solana-vote-program = { workspace = true }

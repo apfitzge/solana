@@ -22,6 +22,7 @@ use {
         simple_vote_transaction_checker::is_simple_vote_transaction,
         transaction::{Result, SanitizedVersionedTransaction},
     },
+    solana_signed_message::Instruction,
     std::collections::HashSet,
 };
 
@@ -86,7 +87,11 @@ impl RuntimeTransaction<SanitizedVersionedMessage> {
             compute_unit_price,
             loaded_accounts_bytes,
             ..
-        } = process_compute_budget_instructions(message.program_instructions_iter())?;
+        } = process_compute_budget_instructions(
+            message
+                .program_instructions_iter()
+                .map(|(pubkey, ix)| (pubkey, Instruction::from(ix))),
+        )?;
         meta.set_compute_unit_limit(compute_unit_limit);
         meta.set_compute_unit_price(compute_unit_price);
         meta.set_loaded_accounts_bytes(loaded_accounts_bytes);

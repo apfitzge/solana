@@ -27,6 +27,7 @@ solana-frozen-abi-macro = { workspace = true }
 solana-measure = { workspace = true }
 solana-metrics = { workspace = true }
 solana-sdk = { workspace = true }
+solana-signed-message = { workspace = true }
 solana_rbpf = { workspace = true }
 thiserror = { workspace = true }
 

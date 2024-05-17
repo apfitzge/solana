@@ -33,6 +33,7 @@ use {
         saturating_add_assign,
         transaction::SanitizedTransaction,
     },
+    solana_signed_message::Message,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
         sync::{Arc, RwLock},
@@ -506,7 +507,7 @@ impl SchedulerController {
                     .is_ok()
                 })
                 .filter_map(|(packet, tx)| {
-                    process_compute_budget_instructions(tx.message().program_instructions_iter())
+                    process_compute_budget_instructions(tx.program_instructions_iter())
                         .map(|compute_budget| (packet, tx, compute_budget.into()))
                         .ok()
                 })

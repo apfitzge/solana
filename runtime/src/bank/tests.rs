@@ -71,7 +71,7 @@ use {
         instruction::{AccountMeta, CompiledInstruction, Instruction, InstructionError},
         loader_upgradeable_instruction::UpgradeableLoaderInstruction,
         loader_v4::{LoaderV4State, LoaderV4Status},
-        message::{Message, MessageHeader, SanitizedMessage},
+        message::{MessageHeader, SanitizedMessage},
         native_loader,
         native_token::{sol_to_lamports, LAMPORTS_PER_SOL},
         nonce::{self, state::DurableNonce},
@@ -100,6 +100,7 @@ use {
         },
         transaction_context::TransactionAccount,
     },
+    solana_signed_message::Message,
     solana_stake_program::stake_state::{self, StakeStateV2},
     solana_svm::{nonce_info::NonceFull, transaction_results::DurableNonceFee},
     solana_vote_program::{
@@ -188,7 +189,7 @@ pub(in crate::bank) fn create_genesis_config(lamports: u64) -> (GenesisConfig, K
     solana_sdk::genesis_config::create_genesis_config(lamports)
 }
 
-fn new_sanitized_message(message: Message) -> SanitizedMessage {
+fn new_sanitized_message(message: solana_sdk::message::Message) -> SanitizedMessage {
     SanitizedMessage::try_from_legacy_message(message, &ReservedAccountKeys::empty_key_set())
         .unwrap()
 }
@@ -2273,7 +2274,7 @@ fn test_one_tx_two_out_atomic_fail() {
         &mint_keypair.pubkey(),
         &[(key1, amount), (key2, amount)],
     );
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     let tx = Transaction::new(&[&mint_keypair], message, genesis_config.hash());
     assert_eq!(
         bank.process_transaction(&tx).unwrap_err(),
@@ -2295,7 +2296,7 @@ fn test_one_tx_two_out_atomic_pass() {
         &mint_keypair.pubkey(),
         &[(key1, amount), (key2, amount)],
     );
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     let tx = Transaction::new(&[&mint_keypair], message, genesis_config.hash());
     bank.process_transaction(&tx).unwrap();
     assert_eq!(
@@ -2643,7 +2644,10 @@ fn test_bank_tx_compute_unit_fee() {
     let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
 
     let expected_fee_paid = calculate_test_fee(
-        &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
+        &new_sanitized_message(solana_sdk::message::Message::new(
+            &[],
+            Some(&Pubkey::new_unique()),
+        )),
         genesis_config
             .fee_rate_governor
             .create_fee_calculator()
@@ -2771,7 +2775,10 @@ fn test_bank_blockhash_fee_structure() {
     assert_eq!(bank.process_transaction(&tx), Ok(()));
     assert_eq!(bank.get_balance(&key), 1);
     let cheap_fee = calculate_test_fee(
-        &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
+        &new_sanitized_message(solana_sdk::message::Message::new(
+            &[],
+            Some(&Pubkey::new_unique()),
+        )),
         cheap_lamports_per_signature,
         bank.fee_structure(),
     );
@@ -2787,7 +2794,10 @@ fn test_bank_blockhash_fee_structure() {
     assert_eq!(bank.process_transaction(&tx), Ok(()));
     assert_eq!(bank.get_balance(&key), 1);
     let expensive_fee = calculate_test_fee(
-        &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
+        &new_sanitized_message(solana_sdk::message::Message::new(
+            &[],
+            Some(&Pubkey::new_unique()),
+        )),
         expensive_lamports_per_signature,
         bank.fee_structure(),
     );
@@ -2833,7 +2843,10 @@ fn test_bank_blockhash_compute_unit_fee_structure() {
     assert_eq!(bank.process_transaction(&tx), Ok(()));
     assert_eq!(bank.get_balance(&key), 1);
     let cheap_fee = calculate_test_fee(
-        &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
+        &new_sanitized_message(solana_sdk::message::Message::new(
+            &[],
+            Some(&Pubkey::new_unique()),
+        )),
         cheap_lamports_per_signature,
         bank.fee_structure(),
     );
@@ -2849,7 +2862,10 @@ fn test_bank_blockhash_compute_unit_fee_structure() {
     assert_eq!(bank.process_transaction(&tx), Ok(()));
     assert_eq!(bank.get_balance(&key), 1);
     let expensive_fee = calculate_test_fee(
-        &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
+        &new_sanitized_message(solana_sdk::message::Message::new(
+            &[],
+            Some(&Pubkey::new_unique()),
+        )),
         expensive_lamports_per_signature,
         bank.fee_structure(),
     );
@@ -2960,7 +2976,10 @@ fn test_filter_program_errors_and_collect_compute_unit_fee() {
                 .fee_rate_governor
                 .burn(
                     calculate_test_fee(
-                        &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
+                        &new_sanitized_message(solana_sdk::message::Message::new(
+                            &[],
+                            Some(&Pubkey::new_unique())
+                        )),
                         genesis_config
                             .fee_rate_governor
                             .create_fee_calculator()
@@ -3135,7 +3154,7 @@ fn test_readonly_relaxed_locks() {
     let key2 = Keypair::new();
     let key3 = solana_sdk::pubkey::new_rand();
 
-    let message = Message {
+    let message = solana_sdk::message::Message {
         header: MessageHeader {
             num_required_signatures: 1,
             num_readonly_signed_accounts: 0,
@@ -3153,7 +3172,7 @@ fn test_readonly_relaxed_locks() {
 
     // Try locking accounts, locking a previously read-only account as writable
     // should fail
-    let message = Message {
+    let message = solana_sdk::message::Message {
         header: MessageHeader {
             num_required_signatures: 1,
             num_readonly_signed_accounts: 0,
@@ -3170,7 +3189,7 @@ fn test_readonly_relaxed_locks() {
     assert!(batch1.lock_results()[0].is_err());
 
     // Try locking a previously read-only account a 2nd time; should succeed
-    let message = Message {
+    let message = solana_sdk::message::Message {
         header: MessageHeader {
             num_required_signatures: 1,
             num_readonly_signed_accounts: 0,
@@ -4032,7 +4051,7 @@ fn test_zero_signatures() {
 
     let mut transfer_instruction = system_instruction::transfer(&mint_keypair.pubkey(), &key, 0);
     transfer_instruction.accounts[0].is_signer = false;
-    let message = Message::new(&[transfer_instruction], None);
+    let message = solana_sdk::message::Message::new(&[transfer_instruction], None);
     let tx = Transaction::new(&[&Keypair::new(); 0], message, bank.last_blockhash());
 
     assert_eq!(
@@ -4211,7 +4230,7 @@ fn test_bank_vote_accounts() {
         },
     );
 
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     let transaction = Transaction::new(
         &[&mint_keypair, &vote_keypair],
         message,
@@ -4289,7 +4308,7 @@ fn test_bank_cloned_stake_delegations() {
         stake_balance,
     ));
 
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     let transaction = Transaction::new(
         &[&mint_keypair, &vote_keypair, &stake_keypair],
         message,
@@ -4592,7 +4611,7 @@ fn test_add_builtin() {
     );
     instructions[1].program_id = mock_vote_program_id();
 
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     let transaction = Transaction::new(
         &[&mint_keypair, &mock_account, &mock_validator_identity],
         message,
@@ -4638,7 +4657,7 @@ fn test_add_duplicate_static_program() {
         },
     );
 
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     let transaction = Transaction::new(
         &[&mint_keypair, &mock_account, &mock_validator_identity],
         message,
@@ -4912,7 +4931,7 @@ fn nonce_setup(
         &nonce_authority,
         nonce_lamports,
     ));
-    let message = Message::new(&setup_ixs, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&setup_ixs, Some(&mint_keypair.pubkey()));
     let setup_tx = Transaction::new(
         &[mint_keypair, &custodian_keypair, &nonce_keypair],
         message,
@@ -5157,7 +5176,7 @@ fn test_assign_from_nonce_account_fail() {
     bank.store_account(&nonce.pubkey(), &nonce_account);
 
     let ix = system_instruction::assign(&nonce.pubkey(), &Pubkey::from([9u8; 32]));
-    let message = Message::new(&[ix], Some(&nonce.pubkey()));
+    let message = solana_sdk::message::Message::new(&[ix], Some(&nonce.pubkey()));
     let tx = Transaction::new(&[&nonce], message, blockhash);
 
     let expect = Err(TransactionError::InstructionError(
@@ -5188,7 +5207,7 @@ fn test_nonce_must_be_advanceable() {
     bank.store_account(&nonce_keypair.pubkey(), &nonce_account);
 
     let ix = system_instruction::advance_nonce_account(&nonce_keypair.pubkey(), &nonce_authority);
-    let message = Message::new(&[ix], Some(&nonce_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&[ix], Some(&nonce_keypair.pubkey()));
     let tx = Transaction::new(&[&nonce_keypair], message, *durable_nonce.as_hash());
     assert_eq!(
         bank.process_transaction(&tx),
@@ -6421,7 +6440,7 @@ fn test_fuzz_instructions() {
             num_readonly_signed_accounts,
             num_readonly_unsigned_accounts,
         };
-        let message = Message {
+        let message = solana_sdk::message::Message {
             header,
             account_keys,
             recent_blockhash: bank.last_blockhash(),
@@ -7111,7 +7130,8 @@ fn test_bank_load_program() {
     bank.store_account_and_update_capitalization(&programdata_key, &programdata_account);
 
     let instruction = Instruction::new_with_bytes(program_key, &[], Vec::new());
-    let invocation_message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
+    let invocation_message =
+        solana_sdk::message::Message::new(&[instruction], Some(&mint_keypair.pubkey()));
     let binding = mint_keypair.insecure_clone();
     let transaction = Transaction::new(
         &[&binding],
@@ -7153,7 +7173,8 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
 
     // Test nonexistent program invocation
     let instruction = Instruction::new_with_bytes(program_keypair.pubkey(), &[], Vec::new());
-    let invocation_message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
+    let invocation_message =
+        solana_sdk::message::Message::new(&[instruction], Some(&mint_keypair.pubkey()));
     let binding = mint_keypair.insecure_clone();
     let transaction = Transaction::new(
         &[&binding],
@@ -7247,7 +7268,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     // Test buffer invocation
     bank.store_account(&buffer_address, &buffer_account);
     let instruction = Instruction::new_with_bytes(buffer_address, &[], Vec::new());
-    let message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&[instruction], Some(&mint_keypair.pubkey()));
     let transaction = Transaction::new(&[&binding], message, bank.last_blockhash());
     assert_eq!(
         bank.process_transaction(&transaction),
@@ -7287,7 +7308,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     );
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &payer_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7382,7 +7403,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     let bank = bank_client
         .advance_slot(1, bank_forks.as_ref(), &mint_keypair.pubkey())
         .unwrap();
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &[Instruction::new_with_bincode(
             bpf_loader_upgradeable::id(),
             &UpgradeableLoaderInstruction::DeployWithMaxDataLen {
@@ -7413,7 +7434,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.clear_signatures();
     bank.store_account(&buffer_address, &buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7441,7 +7462,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &buffer_account);
     bank.store_account(&program_keypair.pubkey(), &program_account);
     bank.store_account(&programdata_address, &programdata_account);
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &[Instruction::new_with_bincode(
             bpf_loader_upgradeable::id(),
             &UpgradeableLoaderInstruction::DeployWithMaxDataLen {
@@ -7472,7 +7493,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &buffer_account);
     bank.store_account(&program_keypair.pubkey(), &program_account);
     bank.store_account(&programdata_address, &programdata_account);
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &[Instruction::new_with_bincode(
             bpf_loader_upgradeable::id(),
             &UpgradeableLoaderInstruction::DeployWithMaxDataLen {
@@ -7504,7 +7525,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &AccountSharedData::default());
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7532,7 +7553,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7576,7 +7597,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
         (UpgradeableLoaderState::size_of_program() as u64).saturating_add(1),
         &bpf_loader_upgradeable::id(),
     );
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     assert_eq!(
         TransactionError::InstructionError(1, InstructionError::ExecutableAccountNotRentExempt),
         bank_client
@@ -7609,7 +7630,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
         (UpgradeableLoaderState::size_of_program() as u64).saturating_sub(1),
         &bpf_loader_upgradeable::id(),
     );
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     assert_eq!(
         TransactionError::InstructionError(1, InstructionError::AccountDataTooSmall),
         bank_client
@@ -7635,7 +7656,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7667,7 +7688,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7701,7 +7722,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &modified_buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7744,7 +7765,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
         .accounts
         .get_mut(6)
         .unwrap() = AccountMeta::new_readonly(Pubkey::new_unique(), false);
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     assert_eq!(
         TransactionError::InstructionError(1, InstructionError::MissingAccount),
         bank_client
@@ -7772,7 +7793,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &modified_buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7816,7 +7837,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &modified_buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7859,7 +7880,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &modified_buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -7902,7 +7923,7 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
     bank.store_account(&buffer_address, &modified_buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &mint_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -9263,7 +9284,7 @@ fn test_vote_epoch_panic() {
 
     let result = bank.process_transaction(&Transaction::new(
         &[&mint_keypair, &vote_keypair, &stake_keypair],
-        Message::new(&setup_ixs, Some(&mint_keypair.pubkey())),
+        solana_sdk::message::Message::new(&setup_ixs, Some(&mint_keypair.pubkey())),
         bank.last_blockhash(),
     ));
     assert!(result.is_ok());
@@ -9614,7 +9635,7 @@ fn test_transfer_sysvar() {
         AccountMeta::new(blockhash_sysvar, false),
     ];
     let ix = Instruction::new_with_bincode(program_id, &0, accounts);
-    let message = Message::new(&[ix], Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&[ix], Some(&mint_keypair.pubkey()));
     let tx = Transaction::new(&[&mint_keypair], message, blockhash);
     assert_eq!(
         bank.process_transaction(&tx),
@@ -9807,7 +9828,7 @@ fn test_compute_budget_program_noop() {
         Ok(())
     });
 
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &[
             ComputeBudgetInstruction::set_compute_unit_limit(
                 compute_budget_processor::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT,
@@ -9852,7 +9873,7 @@ fn test_compute_request_instruction() {
         Ok(())
     });
 
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &[
             ComputeBudgetInstruction::set_compute_unit_limit(
                 compute_budget_processor::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT,
@@ -9906,7 +9927,7 @@ fn test_failed_compute_request_instruction() {
     });
 
     // This message will not be executed because the compute budget request is invalid
-    let message0 = Message::new(
+    let message0 = solana_sdk::message::Message::new(
         &[
             ComputeBudgetInstruction::request_heap_frame(1),
             Instruction::new_with_bincode(program_id, &0, vec![]),
@@ -9914,7 +9935,7 @@ fn test_failed_compute_request_instruction() {
         Some(&payer0_keypair.pubkey()),
     );
     // This message will be processed successfully
-    let message1 = Message::new(
+    let message1 = solana_sdk::message::Message::new(
         &[
             ComputeBudgetInstruction::set_compute_unit_limit(1),
             ComputeBudgetInstruction::request_heap_frame(48 * 1024),
@@ -9962,7 +9983,7 @@ fn test_verify_and_hash_transaction_sig_len() {
     }
 
     let make_transaction = |case: TestCase| {
-        let message = Message::new(
+        let message = solana_sdk::message::Message::new(
             &[system_instruction::transfer(&from_pubkey, &to_pubkey, 1)],
             Some(&from_pubkey),
         );
@@ -10013,7 +10034,7 @@ fn test_verify_transactions_packet_data_size() {
         })
         .take(size)
         .collect();
-        let message = Message::new(&ixs[..], Some(&pubkey));
+        let message = solana_sdk::message::Message::new(&ixs[..], Some(&pubkey));
         Transaction::new(&[&keypair], message, recent_blockhash)
     };
     // Small transaction.
@@ -10113,7 +10134,7 @@ fn test_call_precomiled_program() {
 }
 
 fn calculate_test_fee(
-    message: &SanitizedMessage,
+    message: &impl Message,
     lamports_per_signature: u64,
     fee_structure: &FeeStructure,
 ) -> u64 {
@@ -10127,7 +10148,10 @@ fn calculate_test_fee(
 #[test]
 fn test_calculate_fee() {
     // Default: no fee.
-    let message = new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
+    let message = new_sanitized_message(solana_sdk::message::Message::new(
+        &[],
+        Some(&Pubkey::new_unique()),
+    ));
     assert_eq!(
         calculate_test_fee(
             &message,
@@ -10158,7 +10182,8 @@ fn test_calculate_fee() {
     let key1 = Pubkey::new_unique();
     let ix0 = system_instruction::transfer(&key0, &key1, 1);
     let ix1 = system_instruction::transfer(&key1, &key0, 1);
-    let message = new_sanitized_message(Message::new(&[ix0, ix1], Some(&key0)));
+    let message =
+        new_sanitized_message(solana_sdk::message::Message::new(&[ix0, ix1], Some(&key0)));
     assert_eq!(
         calculate_test_fee(
             &message,
@@ -10183,7 +10208,10 @@ fn test_calculate_fee_compute_units() {
 
     // One signature, no unit request
 
-    let message = new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
+    let message = new_sanitized_message(solana_sdk::message::Message::new(
+        &[],
+        Some(&Pubkey::new_unique()),
+    ));
     assert_eq!(
         calculate_test_fee(&message, 1, &fee_structure,),
         max_fee + lamports_per_signature
@@ -10193,7 +10221,10 @@ fn test_calculate_fee_compute_units() {
 
     let ix0 = system_instruction::transfer(&Pubkey::new_unique(), &Pubkey::new_unique(), 1);
     let ix1 = system_instruction::transfer(&Pubkey::new_unique(), &Pubkey::new_unique(), 1);
-    let message = new_sanitized_message(Message::new(&[ix0, ix1], Some(&Pubkey::new_unique())));
+    let message = new_sanitized_message(solana_sdk::message::Message::new(
+        &[ix0, ix1],
+        Some(&Pubkey::new_unique()),
+    ));
     assert_eq!(
         calculate_test_fee(&message, 1, &fee_structure,),
         max_fee + 3 * lamports_per_signature
@@ -10219,7 +10250,7 @@ fn test_calculate_fee_compute_units() {
             PrioritizationFeeType::ComputeUnitPrice(PRIORITIZATION_FEE_RATE),
             requested_compute_units as u64,
         );
-        let message = new_sanitized_message(Message::new(
+        let message = new_sanitized_message(solana_sdk::message::Message::new(
             &[
                 ComputeBudgetInstruction::set_compute_unit_limit(requested_compute_units),
                 ComputeBudgetInstruction::set_compute_unit_price(PRIORITIZATION_FEE_RATE),
@@ -10250,7 +10281,7 @@ fn test_calculate_prioritization_fee() {
     );
     let prioritization_fee = prioritization_fee_details.get_fee();
 
-    let message = new_sanitized_message(Message::new(
+    let message = new_sanitized_message(solana_sdk::message::Message::new(
         &[
             ComputeBudgetInstruction::set_compute_unit_limit(request_units),
             ComputeBudgetInstruction::set_compute_unit_price(request_unit_price),
@@ -10290,7 +10321,7 @@ fn test_calculate_fee_secp256k1() {
         data: vec![1],
     };
 
-    let message = new_sanitized_message(Message::new(
+    let message = new_sanitized_message(solana_sdk::message::Message::new(
         &[
             ix0.clone(),
             secp_instruction1.clone(),
@@ -10302,7 +10333,7 @@ fn test_calculate_fee_secp256k1() {
 
     secp_instruction1.data = vec![0];
     secp_instruction2.data = vec![10];
-    let message = new_sanitized_message(Message::new(
+    let message = new_sanitized_message(solana_sdk::message::Message::new(
         &[ix0, secp_instruction1, secp_instruction2],
         Some(&key0),
     ));
@@ -10315,7 +10346,7 @@ fn test_an_empty_instruction_without_program() {
     let destination = solana_sdk::pubkey::new_rand();
     let mut ix = system_instruction::transfer(&mint_keypair.pubkey(), &destination, 0);
     ix.program_id = native_loader::id(); // Empty executable account chain
-    let message = Message::new(&[ix], Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&[ix], Some(&mint_keypair.pubkey()));
     let tx = Transaction::new(&[&mint_keypair], message, genesis_config.hash());
 
     let bank = Bank::new_with_bank_forks_for_tests(&genesis_config).0;
@@ -10831,7 +10862,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     .unwrap();
 
     // Dummy message to determine fee amount
-    let dummy_message = new_sanitized_message(Message::new_with_blockhash(
+    let dummy_message = new_sanitized_message(solana_sdk::message::Message::new_with_blockhash(
         &[system_instruction::transfer(
             &rent_exempt_fee_payer.pubkey(),
             &recipient,
@@ -10845,7 +10876,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     // RentPaying fee-payer can remain RentPaying
     let tx = Transaction::new(
         &[&rent_paying_fee_payer, &mint_keypair],
-        Message::new(
+        solana_sdk::message::Message::new(
             &[system_instruction::transfer(
                 &mint_keypair.pubkey(),
                 &recipient,
@@ -10866,7 +10897,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     let fee_payer_balance = bank.get_balance(&rent_paying_fee_payer.pubkey());
     let tx = Transaction::new(
         &[&rent_paying_fee_payer, &sender],
-        Message::new(
+        solana_sdk::message::Message::new(
             &[system_instruction::transfer(
                 &sender.pubkey(),
                 &recipient,
@@ -10892,7 +10923,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     // RentPaying fee-payer can be emptied with fee and transaction
     let tx = Transaction::new(
         &[&rent_paying_fee_payer],
-        Message::new(
+        solana_sdk::message::Message::new(
             &[system_instruction::transfer(
                 &rent_paying_fee_payer.pubkey(),
                 &recipient,
@@ -10909,7 +10940,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     // RentExempt fee-payer cannot become RentPaying from transaction fee
     let tx = Transaction::new(
         &[&rent_exempt_fee_payer, &mint_keypair],
-        Message::new(
+        solana_sdk::message::Message::new(
             &[system_instruction::transfer(
                 &mint_keypair.pubkey(),
                 &recipient,
@@ -10931,7 +10962,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     // RentExempt fee-payer cannot become RentPaying via failed executed tx
     let tx = Transaction::new(
         &[&rent_exempt_fee_payer, &sender],
-        Message::new(
+        solana_sdk::message::Message::new(
             &[system_instruction::transfer(
                 &sender.pubkey(),
                 &recipient,
@@ -10958,7 +10989,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     assert_eq!(fee_payer_balance, rent_exempt_minimum + fee);
     let tx = Transaction::new(
         &[&rent_exempt_fee_payer],
-        Message::new(
+        solana_sdk::message::Message::new(
             &[system_instruction::transfer(
                 &rent_exempt_fee_payer.pubkey(),
                 &recipient,
@@ -10987,7 +11018,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     assert!(bank.get_balance(&rent_exempt_fee_payer.pubkey()) > rent_exempt_minimum + fee);
     let tx = Transaction::new(
         &[&rent_exempt_fee_payer],
-        Message::new(
+        solana_sdk::message::Message::new(
             &[system_instruction::transfer(
                 &rent_exempt_fee_payer.pubkey(),
                 &recipient,
@@ -11011,7 +11042,7 @@ fn test_invalid_rent_state_changes_fee_payer() {
     assert!(bank.get_balance(&rent_exempt_fee_payer.pubkey()) < rent_exempt_minimum + fee);
     let tx = Transaction::new(
         &[&rent_exempt_fee_payer],
-        Message::new(
+        solana_sdk::message::Message::new(
             &[system_instruction::transfer(
                 &rent_exempt_fee_payer.pubkey(),
                 &recipient,
@@ -11761,7 +11792,7 @@ fn test_cap_accounts_data_allocations_per_transaction() {
         keypairs.push(keypair);
         instructions.push(instruction);
     }
-    let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&instructions, Some(&mint_keypair.pubkey()));
     let signers: Vec<_> = keypairs.iter().collect();
     let transaction = Transaction::new(&signers, message, bank.last_blockhash());
 
@@ -11899,7 +11930,8 @@ fn test_calculate_fee_with_congestion_multiplier() {
     let key1 = Pubkey::new_unique();
     let ix0 = system_instruction::transfer(&key0, &key1, 1);
     let ix1 = system_instruction::transfer(&key1, &key0, 1);
-    let message = new_sanitized_message(Message::new(&[ix0, ix1], Some(&key0)));
+    let message =
+        new_sanitized_message(solana_sdk::message::Message::new(&[ix0, ix1], Some(&key0)));
 
     // assert when lamports_per_signature is less than BASE_LAMPORTS, turnning on/off
     // congestion_multiplier has no effect on fee.
@@ -11928,7 +11960,7 @@ fn test_calculate_fee_with_request_heap_frame_flag() {
         lamports_per_signature: signature_fee,
         ..FeeStructure::default()
     };
-    let message = new_sanitized_message(Message::new(
+    let message = new_sanitized_message(solana_sdk::message::Message::new(
         &[
             system_instruction::transfer(&key0, &key1, 1),
             ComputeBudgetInstruction::set_compute_unit_limit(request_cu as u32),
@@ -11989,7 +12021,7 @@ fn test_feature_activation_loaded_programs_recompilation_phase() {
 
     // Compose message using the desired program.
     let instruction = Instruction::new_with_bytes(program_keypair.pubkey(), &[], Vec::new());
-    let message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&[instruction], Some(&mint_keypair.pubkey()));
     let binding = mint_keypair.insecure_clone();
     let signers = vec![&binding];
 
@@ -12103,7 +12135,7 @@ fn test_feature_activation_loaded_programs_epoch_transition() {
 
     // Compose message using the desired program.
     let instruction = Instruction::new_with_bytes(program_keypair.pubkey(), &[], Vec::new());
-    let message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&[instruction], Some(&mint_keypair.pubkey()));
     let binding = mint_keypair.insecure_clone();
     let signers = vec![&binding];
 
@@ -12274,7 +12306,7 @@ fn test_system_instruction_allocate() {
         .transfer_and_confirm(amount, &mint_keypair, &alice_pubkey)
         .unwrap();
 
-    let allocate_with_seed = Message::new(
+    let allocate_with_seed = solana_sdk::message::Message::new(
         &[system_instruction::allocate_with_seed(
             &alice_with_seed,
             &alice_pubkey,
@@ -12358,7 +12390,7 @@ where
         len2 as u64,
         &program,
     );
-    let message = Message::new(&[ix], Some(&alice_pubkey));
+    let message = solana_sdk::message::Message::new(&[ix], Some(&alice_pubkey));
     let r = bank_client.send_and_confirm_message(&[&alice_keypair, &bob_keypair], message);
     assert!(r.is_ok());
 }
@@ -12403,7 +12435,7 @@ fn test_system_instruction_assign_with_seed() {
         )
         .unwrap();
 
-    let assign_with_seed = Message::new(
+    let assign_with_seed = solana_sdk::message::Message::new(
         &[system_instruction::assign_with_seed(
             &alice_with_seed,
             &alice_pubkey,
@@ -12870,7 +12902,7 @@ fn test_failed_simulation_compute_units() {
         Err(InstructionError::InvalidInstructionData)
     });
 
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &[Instruction::new_with_bincode(program_id, &0, vec![])],
         Some(&mint_keypair.pubkey()),
     );
@@ -12986,7 +13018,7 @@ fn test_check_execution_status_and_charge_fee() {
     } = create_genesis_config_with_leader(initial_balance, &Pubkey::new_unique(), 3);
     genesis_config.fee_rate_governor = FeeRateGovernor::new(5000, 0);
     let bank = Bank::new_for_tests(&genesis_config);
-    let message = new_sanitized_message(Message::new(
+    let message = new_sanitized_message(solana_sdk::message::Message::new(
         &[system_instruction::transfer(
             &mint_keypair.pubkey(),
             &Pubkey::new_unique(),
@@ -13103,7 +13135,7 @@ fn test_deploy_last_epoch_slot() {
     bank.store_account(&buffer_address, &buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
-    let message = Message::new(
+    let message = solana_sdk::message::Message::new(
         &bpf_loader_upgradeable::deploy_with_max_program_len(
             &payer_keypair.pubkey(),
             &program_keypair.pubkey(),
@@ -13127,7 +13159,7 @@ fn test_deploy_last_epoch_slot() {
     eprintln!("now at slot {} epoch {}", bank.slot(), bank.epoch());
 
     let instruction = Instruction::new_with_bytes(program_keypair.pubkey(), &[], Vec::new());
-    let message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
+    let message = solana_sdk::message::Message::new(&[instruction], Some(&mint_keypair.pubkey()));
     let binding = mint_keypair.insecure_clone();
     let signers = vec![&binding];
     let transaction = Transaction::new(&signers, message, bank.last_blockhash());

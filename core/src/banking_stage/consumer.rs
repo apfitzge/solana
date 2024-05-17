@@ -31,6 +31,7 @@ use {
         timing::timestamp,
         transaction::{self, AddressLoader, SanitizedTransaction, TransactionError},
     },
+    solana_signed_message::Message,
     solana_svm::{
         account_loader::{validate_fee_payer, TransactionCheckResult},
         transaction_error_metrics::TransactionErrorMetrics,
@@ -739,7 +740,8 @@ impl Consumer {
     ) -> Result<(), TransactionError> {
         let fee_payer = message.fee_payer();
         let budget_limits =
-            process_compute_budget_instructions(message.program_instructions_iter())?.into();
+            process_compute_budget_instructions(Message::program_instructions_iter(message))?
+                .into();
         let fee = bank.fee_structure().calculate_fee(
             message,
             bank.get_lamports_per_signature(),

@@ -6015,6 +6015,7 @@ dependencies = [
  "solana-runtime",
  "solana-sdk",
  "solana-send-transaction-service",
+ "solana-signed-message",
  "solana-stake-program",
  "solana-streamer",
  "solana-svm",
@@ -6060,6 +6061,7 @@ dependencies = [
  "solana-metrics",
  "solana-program-runtime",
  "solana-sdk",
+ "solana-signed-message",
  "solana-stake-program",
  "solana-system-program",
  "solana-vote-program",
@@ -6736,6 +6738,7 @@ dependencies = [
  "solana-measure",
  "solana-metrics",
  "solana-sdk",
+ "solana-signed-message",
  "solana_rbpf",
  "test-case",
  "thiserror",
@@ -7073,6 +7076,7 @@ dependencies = [
  "solana-rayon-threadlimit",
  "solana-runtime",
  "solana-sdk",
+ "solana-signed-message",
  "solana-stake-program",
  "solana-svm",
  "solana-system-program",
@@ -7103,6 +7107,7 @@ dependencies = [
  "solana-program",
  "solana-program-runtime",
  "solana-sdk",
+ "solana-signed-message",
  "thiserror",
 ]
 
@@ -7353,6 +7358,7 @@ dependencies = [
  "solana-metrics",
  "solana-program-runtime",
  "solana-sdk",
+ "solana-signed-message",
  "solana-system-program",
 ]
 
