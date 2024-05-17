@@ -1,6 +1,10 @@
 use solana_sdk::{
-    instruction::CompiledInstruction, message::SanitizedMessage, pubkey::Pubkey,
-    signature::Signature, transaction::SanitizedTransaction,
+    instruction::CompiledInstruction,
+    message::{AccountKeys, SanitizedMessage},
+    pubkey::Pubkey,
+    signature::Signature,
+    sysvar::instructions::{BorrowedAccountMeta, BorrowedInstruction},
+    transaction::SanitizedTransaction,
 };
 
 pub trait Message {
@@ -20,11 +24,42 @@ pub trait Message {
     /// the pubkey of the program.
     fn program_instructions_iter(&self) -> impl Iterator<Item = (&Pubkey, Instruction)>;
 
+    /// Return the account keys.
+    fn account_keys(&self) -> AccountKeys;
+
     /// Returns `true` if the account at `index` is writable.
     fn is_writable(&self, index: usize) -> bool;
 
     /// Returns `true` if the account at `index` is signer.
     fn is_signer(&self, index: usize) -> bool;
+
+    /// Decompile message instructions without cloning account keys
+    /// TODO: Remove this - there's an allocation!
+    fn decompile_instructions(&self) -> Vec<BorrowedInstruction> {
+        let account_keys = self.account_keys();
+        self.program_instructions_iter()
+            .map(|(program_id, instruction)| {
+                let accounts = instruction
+                    .accounts
+                    .iter()
+                    .map(|account_index| {
+                        let account_index = *account_index as usize;
+                        BorrowedAccountMeta {
+                            is_signer: self.is_signer(account_index),
+                            is_writable: self.is_writable(account_index),
+                            pubkey: account_keys.get(account_index).unwrap(),
+                        }
+                    })
+                    .collect();
+
+                BorrowedInstruction {
+                    accounts,
+                    data: instruction.data,
+                    program_id,
+                }
+            })
+            .collect()
+    }
 }
 
 pub trait SignedMessage: Message {
@@ -72,6 +107,10 @@ impl Message for SanitizedMessage {
             .map(|(pubkey, ix)| (pubkey, Instruction::from(ix)))
     }
 
+    fn account_keys(&self) -> AccountKeys {
+        SanitizedMessage::account_keys(self)
+    }
+
     fn is_writable(&self, index: usize) -> bool {
         SanitizedMessage::is_writable(self, index)
     }
@@ -100,6 +139,10 @@ impl Message for SanitizedTransaction {
 
     fn program_instructions_iter(&self) -> impl Iterator<Item = (&Pubkey, Instruction)> {
         Message::program_instructions_iter(self.message())
+    }
+
+    fn account_keys(&self) -> AccountKeys {
+        Message::account_keys(self.message())
     }
 
     fn is_writable(&self, index: usize) -> bool {

@@ -18,7 +18,6 @@ use {
             self, include_loaded_accounts_data_size_in_fee_calculation,
             remove_rounding_in_fee_calculation,
         },
-        message::SanitizedMessage,
         native_loader,
         nonce::State as NonceState,
         pubkey::Pubkey,
@@ -27,7 +26,7 @@ use {
         rent_debits::RentDebits,
         saturating_add_assign,
         sysvar::{self, instructions::construct_instructions_data},
-        transaction::{self, Result, SanitizedTransaction, TransactionError},
+        transaction::{self, Result, TransactionError},
         transaction_context::{IndexOfAccount, TransactionAccount},
     },
     solana_signed_message::Message,
@@ -116,7 +115,7 @@ pub fn validate_fee_payer(
 /// second element.
 pub(crate) fn load_accounts<CB: TransactionProcessingCallback>(
     callbacks: &CB,
-    txs: &[SanitizedTransaction],
+    txs: &[impl Message],
     check_results: &[TransactionCheckResult],
     error_counters: &mut TransactionErrorMetrics,
     fee_structure: &FeeStructure,
@@ -128,7 +127,6 @@ pub(crate) fn load_accounts<CB: TransactionProcessingCallback>(
         .zip(check_results)
         .map(|etx| match etx {
             (tx, (Ok(()), nonce, lamports_per_signature)) => {
-                let message = tx.message();
                 let fee = if let Some(lamports_per_signature) = lamports_per_signature {
                     fee_structure.calculate_fee(
                         tx,
@@ -147,7 +145,7 @@ pub(crate) fn load_accounts<CB: TransactionProcessingCallback>(
                 // load transactions
                 let loaded_transaction = match load_transaction_accounts(
                     callbacks,
-                    message,
+                    tx,
                     fee,
                     error_counters,
                     account_overrides,
@@ -184,7 +182,7 @@ pub(crate) fn load_accounts<CB: TransactionProcessingCallback>(
 
 fn load_transaction_accounts<CB: TransactionProcessingCallback>(
     callbacks: &CB,
-    message: &SanitizedMessage,
+    message: &impl Message,
     fee: u64,
     error_counters: &mut TransactionErrorMetrics,
     account_overrides: Option<&AccountOverrides>,
@@ -206,9 +204,8 @@ fn load_transaction_accounts<CB: TransactionProcessingCallback>(
     let mut accumulated_accounts_data_size: usize = 0;
 
     let instruction_accounts = message
-        .instructions()
-        .iter()
-        .flat_map(|instruction| &instruction.accounts)
+        .instructions_iter()
+        .flat_map(|instruction| instruction.accounts)
         .unique()
         .collect::<Vec<&u8>>();
 
@@ -320,8 +317,7 @@ fn load_transaction_accounts<CB: TransactionProcessingCallback>(
 
     let builtins_start_index = accounts.len();
     let program_indices = message
-        .instructions()
-        .iter()
+        .instructions_iter()
         .map(|instruction| {
             let mut account_indices = Vec::with_capacity(2);
             let mut program_index = instruction.program_id_index as usize;
@@ -397,10 +393,10 @@ fn load_transaction_accounts<CB: TransactionProcessingCallback>(
 ///     user requested loaded accounts size.
 ///     Note, requesting zero bytes will result transaction error
 fn get_requested_loaded_accounts_data_size_limit(
-    sanitized_message: &SanitizedMessage,
+    message: &impl Message,
 ) -> Result<Option<NonZeroUsize>> {
     let compute_budget_limits =
-        process_compute_budget_instructions(Message::program_instructions_iter(sanitized_message))
+        process_compute_budget_instructions(Message::program_instructions_iter(message))
             .unwrap_or_default();
     // sanitize against setting size limit to zero
     NonZeroUsize::new(
@@ -445,7 +441,7 @@ fn accumulate_and_check_loaded_account_data_size(
     }
 }
 
-fn construct_instructions_account(message: &SanitizedMessage) -> AccountSharedData {
+fn construct_instructions_account(message: &impl Message) -> AccountSharedData {
     AccountSharedData::from(Account {
         data: construct_instructions_data(&message.decompile_instructions()),
         owner: sysvar::id(),
