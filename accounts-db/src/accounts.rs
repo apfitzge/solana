@@ -15,7 +15,7 @@ use {
         account_utils::StateMut,
         address_lookup_table::{self, error::AddressLookupError, state::AddressLookupTable},
         clock::{BankId, Slot},
-        message::v0::{LoadedAddresses, MessageAddressTableLookup},
+        message::v0::LoadedAddresses,
         nonce::{
             state::{DurableNonce, Versions as NonceVersions},
             State as NonceState,
@@ -25,7 +25,7 @@ use {
         transaction::{Result, SanitizedTransaction, TransactionAccountLocks, TransactionError},
         transaction_context::TransactionAccount,
     },
-    solana_signed_message::SignedMessage,
+    solana_signed_message::{MessageAddressTableLookup, SignedMessage},
     solana_svm::{
         account_loader::TransactionLoadResult,
         nonce_info::{NonceFull, NonceInfo},
@@ -123,12 +123,12 @@ impl Accounts {
     pub fn load_lookup_table_addresses(
         &self,
         ancestors: &Ancestors,
-        address_table_lookup: &MessageAddressTableLookup,
+        address_table_lookup: MessageAddressTableLookup,
         slot_hashes: &SlotHashes,
     ) -> std::result::Result<LoadedAddresses, AddressLookupError> {
         let table_account = self
             .accounts_db
-            .load_with_fixed_root(ancestors, &address_table_lookup.account_key)
+            .load_with_fixed_root(ancestors, address_table_lookup.account_key)
             .map(|(account, _rent)| account)
             .ok_or(AddressLookupError::LookupTableAccountNotFound)?;
 
@@ -140,12 +140,12 @@ impl Accounts {
             Ok(LoadedAddresses {
                 writable: lookup_table.lookup(
                     current_slot,
-                    &address_table_lookup.writable_indexes,
+                    address_table_lookup.writable_indexes,
                     slot_hashes,
                 )?,
                 readonly: lookup_table.lookup(
                     current_slot,
-                    &address_table_lookup.readonly_indexes,
+                    address_table_lookup.readonly_indexes,
                     slot_hashes,
                 )?,
             })
@@ -930,15 +930,15 @@ mod tests {
 
         let invalid_table_key = Pubkey::new_unique();
         let address_table_lookup = MessageAddressTableLookup {
-            account_key: invalid_table_key,
-            writable_indexes: vec![],
-            readonly_indexes: vec![],
+            account_key: &invalid_table_key,
+            writable_indexes: &[],
+            readonly_indexes: &[],
         };
 
         assert_eq!(
             accounts.load_lookup_table_addresses(
                 &ancestors,
-                &address_table_lookup,
+                address_table_lookup,
                 &SlotHashes::default(),
             ),
             Err(AddressLookupError::LookupTableAccountNotFound),
@@ -957,15 +957,15 @@ mod tests {
         accounts.store_slow_uncached(0, &invalid_table_key, &invalid_table_account);
 
         let address_table_lookup = MessageAddressTableLookup {
-            account_key: invalid_table_key,
-            writable_indexes: vec![],
-            readonly_indexes: vec![],
+            account_key: &invalid_table_key,
+            writable_indexes: &[],
+            readonly_indexes: &[],
         };
 
         assert_eq!(
             accounts.load_lookup_table_addresses(
                 &ancestors,
-                &address_table_lookup,
+                address_table_lookup,
                 &SlotHashes::default(),
             ),
             Err(AddressLookupError::InvalidAccountOwner),
@@ -984,15 +984,15 @@ mod tests {
         accounts.store_slow_uncached(0, &invalid_table_key, &invalid_table_account);
 
         let address_table_lookup = MessageAddressTableLookup {
-            account_key: invalid_table_key,
-            writable_indexes: vec![],
-            readonly_indexes: vec![],
+            account_key: &invalid_table_key,
+            writable_indexes: &[],
+            readonly_indexes: &[],
         };
 
         assert_eq!(
             accounts.load_lookup_table_addresses(
                 &ancestors,
-                &address_table_lookup,
+                address_table_lookup,
                 &SlotHashes::default(),
             ),
             Err(AddressLookupError::InvalidAccountData),
@@ -1023,15 +1023,15 @@ mod tests {
         accounts.store_slow_uncached(0, &table_key, &table_account);
 
         let address_table_lookup = MessageAddressTableLookup {
-            account_key: table_key,
-            writable_indexes: vec![0],
-            readonly_indexes: vec![1],
+            account_key: &table_key,
+            writable_indexes: &[0],
+            readonly_indexes: &[1],
         };
 
         assert_eq!(
             accounts.load_lookup_table_addresses(
                 &ancestors,
-                &address_table_lookup,
+                address_table_lookup,
                 &SlotHashes::default(),
             ),
             Ok(LoadedAddresses {

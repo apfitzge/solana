@@ -101,6 +101,12 @@ pub trait Message: Debug {
             Ok(())
         }
     }
+
+    /// Get the number of lookup tables.
+    fn num_lookup_tables(&self) -> usize;
+
+    /// Get message address table lookups used in the message
+    fn message_address_table_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup>;
 }
 
 pub trait SignedMessage: Message {
@@ -145,6 +151,18 @@ pub struct Instruction<'a> {
     pub accounts: &'a [u8],
     /// The program input data.
     pub data: &'a [u8],
+}
+
+/// A non-owning version of [`MessageAddressTableLookup`] that references
+/// the account key and indexes used to load writable and readonly accounts
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct MessageAddressTableLookup<'a> {
+    /// Address lookup table account key
+    pub account_key: &'a Pubkey,
+    /// List of indexes used to load writable account addresses
+    pub writable_indexes: &'a [u8],
+    /// List of indexes used to load readonly account addresses
+    pub readonly_indexes: &'a [u8],
 }
 
 // Implement for the "reference" `SanitizedMessage` type.
@@ -213,6 +231,20 @@ impl Message for SanitizedMessage {
     fn has_duplicates(&self) -> bool {
         SanitizedMessage::has_duplicates(self)
     }
+
+    fn num_lookup_tables(&self) -> usize {
+        SanitizedMessage::message_address_table_lookups(self).len()
+    }
+
+    fn message_address_table_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup> {
+        SanitizedMessage::message_address_table_lookups(self)
+            .iter()
+            .map(|lookup| MessageAddressTableLookup {
+                account_key: &lookup.account_key,
+                writable_indexes: lookup.writable_indexes.as_slice(),
+                readonly_indexes: lookup.readonly_indexes.as_slice(),
+            })
+    }
 }
 
 impl Message for SanitizedTransaction {
@@ -279,6 +311,14 @@ impl Message for SanitizedTransaction {
 
     fn has_duplicates(&self) -> bool {
         Message::has_duplicates(self.message())
+    }
+
+    fn num_lookup_tables(&self) -> usize {
+        Message::num_lookup_tables(self.message())
+    }
+
+    fn message_address_table_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup> {
+        Message::message_address_table_lookups(self.message())
     }
 }
 

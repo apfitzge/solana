@@ -26,7 +26,7 @@ use {
         clock::{Slot, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
         feature_set, saturating_add_assign,
         timing::timestamp,
-        transaction::{self, AddressLoader, SanitizedTransaction, TransactionError},
+        transaction::{self, SanitizedTransaction, TransactionError},
     },
     solana_signed_message::Message,
     solana_svm::{
@@ -452,8 +452,9 @@ impl Consumer {
             } else {
                 // Any transaction executed between sanitization time and now may have closed the lookup table(s).
                 // Above re-sanitization already loads addresses, so don't need to re-check in that case.
-                let lookup_tables = tx.message().message_address_table_lookups();
-                if !lookup_tables.is_empty() {
+                let num_lookup_tables = tx.num_lookup_tables();
+                let lookup_tables = tx.message_address_table_lookups();
+                if num_lookup_tables != 0 {
                     bank.load_addresses(lookup_tables)?;
                 }
             }
