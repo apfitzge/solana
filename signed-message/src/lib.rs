@@ -7,7 +7,7 @@ use {
         pubkey::Pubkey,
         signature::Signature,
         sysvar::instructions::{BorrowedAccountMeta, BorrowedInstruction},
-        transaction::SanitizedTransaction,
+        transaction::{SanitizedTransaction, TransactionError},
     },
 };
 
@@ -60,6 +60,9 @@ pub trait Message: Debug {
     /// Return the signers for the instruction at the given index.
     fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey>;
 
+    /// Checks for duplicate accounts in the message
+    fn has_duplicates(&self) -> bool;
+
     /// Decompile message instructions without cloning account keys
     /// TODO: Remove this - there's an allocation!
     fn decompile_instructions(&self) -> Vec<BorrowedInstruction> {
@@ -86,6 +89,17 @@ pub trait Message: Debug {
                 }
             })
             .collect()
+    }
+
+    /// Validate a transaction message against locked accounts
+    fn validate_account_locks(&self, tx_account_lock_limit: usize) -> Result<(), TransactionError> {
+        if self.has_duplicates() {
+            Err(TransactionError::AccountLoadedTwice)
+        } else if self.account_keys().len() > tx_account_lock_limit {
+            Err(TransactionError::TooManyAccountLocks)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -181,6 +195,10 @@ impl Message for SanitizedMessage {
     fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
         SanitizedMessage::get_ix_signers(self, index)
     }
+
+    fn has_duplicates(&self) -> bool {
+        SanitizedMessage::has_duplicates(self)
+    }
 }
 
 impl Message for SanitizedTransaction {
@@ -243,6 +261,10 @@ impl Message for SanitizedTransaction {
 
     fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
         Message::get_ix_signers(self.message(), index)
+    }
+
+    fn has_duplicates(&self) -> bool {
+        Message::has_duplicates(self.message())
     }
 }
 

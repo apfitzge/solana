@@ -505,11 +505,8 @@ impl SchedulerController {
                 })
                 .inspect(|_| saturating_add_assign!(post_sanitization_count, 1))
                 .filter(|(_packet, tx)| {
-                    SanitizedTransaction::validate_account_locks(
-                        tx.message(),
-                        transaction_account_lock_limit,
-                    )
-                    .is_ok()
+                    tx.validate_account_locks(transaction_account_lock_limit)
+                        .is_ok()
                 })
                 .filter_map(|(packet, tx)| {
                     process_compute_budget_instructions(tx.program_instructions_iter())
