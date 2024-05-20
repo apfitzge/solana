@@ -13,8 +13,8 @@ use {
         reward_info::RewardInfo,
         reward_type::RewardType,
         system_program,
-        transaction::SanitizedTransaction,
     },
+    solana_signed_message::Message,
     solana_svm::account_rent_state::RentState,
     solana_vote::vote_account::VoteAccountsHashMap,
     std::{result::Result, sync::atomic::Ordering::Relaxed},
@@ -82,12 +82,12 @@ impl Bank {
 
     pub fn calculate_reward_for_transaction(
         &self,
-        transaction: &SanitizedTransaction,
+        transaction: &impl Message,
         fee_budget_limits: &FeeBudgetLimits,
     ) -> u64 {
         let (reward, _burn) = if self.feature_set.is_active(&reward_full_priority_fee::id()) {
             let fee_details = self.fee_structure().calculate_fee_details(
-                transaction.message(),
+                transaction,
                 fee_budget_limits,
                 self.feature_set
                     .is_active(&include_loaded_accounts_data_size_in_fee_calculation::id()),
@@ -95,7 +95,7 @@ impl Bank {
             self.calculate_reward_and_burn_fee_details(&CollectorFeeDetails::from(fee_details))
         } else {
             let fee = self.fee_structure().calculate_fee(
-                transaction.message(),
+                transaction,
                 5_000, // this just needs to be non-zero
                 fee_budget_limits,
                 self.feature_set

@@ -607,7 +607,7 @@ impl SchedulerController {
     /// Any difference in the prioritization is negligible for
     /// the current transaction costs.
     fn calculate_priority_and_cost(
-        transaction: &SanitizedTransaction,
+        transaction: &impl SignedMessage,
         fee_budget_limits: &FeeBudgetLimits,
         bank: &Bank,
     ) -> (u64, u64) {
