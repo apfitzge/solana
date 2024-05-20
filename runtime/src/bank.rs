@@ -3668,7 +3668,7 @@ impl Bank {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn load_and_execute_transactions(
         &self,
-        sanitized_txs: &[SanitizedTransaction],
+        sanitized_txs: &[impl SignedMessage],
         lock_results: &[Result<()>],
         max_age: usize,
         recording_config: ExecutionRecordingConfig,
@@ -3748,7 +3748,7 @@ impl Bank {
         let mut collect_logs_time = Measure::start("collect_logs_time");
         for (execution_result, tx) in sanitized_output.execution_results.iter().zip(sanitized_txs) {
             if let Some(debug_keys) = &self.transaction_debug_keys {
-                for key in tx.message().account_keys().iter() {
+                for key in tx.account_keys().iter() {
                     if debug_keys.contains(key) {
                         let result = execution_result.flattened_result();
                         info!("slot: {} result: {:?} tx: {:?}", self.slot, result, tx);
@@ -3767,7 +3767,7 @@ impl Bank {
                     .mentioned_addresses
                     .is_empty()
                 {
-                    for key in tx.message().account_keys().iter() {
+                    for key in tx.account_keys().iter() {
                         if transaction_log_collector_config
                             .mentioned_addresses
                             .contains(key)
@@ -3820,7 +3820,7 @@ impl Bank {
                 // Signature count must be accumulated only if the transaction
                 // is executed, otherwise a mismatched count between banking and
                 // replay could occur
-                signature_count += u64::from(tx.message().header().num_required_signatures);
+                signature_count += tx.num_signatures();
                 executed_transactions_count += 1;
 
                 if !is_vote {
