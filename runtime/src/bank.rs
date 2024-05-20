@@ -6737,7 +6737,7 @@ impl Bank {
     /// Checks a batch of sanitized transactions again bank for age and status
     pub fn check_transactions_with_forwarding_delay(
         &self,
-        transactions: &[SanitizedTransaction],
+        transactions: &[impl SignedMessage],
         filter: &[transaction::Result<()>],
         forward_transactions_to_leader_at_slot_offset: u64,
     ) -> Vec<TransactionCheckResult> {

@@ -26,7 +26,7 @@ use {
         clock::{Slot, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
         feature_set, saturating_add_assign,
         timing::timestamp,
-        transaction::{self, SanitizedTransaction, TransactionError},
+        transaction::{self, TransactionError},
     },
     solana_signed_message::{Message, SignedMessage},
     solana_svm::{
@@ -214,7 +214,7 @@ impl Consumer {
         &self,
         bank: &Arc<Bank>,
         bank_creation_time: &Instant,
-        sanitized_transactions: &[SanitizedTransaction],
+        sanitized_transactions: &[impl SignedMessage],
         banking_stage_stats: &BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> ProcessTransactionsSummary {
@@ -784,7 +784,7 @@ impl Consumer {
     /// * `pending_indexes` - identifies which indexes in the `transactions` list are still pending
     fn filter_pending_packets_from_pending_txs(
         bank: &Bank,
-        transactions: &[SanitizedTransaction],
+        transactions: &[impl SignedMessage],
         pending_indexes: &[usize],
     ) -> Vec<usize> {
         let filter =
@@ -869,7 +869,7 @@ mod tests {
             signature::Keypair,
             signer::Signer,
             system_instruction, system_program, system_transaction,
-            transaction::{MessageHash, Transaction, VersionedTransaction},
+            transaction::{MessageHash, SanitizedTransaction, Transaction, VersionedTransaction},
         },
         solana_transaction_status::{TransactionStatusMeta, VersionedTransactionWithStatusMeta},
         std::{
