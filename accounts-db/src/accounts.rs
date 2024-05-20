@@ -606,9 +606,9 @@ impl Accounts {
 
     #[must_use]
     #[allow(clippy::needless_collect)]
-    pub fn lock_accounts_with_results<'a>(
+    pub fn lock_accounts_with_results<'a, T: SignedMessage + 'a>(
         &self,
-        txs: impl Iterator<Item = &'a SanitizedTransaction>,
+        txs: impl Iterator<Item = &'a T>,
         results: impl Iterator<Item = Result<()>>,
         tx_account_lock_limit: usize,
     ) -> Vec<Result<()>> {
