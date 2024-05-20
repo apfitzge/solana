@@ -16,10 +16,8 @@ use {
     solana_perf::{data_budget::DataBudget, packet::Packet},
     solana_poh::poh_recorder::PohRecorder,
     solana_runtime::bank_forks::BankForks,
-    solana_sdk::{
-        feature_set::FeatureSet, pubkey::Pubkey, transaction::SanitizedTransaction,
-        transport::TransportError,
-    },
+    solana_sdk::{feature_set::FeatureSet, pubkey::Pubkey, transport::TransportError},
+    solana_signed_message::SignedMessage,
     solana_streamer::sendmmsg::batch_send,
     std::{
         iter::repeat,
@@ -64,7 +62,7 @@ impl Forwarder {
 
     pub fn try_add_packet(
         &mut self,
-        sanitized_transaction: &SanitizedTransaction,
+        sanitized_transaction: &impl SignedMessage,
         immutable_packet: Arc<ImmutableDeserializedPacket>,
         feature_set: &FeatureSet,
     ) -> bool {

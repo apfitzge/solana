@@ -1,14 +1,18 @@
-use solana_sdk::{
-    hash::Hash,
-    instruction::CompiledInstruction,
-    message::{AccountKeys, SanitizedMessage},
-    pubkey::Pubkey,
-    signature::Signature,
-    sysvar::instructions::{BorrowedAccountMeta, BorrowedInstruction},
-    transaction::SanitizedTransaction,
+use {
+    core::fmt::Debug,
+    solana_sdk::{
+        hash::Hash,
+        instruction::CompiledInstruction,
+        message::{AccountKeys, SanitizedMessage, TransactionSignatureDetails},
+        pubkey::Pubkey,
+        signature::Signature,
+        sysvar::instructions::{BorrowedAccountMeta, BorrowedInstruction},
+        transaction::SanitizedTransaction,
+    },
 };
 
-pub trait Message {
+// - Debug to support legacy logging
+pub trait Message: Debug {
     /// Return the number of signatures in the message.
     fn num_signatures(&self) -> u64;
 
@@ -46,6 +50,9 @@ pub trait Message {
 
     /// Returns `true` if the account at `index` is not a loader key.
     fn is_non_loader_key(&self, index: usize) -> bool;
+
+    /// Return signature details.
+    fn get_signature_details(&self) -> TransactionSignatureDetails;
 
     /// Decompile message instructions without cloning account keys
     /// TODO: Remove this - there's an allocation!
@@ -86,6 +93,10 @@ pub trait SignedMessage: Message {
     /// Returns the message hash.
     // TODO: consider moving this to Message
     fn message_hash(&self) -> &Hash;
+
+    /// Returns true if the transaction is a simple vote transaction.
+    // TODO: consider moving this to Message
+    fn is_simple_vote_transaction(&self) -> bool;
 }
 
 /// A non-owning version of [`CompiledInstruction`] that references
@@ -152,6 +163,10 @@ impl Message for SanitizedMessage {
     fn is_non_loader_key(&self, index: usize) -> bool {
         SanitizedMessage::is_non_loader_key(self, index)
     }
+
+    fn get_signature_details(&self) -> TransactionSignatureDetails {
+        SanitizedMessage::get_signature_details(self)
+    }
 }
 
 impl Message for SanitizedTransaction {
@@ -203,6 +218,10 @@ impl Message for SanitizedTransaction {
     fn is_non_loader_key(&self, index: usize) -> bool {
         Message::is_non_loader_key(self.message(), index)
     }
+
+    fn get_signature_details(&self) -> TransactionSignatureDetails {
+        Message::get_signature_details(self.message())
+    }
 }
 
 impl SignedMessage for SanitizedTransaction {
@@ -216,6 +235,10 @@ impl SignedMessage for SanitizedTransaction {
 
     fn message_hash(&self) -> &Hash {
         self.message_hash()
+    }
+
+    fn is_simple_vote_transaction(&self) -> bool {
+        self.is_simple_vote_transaction()
     }
 }
 

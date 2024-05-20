@@ -7,7 +7,8 @@ use {
         transaction_cost::TransactionCost,
     },
     solana_perf::packet::Packet,
-    solana_sdk::{feature_set::FeatureSet, transaction::SanitizedTransaction},
+    solana_sdk::feature_set::FeatureSet,
+    solana_signed_message::SignedMessage,
     std::sync::Arc,
 };
 
@@ -104,7 +105,7 @@ impl ForwardPacketBatchesByAccounts {
 
     pub fn try_add_packet(
         &mut self,
-        sanitized_transaction: &SanitizedTransaction,
+        sanitized_transaction: &impl SignedMessage,
         immutable_packet: Arc<ImmutableDeserializedPacket>,
         feature_set: &FeatureSet,
     ) -> bool {
@@ -171,8 +172,12 @@ mod tests {
         crate::banking_stage::unprocessed_packet_batches::DeserializedPacket,
         solana_cost_model::transaction_cost::UsageCostDetails,
         solana_sdk::{
-            compute_budget::ComputeBudgetInstruction, feature_set::FeatureSet, message::Message,
-            pubkey::Pubkey, system_instruction, transaction::Transaction,
+            compute_budget::ComputeBudgetInstruction,
+            feature_set::FeatureSet,
+            message::Message,
+            pubkey::Pubkey,
+            system_instruction,
+            transaction::{SanitizedTransaction, Transaction},
         },
     };
 

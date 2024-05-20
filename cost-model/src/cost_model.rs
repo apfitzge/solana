@@ -20,21 +20,19 @@ use {
         borsh1::try_from_slice_unchecked,
         compute_budget::{self, ComputeBudgetInstruction},
         feature_set::{self, include_loaded_accounts_data_size_in_fee_calculation, FeatureSet},
-        instruction::CompiledInstruction,
         program_utils::limited_deserialize,
         pubkey::Pubkey,
         system_instruction::SystemInstruction,
         system_program,
-        transaction::SanitizedTransaction,
     },
-    solana_signed_message::Message,
+    solana_signed_message::{Instruction, SignedMessage},
 };
 
 pub struct CostModel;
 
 impl CostModel {
     pub fn calculate_cost(
-        transaction: &SanitizedTransaction,
+        transaction: &impl SignedMessage,
         feature_set: &FeatureSet,
     ) -> TransactionCost {
         if transaction.is_simple_vote_transaction() {
@@ -54,8 +52,8 @@ impl CostModel {
         }
     }
 
-    fn get_signature_cost(tx_cost: &mut UsageCostDetails, transaction: &SanitizedTransaction) {
-        let signatures_count_detail = transaction.message().get_signature_details();
+    fn get_signature_cost(tx_cost: &mut UsageCostDetails, transaction: &impl SignedMessage) {
+        let signatures_count_detail = transaction.get_signature_details();
         tx_cost.num_transaction_signatures = signatures_count_detail.num_transaction_signatures();
         tx_cost.num_secp256k1_instruction_signatures =
             signatures_count_detail.num_secp256k1_instruction_signatures();
@@ -76,8 +74,7 @@ impl CostModel {
             );
     }
 
-    fn get_writable_accounts(transaction: &SanitizedTransaction) -> Vec<Pubkey> {
-        let message = transaction.message();
+    fn get_writable_accounts(message: &impl SignedMessage) -> Vec<Pubkey> {
         message
             .account_keys()
             .iter()
@@ -94,13 +91,13 @@ impl CostModel {
 
     fn get_write_lock_cost(
         tx_cost: &mut UsageCostDetails,
-        transaction: &SanitizedTransaction,
+        message: &impl SignedMessage,
         feature_set: &FeatureSet,
     ) {
-        tx_cost.writable_accounts = Self::get_writable_accounts(transaction);
+        tx_cost.writable_accounts = Self::get_writable_accounts(message);
         let num_write_locks =
             if feature_set.is_active(&feature_set::cost_model_requested_write_lock_cost::id()) {
-                transaction.message().num_write_locks()
+                message.num_write_locks()
             } else {
                 tx_cost.writable_accounts.len() as u64
             };
@@ -109,7 +106,7 @@ impl CostModel {
 
     fn get_transaction_cost(
         tx_cost: &mut UsageCostDetails,
-        transaction: &SanitizedTransaction,
+        message: &impl SignedMessage,
         feature_set: &FeatureSet,
     ) {
         let mut programs_execution_costs = 0u64;
@@ -118,7 +115,7 @@ impl CostModel {
         let mut compute_unit_limit_is_set = false;
         let mut has_user_space_instructions = false;
 
-        for (program_id, instruction) in transaction.message().program_instructions_iter() {
+        for (program_id, instruction) in message.program_instructions_iter() {
             let ix_execution_cost =
                 if let Some(builtin_cost) = BUILT_IN_INSTRUCTION_COSTS.get(program_id) {
                     *builtin_cost
@@ -136,7 +133,7 @@ impl CostModel {
 
             if compute_budget::check_id(program_id) {
                 if let Ok(ComputeBudgetInstruction::SetComputeUnitLimit(_)) =
-                    try_from_slice_unchecked(&instruction.data)
+                    try_from_slice_unchecked(instruction.data)
                 {
                     compute_unit_limit_is_set = true;
                 }
@@ -145,7 +142,7 @@ impl CostModel {
 
         // if failed to process compute_budget instructions, the transaction will not be executed
         // by `bank`, therefore it should be considered as no execution cost by cost model.
-        match process_compute_budget_instructions(transaction.program_instructions_iter()) {
+        match process_compute_budget_instructions(message.program_instructions_iter()) {
             Ok(compute_budget_limits) => {
                 // if tx contained user-space instructions and a more accurate estimate available correct it,
                 // where "user-space instructions" must be specifically checked by
@@ -204,10 +201,10 @@ impl CostModel {
 
     fn calculate_account_data_size_on_instruction(
         program_id: &Pubkey,
-        instruction: &CompiledInstruction,
+        instruction: Instruction,
     ) -> u64 {
         if program_id == &system_program::id() {
-            if let Ok(instruction) = limited_deserialize(&instruction.data) {
+            if let Ok(instruction) = limited_deserialize(instruction.data) {
                 return Self::calculate_account_data_size_on_deserialized_system_instruction(
                     instruction,
                 );
@@ -218,9 +215,8 @@ impl CostModel {
 
     /// eventually, potentially determine account data size of all writable accounts
     /// at the moment, calculate account data size of account creation
-    fn calculate_account_data_size(transaction: &SanitizedTransaction) -> u64 {
-        transaction
-            .message()
+    fn calculate_account_data_size(message: &impl SignedMessage) -> u64 {
+        message
             .program_instructions_iter()
             .map(|(program_id, instruction)| {
                 Self::calculate_account_data_size_on_instruction(program_id, instruction)
@@ -240,9 +236,8 @@ mod tests {
             instruction::{CompiledInstruction, Instruction},
             message::Message,
             signature::{Keypair, Signer},
-            system_instruction::{self},
-            system_program, system_transaction,
-            transaction::Transaction,
+            system_instruction, system_program, system_transaction,
+            transaction::{SanitizedTransaction, Transaction},
         },
     };
 
