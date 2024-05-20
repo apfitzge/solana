@@ -18,6 +18,7 @@ serde_derive = { workspace = true }
 solana-frozen-abi = { workspace = true }
 solana-frozen-abi-macro = { workspace = true }
 solana-sdk = { workspace = true }
+solana-signed-message = { workspace = true }
 thiserror = { workspace = true }
 
 [lib]

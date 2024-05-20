@@ -21,7 +21,6 @@ use {
     solana_runtime::{
         bank::{Bank, LoadAndExecuteTransactionsOutput},
         compute_budget_details::get_compute_budget_details,
-        transaction_batch::TransactionBatch,
     },
     solana_sdk::{
         clock::{Slot, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
@@ -493,8 +492,12 @@ impl Consumer {
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
         // and WouldExceedMaxAccountDataCostLimit
-        let mut execute_and_commit_transactions_output =
-            self.execute_and_commit_transactions_locked(bank, &batch);
+        let mut execute_and_commit_transactions_output = self
+            .execute_and_commit_transactions_locked(
+                bank,
+                batch.sanitized_transactions(),
+                batch.lock_results(),
+            );
 
         // Once the accounts are new transactions can enter the pipeline to process them
         let (_, unlock_us) = measure_us!(drop(batch));
@@ -559,7 +562,8 @@ impl Consumer {
     fn execute_and_commit_transactions_locked(
         &self,
         bank: &Arc<Bank>,
-        batch: &TransactionBatch,
+        txs: &[SanitizedTransaction],
+        lock_results: &[transaction::Result<()>],
     ) -> ExecuteAndCommitTransactionsOutput {
         let transaction_status_sender_enabled = self.committer.transaction_status_sender_enabled();
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();
@@ -569,15 +573,14 @@ impl Consumer {
             // If the extra meta-data services are enabled for RPC, collect the
             // pre-balances for native and token programs.
             if transaction_status_sender_enabled {
-                pre_balance_info.native = bank.collect_balances(batch);
+                pre_balance_info.native = bank.collect_balances(txs);
                 pre_balance_info.token =
-                    collect_token_balances(bank, batch, &mut pre_balance_info.mint_decimals)
+                    collect_token_balances(bank, txs, &mut pre_balance_info.mint_decimals)
             }
         });
         execute_and_commit_timings.collect_balances_us = collect_balances_us;
 
-        let min_max = batch
-            .sanitized_transactions()
+        let min_max = txs
             .iter()
             .filter_map(|transaction| {
                 let round_compute_unit_price_enabled = false; // TODO get from working_bank.feature_set
@@ -590,8 +593,8 @@ impl Consumer {
 
         let (load_and_execute_transactions_output, load_execute_us) = measure_us!(bank
             .load_and_execute_transactions(
-                batch.sanitized_transactions(),
-                batch.lock_results(),
+                txs,
+                lock_results,
                 MAX_PROCESSING_AGE,
                 ExecutionRecordingConfig::new_single_setting(transaction_status_sender_enabled),
                 &mut execute_and_commit_timings.execute_timings,
@@ -617,7 +620,7 @@ impl Consumer {
         let (executed_transactions, execution_results_to_transactions_us) =
             measure_us!(execution_results
                 .iter()
-                .zip(batch.sanitized_transactions())
+                .zip(txs)
                 .filter_map(|(execution_result, tx)| {
                     if execution_result.was_executed() {
                         Some(tx.to_versioned_transaction())
@@ -676,7 +679,7 @@ impl Consumer {
 
         let (commit_time_us, commit_transaction_statuses) = if executed_transactions_count != 0 {
             self.committer.commit_transactions(
-                batch,
+                txs,
                 &mut loaded_transactions,
                 execution_results,
                 last_blockhash,
@@ -705,7 +708,7 @@ impl Consumer {
             load_execute_us,
             record_us,
             commit_time_us,
-            batch.sanitized_transactions().len(),
+            txs.len(),
         );
 
         debug!(

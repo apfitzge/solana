@@ -7,7 +7,7 @@ use {
         pubkey::Pubkey,
         signature::Signature,
         sysvar::instructions::{BorrowedAccountMeta, BorrowedInstruction},
-        transaction::{SanitizedTransaction, TransactionError},
+        transaction::{SanitizedTransaction, TransactionAccountLocks, TransactionError},
     },
 };
 
@@ -117,6 +117,20 @@ pub trait SignedMessage: Message {
     /// Returns true if the transaction is a simple vote transaction.
     // TODO: consider moving this to Message
     fn is_simple_vote_transaction(&self) -> bool;
+
+    /// Validate and return the account keys locked by this transaction
+    // TODO: Change return type so it has no allocation.
+    // TODO: consider moving this to Message
+    fn get_account_locks(
+        &self,
+        tx_account_lock_limit: usize,
+    ) -> Result<TransactionAccountLocks, TransactionError> {
+        self.validate_account_locks(tx_account_lock_limit)?;
+        Ok(self.get_account_locks_unchecked())
+    }
+
+    /// Return the account keys locked by this transaction without validation
+    fn get_account_locks_unchecked(&self) -> TransactionAccountLocks;
 }
 
 /// A non-owning version of [`CompiledInstruction`] that references
@@ -283,6 +297,10 @@ impl SignedMessage for SanitizedTransaction {
 
     fn is_simple_vote_transaction(&self) -> bool {
         self.is_simple_vote_transaction()
+    }
+
+    fn get_account_locks_unchecked(&self) -> TransactionAccountLocks {
+        SanitizedTransaction::get_account_locks_unchecked(self)
     }
 }
 

@@ -1,24 +1,20 @@
 use {
     super::leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
     itertools::Itertools,
-    solana_ledger::{
-        blockstore_processor::TransactionStatusSender, token_balances::collect_token_balances,
-    },
+    solana_ledger::blockstore_processor::TransactionStatusSender,
     solana_measure::measure_us,
     solana_runtime::{
-        bank::{Bank, CommitTransactionCounts, TransactionBalancesSet},
+        bank::{Bank, CommitTransactionCounts},
         bank_utils,
         prioritization_fee_cache::PrioritizationFeeCache,
-        transaction_batch::TransactionBatch,
     },
-    solana_sdk::{hash::Hash, pubkey::Pubkey, saturating_add_assign},
+    solana_sdk::{hash::Hash, pubkey::Pubkey},
+    solana_signed_message::SignedMessage,
     solana_svm::{
         account_loader::TransactionLoadResult,
         transaction_results::{TransactionExecutionResult, TransactionResults},
     },
-    solana_transaction_status::{
-        token_balances::TransactionTokenBalancesSet, TransactionTokenBalance,
-    },
+    solana_transaction_status::TransactionTokenBalance,
     solana_vote::vote_sender_types::ReplayVoteSender,
     std::{collections::HashMap, sync::Arc},
 };
@@ -63,7 +59,7 @@ impl Committer {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_transactions(
         &self,
-        batch: &TransactionBatch,
+        txs: &[impl SignedMessage],
         loaded_transactions: &mut [TransactionLoadResult],
         execution_results: Vec<TransactionExecutionResult>,
         last_blockhash: Hash,
@@ -79,12 +75,12 @@ impl Committer {
     ) -> (u64, Vec<CommitTransactionDetails>) {
         let executed_transactions = execution_results
             .iter()
-            .zip(batch.sanitized_transactions())
+            .zip(txs)
             .filter_map(|(execution_result, tx)| execution_result.was_executed().then_some(tx))
             .collect_vec();
 
         let (tx_results, commit_time_us) = measure_us!(bank.commit_transactions(
-            batch.sanitized_transactions(),
+            txs,
             loaded_transactions,
             execution_results,
             last_blockhash,
@@ -113,15 +109,11 @@ impl Committer {
             .collect();
 
         let ((), find_and_send_votes_us) = measure_us!({
-            bank_utils::find_and_send_votes(
-                batch.sanitized_transactions(),
-                &tx_results,
-                Some(&self.replay_vote_sender),
-            );
+            bank_utils::find_and_send_votes(txs, &tx_results, Some(&self.replay_vote_sender));
             self.collect_balances_and_send_status_batch(
                 tx_results,
                 bank,
-                batch,
+                txs,
                 pre_balance_info,
                 starting_transaction_index,
             );
@@ -134,46 +126,49 @@ impl Committer {
 
     fn collect_balances_and_send_status_batch(
         &self,
-        tx_results: TransactionResults,
-        bank: &Arc<Bank>,
-        batch: &TransactionBatch,
-        pre_balance_info: &mut PreBalanceInfo,
-        starting_transaction_index: Option<usize>,
+        _tx_results: TransactionResults,
+        _bank: &Arc<Bank>,
+        _txs: &[impl SignedMessage],
+        _pre_balance_info: &mut PreBalanceInfo,
+        _starting_transaction_index: Option<usize>,
     ) {
-        if let Some(transaction_status_sender) = &self.transaction_status_sender {
-            let txs = batch.sanitized_transactions().to_vec();
-            let post_balances = bank.collect_balances(batch);
-            let post_token_balances =
-                collect_token_balances(bank, batch, &mut pre_balance_info.mint_decimals);
-            let mut transaction_index = starting_transaction_index.unwrap_or_default();
-            let batch_transaction_indexes: Vec<_> = tx_results
-                .execution_results
-                .iter()
-                .map(|result| {
-                    if result.was_executed() {
-                        let this_transaction_index = transaction_index;
-                        saturating_add_assign!(transaction_index, 1);
-                        this_transaction_index
-                    } else {
-                        0
-                    }
-                })
-                .collect();
-            transaction_status_sender.send_transaction_status_batch(
-                bank.clone(),
-                txs,
-                tx_results.execution_results,
-                TransactionBalancesSet::new(
-                    std::mem::take(&mut pre_balance_info.native),
-                    post_balances,
-                ),
-                TransactionTokenBalancesSet::new(
-                    std::mem::take(&mut pre_balance_info.token),
-                    post_token_balances,
-                ),
-                tx_results.rent_debits,
-                batch_transaction_indexes,
-            );
+        if let Some(_transaction_status_sender) = &self.transaction_status_sender {
+            // TODO: Implement this for generic SignedMessage type.
+            // Skipping for now since this is RPC only.
+            todo!("implement transaction status sending")
+            // let txs = batch.sanitized_transactions().to_vec();
+            // let post_balances = bank.collect_balances(txs);
+            // let post_token_balances =
+            //     collect_token_balances(bank, txs, &mut pre_balance_info.mint_decimals);
+            // let mut transaction_index = starting_transaction_index.unwrap_or_default();
+            // let batch_transaction_indexes: Vec<_> = tx_results
+            //     .execution_results
+            //     .iter()
+            //     .map(|result| {
+            //         if result.was_executed() {
+            //             let this_transaction_index = transaction_index;
+            //             saturating_add_assign!(transaction_index, 1);
+            //             this_transaction_index
+            //         } else {
+            //             0
+            //         }
+            //     })
+            //     .collect();
+            // transaction_status_sender.send_transaction_status_batch(
+            //     bank.clone(),
+            //     txs,
+            //     tx_results.execution_results,
+            //     TransactionBalancesSet::new(
+            //         std::mem::take(&mut pre_balance_info.native),
+            //         post_balances,
+            //     ),
+            //     TransactionTokenBalancesSet::new(
+            //         std::mem::take(&mut pre_balance_info.token),
+            //         post_token_balances,
+            //     ),
+            //     tx_results.rent_debits,
+            //     batch_transaction_indexes,
+            // );
         }
     }
 }

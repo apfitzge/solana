@@ -7,7 +7,7 @@ use {
     solana_sdk::{pubkey::Pubkey, signature::Signer},
 };
 use {
-    solana_sdk::transaction::SanitizedTransaction,
+    solana_signed_message::SignedMessage,
     solana_svm::transaction_results::TransactionResults,
     solana_vote::{vote_parser, vote_sender_types::ReplayVoteSender},
 };
@@ -37,7 +37,7 @@ pub fn setup_bank_and_vote_pubkeys_for_tests(
 }
 
 pub fn find_and_send_votes(
-    sanitized_txs: &[SanitizedTransaction],
+    sanitized_txs: &[impl SignedMessage],
     tx_results: &TransactionResults,
     vote_sender: Option<&ReplayVoteSender>,
 ) {

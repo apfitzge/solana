@@ -6395,6 +6395,7 @@ dependencies = [
  "solana-rayon-threadlimit",
  "solana-runtime",
  "solana-sdk",
+ "solana-signed-message",
  "solana-stake-program",
  "solana-storage-bigtable",
  "solana-storage-proto",
@@ -7657,6 +7658,7 @@ dependencies = [
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
  "solana-sdk",
+ "solana-signed-message",
  "thiserror",
 ]
 

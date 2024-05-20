@@ -5898,14 +5898,14 @@ fn test_collect_balances() {
     );
     let txs = vec![tx0, tx1];
     let batch = bank0.prepare_batch_for_tests(txs.clone());
-    let balances = bank0.collect_balances(&batch);
+    let balances = bank0.collect_balances(batch.sanitized_transactions());
     assert_eq!(balances.len(), 2);
     assert_eq!(balances[0], vec![8, 11, 1]);
     assert_eq!(balances[1], vec![8, 0, 1]);
 
     let txs: Vec<_> = txs.into_iter().rev().collect();
     let batch = bank0.prepare_batch_for_tests(txs);
-    let balances = bank0.collect_balances(&batch);
+    let balances = bank0.collect_balances(batch.sanitized_transactions());
     assert_eq!(balances.len(), 2);
     assert_eq!(balances[0], vec![8, 0, 1]);
     assert_eq!(balances[1], vec![8, 11, 1]);

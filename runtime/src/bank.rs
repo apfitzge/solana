@@ -3653,11 +3653,11 @@ impl Bank {
         self.check_status_cache(sanitized_txs, lock_results, error_counters)
     }
 
-    pub fn collect_balances(&self, batch: &TransactionBatch) -> TransactionBalances {
+    pub fn collect_balances(&self, txs: &[impl SignedMessage]) -> TransactionBalances {
         let mut balances: TransactionBalances = vec![];
-        for transaction in batch.sanitized_transactions() {
+        for transaction in txs {
             let mut transaction_balances: Vec<u64> = vec![];
-            for account_key in transaction.message().account_keys().iter() {
+            for account_key in transaction.account_keys().iter() {
                 transaction_balances.push(self.get_balance(account_key));
             }
             balances.push(transaction_balances);
@@ -4850,7 +4850,7 @@ impl Bank {
         log_messages_bytes_limit: Option<usize>,
     ) -> (TransactionResults, TransactionBalancesSet) {
         let pre_balances = if collect_balances {
-            self.collect_balances(batch)
+            self.collect_balances(batch.sanitized_transactions())
         } else {
             vec![]
         };
@@ -4893,7 +4893,7 @@ impl Bank {
             timings,
         );
         let post_balances = if collect_balances {
-            self.collect_balances(batch)
+            self.collect_balances(batch.sanitized_transactions())
         } else {
             vec![]
         };

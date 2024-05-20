@@ -1,13 +1,15 @@
 use {
-    crate::{bank::Bank, compute_budget_details::GetComputeBudgetDetails, prioritization_fee::*},
+    crate::{
+        bank::Bank, compute_budget_details::get_compute_budget_details, prioritization_fee::*,
+    },
     crossbeam_channel::{unbounded, Receiver, Sender},
     log::*,
     solana_measure::measure,
     solana_sdk::{
         clock::{BankId, Slot},
         pubkey::Pubkey,
-        transaction::SanitizedTransaction,
     },
+    solana_signed_message::SignedMessage,
     std::{
         collections::{BTreeMap, HashMap},
         sync::{
@@ -192,7 +194,7 @@ impl PrioritizationFeeCache {
     /// Update with a list of non-vote transactions' compute_budget_details and account_locks; Only
     /// transactions have both valid compute_budget_details and account_locks will be used to update
     /// fee_cache asynchronously.
-    pub fn update<'a>(&self, bank: &Bank, txs: impl Iterator<Item = &'a SanitizedTransaction>) {
+    pub fn update<'a, T: SignedMessage + 'a>(&self, bank: &Bank, txs: impl Iterator<Item = &'a T>) {
         let (_, send_updates_time) = measure!(
             {
                 for sanitized_transaction in txs {
@@ -203,8 +205,10 @@ impl PrioritizationFeeCache {
                     }
 
                     let round_compute_unit_price_enabled = false; // TODO: bank.feture_set.is_active(round_compute_unit_price)
-                    let compute_budget_details = sanitized_transaction
-                        .get_compute_budget_details(round_compute_unit_price_enabled);
+                    let compute_budget_details = get_compute_budget_details(
+                        sanitized_transaction,
+                        round_compute_unit_price_enabled,
+                    );
                     let account_locks = sanitized_transaction
                         .get_account_locks(bank.get_transaction_account_lock_limit());
 
