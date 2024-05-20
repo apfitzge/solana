@@ -1,9 +1,11 @@
 use {
     core::fmt::Debug,
     solana_sdk::{
+        feature_set::FeatureSet,
         hash::Hash,
         instruction::CompiledInstruction,
         message::{AccountKeys, SanitizedMessage, TransactionSignatureDetails},
+        precompiles::{get_precompiles, is_precompile},
         pubkey::Pubkey,
         signature::Signature,
         sysvar::instructions::{BorrowedAccountMeta, BorrowedInstruction},
@@ -107,6 +109,32 @@ pub trait Message: Debug {
 
     /// Get message address table lookups used in the message
     fn message_address_table_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup>;
+
+    /// Verify precompiles in the message
+    fn verify_precompiles(&self, feature_set: &FeatureSet) -> Result<(), TransactionError> {
+        let is_enabled = |feature_id: &Pubkey| feature_set.is_active(feature_id);
+        let has_precompiles = self
+            .program_instructions_iter()
+            .any(|(program_id, _)| is_precompile(program_id, is_enabled));
+
+        if has_precompiles {
+            let instructions_data: Vec<_> = self
+                .instructions_iter()
+                .map(|instruction| instruction.data)
+                .collect();
+            for (program_id, instruction) in self.program_instructions_iter() {
+                if let Some(precompile) = get_precompiles()
+                    .iter()
+                    .find(|precompile| precompile.check_id(program_id, is_enabled))
+                {
+                    precompile
+                        .verify(instruction.data, &instructions_data, feature_set)
+                        .map_err(|_| TransactionError::InvalidAccountIndex)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub trait SignedMessage: Message {

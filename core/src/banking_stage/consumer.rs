@@ -441,22 +441,18 @@ impl Consumer {
         let pre_results = txs.iter().zip(max_slot_ages).map(|(tx, max_slot_age)| {
             if *max_slot_age < bank.slot() {
                 // Attempt re-sanitization after epoch-cross.
-                // Re-sanitized transaction should be equal to the original transaction,
-                // but whether it will pass sanitization needs to be checked.
-                let resanitized_tx =
-                    bank.fully_verify_transaction(tx.to_versioned_transaction())?;
-                if resanitized_tx != *tx {
-                    // Sanitization before/after epoch give different transaction data - do not execute.
-                    return Err(TransactionError::ResanitizationNeeded);
-                }
-            } else {
-                // Any transaction executed between sanitization time and now may have closed the lookup table(s).
-                // Above re-sanitization already loads addresses, so don't need to re-check in that case.
-                let num_lookup_tables = tx.num_lookup_tables();
-                let lookup_tables = tx.message_address_table_lookups();
-                if num_lookup_tables != 0 {
-                    bank.load_addresses(lookup_tables)?;
-                }
+                // Only perform necessary checks (for now).
+                // Redo precompile checks - feature-gates may have changed results
+                // Redo address load checks - lookup tables may have been closed (done below)
+                tx.verify_precompiles(&bank.feature_set)?;
+            }
+
+            // Any transaction executed between sanitization time and now may have closed the lookup table(s).
+            // Above re-sanitization already loads addresses, so don't need to re-check in that case.
+            let num_lookup_tables = tx.num_lookup_tables();
+            let lookup_tables = tx.message_address_table_lookups();
+            if num_lookup_tables != 0 {
+                bank.load_addresses(lookup_tables)?;
             }
             Ok(())
         });
