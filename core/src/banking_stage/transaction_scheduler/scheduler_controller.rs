@@ -52,7 +52,7 @@ pub(crate) struct SchedulerController {
     transaction_id_generator: TransactionIdGenerator,
     /// Container for transaction state.
     /// Shared resource between `packet_receiver` and `scheduler`.
-    container: TransactionStateContainer,
+    container: TransactionStateContainer<SanitizedTransaction>,
     /// State for scheduling and communicating with worker threads.
     scheduler: PrioGraphScheduler,
     /// Metrics tracking time for leader bank detection.
