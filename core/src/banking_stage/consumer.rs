@@ -28,7 +28,7 @@ use {
         timing::timestamp,
         transaction::{self, SanitizedTransaction, TransactionError},
     },
-    solana_signed_message::Message,
+    solana_signed_message::{Message, SignedMessage},
     solana_svm::{
         account_loader::{validate_fee_payer, TransactionCheckResult},
         transaction_error_metrics::TransactionErrorMetrics,
@@ -557,7 +557,7 @@ impl Consumer {
     fn execute_and_commit_transactions_locked(
         &self,
         bank: &Arc<Bank>,
-        txs: &[SanitizedTransaction],
+        txs: &[impl SignedMessage],
         lock_results: &[transaction::Result<()>],
     ) -> ExecuteAndCommitTransactionsOutput {
         let transaction_status_sender_enabled = self.committer.transaction_status_sender_enabled();

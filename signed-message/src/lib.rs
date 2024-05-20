@@ -9,7 +9,9 @@ use {
         pubkey::Pubkey,
         signature::Signature,
         sysvar::instructions::{BorrowedAccountMeta, BorrowedInstruction},
-        transaction::{SanitizedTransaction, TransactionAccountLocks, TransactionError},
+        transaction::{
+            SanitizedTransaction, TransactionAccountLocks, TransactionError, VersionedTransaction,
+        },
     },
 };
 
@@ -165,6 +167,10 @@ pub trait SignedMessage: Message {
 
     /// Return the account keys locked by this transaction without validation
     fn get_account_locks_unchecked(&self) -> TransactionAccountLocks;
+
+    /// Make a versioned transaction copy of the transaction.
+    // TODO: get rid of this.
+    fn to_versioned_transaction(&self) -> VersionedTransaction;
 }
 
 /// A non-owning version of [`CompiledInstruction`] that references
@@ -369,6 +375,10 @@ impl SignedMessage for SanitizedTransaction {
 
     fn get_account_locks_unchecked(&self) -> TransactionAccountLocks {
         SanitizedTransaction::get_account_locks_unchecked(self)
+    }
+
+    fn to_versioned_transaction(&self) -> VersionedTransaction {
+        SanitizedTransaction::to_versioned_transaction(self)
     }
 }
 
