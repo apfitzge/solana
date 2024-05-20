@@ -481,26 +481,24 @@ impl Consumer {
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
         // same account state
-        let (batch, lock_us) = measure_us!(bank.prepare_sanitized_batch_with_results(
-            txs,
+        let tx_account_lock_limit = bank.get_transaction_account_lock_limit();
+        let (lock_results, lock_us) = measure_us!(bank.rc.accounts.lock_accounts_with_results(
+            txs.iter(),
             transaction_qos_cost_results.iter().map(|r| match r {
                 Ok(_cost) => Ok(()),
                 Err(err) => Err(err.clone()),
-            })
+            }),
+            tx_account_lock_limit,
         ));
 
         // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
         // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
         // and WouldExceedMaxAccountDataCostLimit
-        let mut execute_and_commit_transactions_output = self
-            .execute_and_commit_transactions_locked(
-                bank,
-                batch.sanitized_transactions(),
-                batch.lock_results(),
-            );
+        let mut execute_and_commit_transactions_output =
+            self.execute_and_commit_transactions_locked(bank, txs, &lock_results);
 
         // Once the accounts are new transactions can enter the pipeline to process them
-        let (_, unlock_us) = measure_us!(drop(batch));
+        let (_, unlock_us) = measure_us!(bank.unlock_accounts(txs.iter().zip(&lock_results)));
 
         let ExecuteAndCommitTransactionsOutput {
             ref mut retryable_transaction_indexes,
