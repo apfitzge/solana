@@ -4,7 +4,7 @@ use {
         pubkey::Pubkey,
         transaction::{SanitizedTransaction, SanitizedVersionedTransaction},
     },
-    solana_signed_message::{Instruction, Message},
+    solana_signed_message::{Instruction, Message, SignedMessage},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,17 +18,17 @@ pub trait GetComputeBudgetDetails {
         &self,
         round_compute_unit_price_enabled: bool,
     ) -> Option<ComputeBudgetDetails>;
+}
 
-    fn process_compute_budget_instruction<'a>(
-        instructions: impl Iterator<Item = (&'a Pubkey, Instruction<'a>)>,
-        _round_compute_unit_price_enabled: bool,
-    ) -> Option<ComputeBudgetDetails> {
-        let compute_budget_limits = process_compute_budget_instructions(instructions).ok()?;
-        Some(ComputeBudgetDetails {
-            compute_unit_price: compute_budget_limits.compute_unit_price,
-            compute_unit_limit: u64::from(compute_budget_limits.compute_unit_limit),
-        })
-    }
+fn process_compute_budget_instruction<'a>(
+    instructions: impl Iterator<Item = (&'a Pubkey, Instruction<'a>)>,
+    _round_compute_unit_price_enabled: bool,
+) -> Option<ComputeBudgetDetails> {
+    let compute_budget_limits = process_compute_budget_instructions(instructions).ok()?;
+    Some(ComputeBudgetDetails {
+        compute_unit_price: compute_budget_limits.compute_unit_price,
+        compute_unit_limit: u64::from(compute_budget_limits.compute_unit_limit),
+    })
 }
 
 impl GetComputeBudgetDetails for SanitizedVersionedTransaction {
@@ -36,7 +36,7 @@ impl GetComputeBudgetDetails for SanitizedVersionedTransaction {
         &self,
         round_compute_unit_price_enabled: bool,
     ) -> Option<ComputeBudgetDetails> {
-        Self::process_compute_budget_instruction(
+        process_compute_budget_instruction(
             self.get_message()
                 .program_instructions_iter()
                 .map(|(pubkey, ix)| (pubkey, Instruction::from(ix))),
@@ -50,11 +50,21 @@ impl GetComputeBudgetDetails for SanitizedTransaction {
         &self,
         round_compute_unit_price_enabled: bool,
     ) -> Option<ComputeBudgetDetails> {
-        Self::process_compute_budget_instruction(
+        process_compute_budget_instruction(
             self.program_instructions_iter(),
             round_compute_unit_price_enabled,
         )
     }
+}
+
+pub fn get_compute_budget_details<T: SignedMessage>(
+    message: &T,
+    round_compute_unit_price_enabled: bool,
+) -> Option<ComputeBudgetDetails> {
+    process_compute_budget_instruction(
+        message.program_instructions_iter(),
+        round_compute_unit_price_enabled,
+    )
 }
 
 #[cfg(test)]

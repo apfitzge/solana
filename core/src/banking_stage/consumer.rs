@@ -20,7 +20,7 @@ use {
     },
     solana_runtime::{
         bank::{Bank, LoadAndExecuteTransactionsOutput},
-        compute_budget_details::GetComputeBudgetDetails,
+        compute_budget_details::get_compute_budget_details,
         transaction_batch::TransactionBatch,
     },
     solana_sdk::{
@@ -581,8 +581,7 @@ impl Consumer {
             .iter()
             .filter_map(|transaction| {
                 let round_compute_unit_price_enabled = false; // TODO get from working_bank.feature_set
-                transaction
-                    .get_compute_budget_details(round_compute_unit_price_enabled)
+                get_compute_budget_details(transaction, round_compute_unit_price_enabled)
                     .map(|details| details.compute_unit_price)
             })
             .minmax();
