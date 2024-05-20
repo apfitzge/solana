@@ -3511,9 +3511,9 @@ impl Bank {
         self.rc.accounts.accounts_db.remove_unrooted_slots(slots)
     }
 
-    fn check_age(
+    fn check_age<B: core::borrow::Borrow<T>, T: SignedMessage>(
         &self,
-        sanitized_txs: &[impl core::borrow::Borrow<SanitizedTransaction>],
+        sanitized_txs: &[B],
         lock_results: &[Result<()>],
         max_age: usize,
         error_counters: &mut TransactionErrorMetrics,
@@ -3540,18 +3540,18 @@ impl Bank {
 
     fn check_transaction_age(
         &self,
-        tx: &SanitizedTransaction,
+        tx: &impl SignedMessage,
         max_age: usize,
         next_durable_nonce: &DurableNonce,
         hash_queue: &BlockhashQueue,
         error_counters: &mut TransactionErrorMetrics,
     ) -> TransactionCheckResult {
-        let recent_blockhash = tx.message().recent_blockhash();
+        let recent_blockhash = tx.recent_blockhash();
         if hash_queue.is_hash_valid_for_age(recent_blockhash, max_age) {
             (
                 Ok(()),
                 None,
-                hash_queue.get_lamports_per_signature(tx.message().recent_blockhash()),
+                hash_queue.get_lamports_per_signature(tx.recent_blockhash()),
             )
         } else if let Some((address, account)) =
             self.check_transaction_for_nonce(tx, next_durable_nonce)
@@ -3567,19 +3567,19 @@ impl Bank {
 
     fn is_transaction_already_processed(
         &self,
-        sanitized_tx: &SanitizedTransaction,
+        sanitized_tx: &impl SignedMessage,
         status_cache: &BankStatusCache,
     ) -> bool {
         let key = sanitized_tx.message_hash();
-        let transaction_blockhash = sanitized_tx.message().recent_blockhash();
+        let transaction_blockhash = sanitized_tx.recent_blockhash();
         status_cache
             .get_status(key, transaction_blockhash, &self.ancestors)
             .is_some()
     }
 
-    fn check_status_cache(
+    fn check_status_cache<B: core::borrow::Borrow<T>, T: SignedMessage>(
         &self,
-        sanitized_txs: &[impl core::borrow::Borrow<SanitizedTransaction>],
+        sanitized_txs: &[B],
         lock_results: Vec<TransactionCheckResult>,
         error_counters: &mut TransactionErrorMetrics,
     ) -> Vec<TransactionCheckResult> {
@@ -3612,7 +3612,7 @@ impl Bank {
             .is_hash_valid_for_age(hash, max_age)
     }
 
-    fn check_message_for_nonce(&self, message: &SanitizedMessage) -> Option<TransactionAccount> {
+    fn check_message_for_nonce(&self, message: &impl Message) -> Option<TransactionAccount> {
         let nonce_address = message.get_durable_nonce()?;
         let nonce_account = self.get_account_with_fixed_root(nonce_address)?;
         let nonce_data =
@@ -3630,20 +3630,20 @@ impl Bank {
 
     fn check_transaction_for_nonce(
         &self,
-        tx: &SanitizedTransaction,
+        tx: &impl Message,
         next_durable_nonce: &DurableNonce,
     ) -> Option<TransactionAccount> {
-        let nonce_is_advanceable = tx.message().recent_blockhash() != next_durable_nonce.as_hash();
+        let nonce_is_advanceable = tx.recent_blockhash() != next_durable_nonce.as_hash();
         if nonce_is_advanceable {
-            self.check_message_for_nonce(tx.message())
+            self.check_message_for_nonce(tx)
         } else {
             None
         }
     }
 
-    pub fn check_transactions(
+    pub fn check_transactions<B: core::borrow::Borrow<T>, T: SignedMessage>(
         &self,
-        sanitized_txs: &[impl core::borrow::Borrow<SanitizedTransaction>],
+        sanitized_txs: &[B],
         lock_results: &[Result<()>],
         max_age: usize,
         error_counters: &mut TransactionErrorMetrics,

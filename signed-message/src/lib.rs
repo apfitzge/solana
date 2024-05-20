@@ -54,6 +54,12 @@ pub trait Message: Debug {
     /// Return signature details.
     fn get_signature_details(&self) -> TransactionSignatureDetails;
 
+    /// Return the durable nonce for the message if it exists
+    fn get_durable_nonce(&self) -> Option<&Pubkey>;
+
+    /// Return the signers for the instruction at the given index.
+    fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey>;
+
     /// Decompile message instructions without cloning account keys
     /// TODO: Remove this - there's an allocation!
     fn decompile_instructions(&self) -> Vec<BorrowedInstruction> {
@@ -167,6 +173,14 @@ impl Message for SanitizedMessage {
     fn get_signature_details(&self) -> TransactionSignatureDetails {
         SanitizedMessage::get_signature_details(self)
     }
+
+    fn get_durable_nonce(&self) -> Option<&Pubkey> {
+        SanitizedMessage::get_durable_nonce(self)
+    }
+
+    fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
+        SanitizedMessage::get_ix_signers(self, index)
+    }
 }
 
 impl Message for SanitizedTransaction {
@@ -221,6 +235,14 @@ impl Message for SanitizedTransaction {
 
     fn get_signature_details(&self) -> TransactionSignatureDetails {
         Message::get_signature_details(self.message())
+    }
+
+    fn get_durable_nonce(&self) -> Option<&Pubkey> {
+        Message::get_durable_nonce(self.message())
+    }
+
+    fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
+        Message::get_ix_signers(self.message(), index)
     }
 }
 

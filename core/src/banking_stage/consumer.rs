@@ -25,9 +25,7 @@ use {
     },
     solana_sdk::{
         clock::{Slot, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
-        feature_set,
-        message::SanitizedMessage,
-        saturating_add_assign,
+        feature_set, saturating_add_assign,
         timing::timestamp,
         transaction::{self, AddressLoader, SanitizedTransaction, TransactionError},
     },
@@ -735,13 +733,12 @@ impl Consumer {
 
     pub fn check_fee_payer_unlocked(
         bank: &Bank,
-        message: &SanitizedMessage,
+        message: &impl Message,
         error_counters: &mut TransactionErrorMetrics,
     ) -> Result<(), TransactionError> {
         let fee_payer = message.fee_payer();
         let budget_limits =
-            process_compute_budget_instructions(Message::program_instructions_iter(message))?
-                .into();
+            process_compute_budget_instructions(message.program_instructions_iter())?.into();
         let fee = bank.fee_structure().calculate_fee(
             message,
             bank.get_lamports_per_signature(),

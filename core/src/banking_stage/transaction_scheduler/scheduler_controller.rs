@@ -33,7 +33,7 @@ use {
         saturating_add_assign,
         transaction::SanitizedTransaction,
     },
-    solana_signed_message::Message,
+    solana_signed_message::{Message, SignedMessage},
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
         sync::{Arc, RwLock},
@@ -203,23 +203,27 @@ impl SchedulerController {
         Ok(())
     }
 
-    fn pre_graph_filter(
-        transactions: &[&SanitizedTransaction],
+    fn pre_graph_filter<T: SignedMessage>(
+        transactions: &[&T],
         results: &mut [bool],
         bank: &Bank,
         max_age: usize,
     ) {
         let lock_results = vec![Ok(()); transactions.len()];
         let mut error_counters = TransactionErrorMetrics::default();
-        let check_results =
-            bank.check_transactions(transactions, &lock_results, max_age, &mut error_counters);
+        let check_results = bank.check_transactions::<&T, T>(
+            transactions,
+            &lock_results,
+            max_age,
+            &mut error_counters,
+        );
 
         let fee_check_results: Vec<_> = check_results
             .into_iter()
             .zip(transactions)
             .map(|((result, _nonce, _lamports), tx)| {
                 result?; // if there's already error do nothing
-                Consumer::check_fee_payer_unlocked(bank, tx.message(), &mut error_counters)
+                Consumer::check_fee_payer_unlocked(bank, *tx, &mut error_counters)
             })
             .collect();
 
@@ -375,12 +379,13 @@ impl SchedulerController {
                 })
                 .collect();
 
-            let check_results = bank.check_transactions(
-                &sanitized_txs,
-                &lock_results,
-                MAX_PROCESSING_AGE,
-                &mut error_counters,
-            );
+            let check_results = bank
+                .check_transactions::<&SanitizedTransaction, SanitizedTransaction>(
+                    &sanitized_txs,
+                    &lock_results,
+                    MAX_PROCESSING_AGE,
+                    &mut error_counters,
+                );
 
             for ((result, _nonce, _lamports), id) in check_results.into_iter().zip(chunk.iter()) {
                 if result.is_err() {
