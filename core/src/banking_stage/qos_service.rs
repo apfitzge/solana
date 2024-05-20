@@ -14,8 +14,9 @@ use {
         clock::Slot,
         feature_set::FeatureSet,
         saturating_add_assign,
-        transaction::{self, SanitizedTransaction, TransactionError},
+        transaction::{self, TransactionError},
     },
+    solana_signed_message::SignedMessage,
     std::sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -39,10 +40,10 @@ impl QosService {
     /// include in the slot, and accumulate costs in the cost tracker.
     /// Returns a vector of results containing selected transaction costs, and the number of
     /// transactions that were *NOT* selected.
-    pub fn select_and_accumulate_transaction_costs(
+    pub fn select_and_accumulate_transaction_costs<T: SignedMessage>(
         &self,
         bank: &Bank,
-        transactions: &[SanitizedTransaction],
+        transactions: &[T],
         pre_results: impl Iterator<Item = transaction::Result<()>>,
     ) -> (Vec<transaction::Result<TransactionCost>>, usize) {
         let transaction_costs =
@@ -66,10 +67,10 @@ impl QosService {
 
     // invoke cost_model to calculate cost for the given list of transactions that have not
     // been filtered out already.
-    fn compute_transaction_costs<'a>(
+    fn compute_transaction_costs<'a, T: SignedMessage + 'a>(
         &self,
         feature_set: &FeatureSet,
-        transactions: impl Iterator<Item = &'a SanitizedTransaction>,
+        transactions: impl Iterator<Item = &'a T>,
         pre_results: impl Iterator<Item = transaction::Result<()>>,
     ) -> Vec<transaction::Result<TransactionCost>> {
         let mut compute_cost_time = Measure::start("compute_cost_time");
@@ -92,9 +93,9 @@ impl QosService {
     /// Given a list of transactions and their costs, this function returns a corresponding
     /// list of Results that indicate if a transaction is selected to be included in the current block,
     /// and a count of the number of transactions that would fit in the block
-    fn select_transactions_per_cost<'a>(
+    fn select_transactions_per_cost<'a, T: SignedMessage + 'a>(
         &self,
-        transactions: impl Iterator<Item = &'a SanitizedTransaction>,
+        transactions: impl Iterator<Item = &'a T>,
         transactions_costs: impl Iterator<Item = transaction::Result<TransactionCost>>,
         bank: &Bank,
     ) -> (Vec<transaction::Result<TransactionCost>>, usize) {
@@ -588,6 +589,7 @@ mod tests {
             hash::Hash,
             signature::{Keypair, Signer},
             system_transaction,
+            transaction::SanitizedTransaction,
         },
         solana_vote_program::vote_transaction,
         std::sync::Arc,
