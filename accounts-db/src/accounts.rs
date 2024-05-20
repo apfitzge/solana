@@ -643,9 +643,9 @@ impl Accounts {
 
     /// Once accounts are unlocked, new transactions that modify that state can enter the pipeline
     #[allow(clippy::needless_collect)]
-    pub fn unlock_accounts<'a>(
+    pub fn unlock_accounts<'a, T: SignedMessage + 'a>(
         &self,
-        txs_and_results: impl Iterator<Item = (&'a SanitizedTransaction, &'a Result<()>)>,
+        txs_and_results: impl Iterator<Item = (&'a T, &'a Result<()>)>,
     ) {
         let keys: Vec<_> = txs_and_results
             .filter(|(_, res)| res.is_ok())

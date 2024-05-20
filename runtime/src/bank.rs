@@ -3501,9 +3501,9 @@ impl Bank {
         account_overrides
     }
 
-    pub fn unlock_accounts<'a>(
+    pub fn unlock_accounts<'a, T: SignedMessage + 'a>(
         &self,
-        txs_and_results: impl Iterator<Item = (&'a SanitizedTransaction, &'a Result<()>)>,
+        txs_and_results: impl Iterator<Item = (&'a T, &'a Result<()>)>,
     ) {
         self.rc.accounts.unlock_accounts(txs_and_results)
     }
