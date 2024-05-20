@@ -159,7 +159,7 @@ use {
         },
         transaction_context::{TransactionAccount, TransactionReturnData},
     },
-    solana_signed_message::Message,
+    solana_signed_message::{Message, SignedMessage},
     solana_stake_program::{
         points::{InflationPointCalculationEvent, PointValue},
         stake_state::StakeStateV2,
@@ -3188,7 +3188,7 @@ impl Bank {
 
     fn update_transaction_statuses(
         &self,
-        sanitized_txs: &[SanitizedTransaction],
+        sanitized_txs: &[impl SignedMessage],
         execution_results: &[TransactionExecutionResult],
     ) {
         let mut status_cache = self.status_cache.write().unwrap();
@@ -3198,7 +3198,7 @@ impl Bank {
                 // Add the message hash to the status cache to ensure that this message
                 // won't be processed again with a different signature.
                 status_cache.insert(
-                    tx.message().recent_blockhash(),
+                    tx.recent_blockhash(),
                     tx.message_hash(),
                     self.slot(),
                     details.status.clone(),
@@ -3207,7 +3207,7 @@ impl Bank {
                 // can be queried by transaction signature over RPC. In the future, this should
                 // only be added for API nodes because voting validators don't need to do this.
                 status_cache.insert(
-                    tx.message().recent_blockhash(),
+                    tx.recent_blockhash(),
                     tx.signature(),
                     self.slot(),
                     details.status.clone(),
@@ -3935,7 +3935,7 @@ impl Bank {
 
     fn filter_program_errors_and_collect_fee(
         &self,
-        txs: &[SanitizedTransaction],
+        txs: &[impl SignedMessage],
         execution_results: &[TransactionExecutionResult],
     ) -> Vec<Result<()>> {
         let hash_queue = self.blockhash_queue.read().unwrap();
@@ -3945,24 +3945,16 @@ impl Bank {
             .iter()
             .zip(execution_results)
             .map(|(tx, execution_result)| {
-                let message = tx.message();
                 let (execution_status, is_nonce, lamports_per_signature) =
                     Self::get_details_from_execution_result(
                         &hash_queue,
                         execution_result,
-                        message.recent_blockhash(),
+                        tx.recent_blockhash(),
                     )?;
-                let fee = self.get_fee_for_message_with_lamports_per_signature(
-                    message,
-                    lamports_per_signature,
-                );
+                let fee = self
+                    .get_fee_for_message_with_lamports_per_signature(tx, lamports_per_signature);
 
-                self.check_execution_status_and_charge_fee(
-                    message,
-                    execution_status,
-                    is_nonce,
-                    fee,
-                )?;
+                self.check_execution_status_and_charge_fee(tx, execution_status, is_nonce, fee)?;
 
                 fees += fee;
                 Ok(())
@@ -3976,7 +3968,7 @@ impl Bank {
     // Note: this function is not yet used; next PR will call it behind a feature gate
     fn filter_program_errors_and_collect_fee_details(
         &self,
-        txs: &[SanitizedTransaction],
+        txs: &[impl Message],
         execution_results: &[TransactionExecutionResult],
     ) -> Vec<Result<()>> {
         let hash_queue = self.blockhash_queue.read().unwrap();
@@ -3986,17 +3978,16 @@ impl Bank {
             .iter()
             .zip(execution_results)
             .map(|(tx, execution_result)| {
-                let message = tx.message();
                 let (execution_status, is_nonce, lamports_per_signature) =
                     Self::get_details_from_execution_result(
                         &hash_queue,
                         execution_result,
-                        message.recent_blockhash(),
+                        tx.recent_blockhash(),
                     )?;
 
                 if !FeeStructure::to_clear_transaction_fee(lamports_per_signature) {
                     let fee_details = self.fee_structure().calculate_fee_details(
-                        message,
+                        tx,
                         &process_compute_budget_instructions(tx.program_instructions_iter())
                             .unwrap_or_default()
                             .into(),
@@ -4005,7 +3996,7 @@ impl Bank {
                     );
 
                     self.check_execution_status_and_charge_fee(
-                        message,
+                        tx,
                         execution_status,
                         is_nonce,
                         fee_details.total_fee(
@@ -4056,7 +4047,7 @@ impl Bank {
 
     fn check_execution_status_and_charge_fee(
         &self,
-        message: &SanitizedMessage,
+        message: &impl Message,
         execution_status: &transaction::Result<()>,
         is_nonce: bool,
         fee: u64,
@@ -4081,7 +4072,7 @@ impl Bank {
     /// a failure result.
     pub fn commit_transactions(
         &self,
-        sanitized_txs: &[SanitizedTransaction],
+        sanitized_txs: &[impl SignedMessage],
         loaded_txs: &mut [TransactionLoadResult],
         execution_results: Vec<TransactionExecutionResult>,
         last_blockhash: Hash,
@@ -6150,7 +6141,7 @@ impl Bank {
     /// a bank-level cache of vote accounts and stake delegation info
     fn update_stakes_cache(
         &self,
-        txs: &[SanitizedTransaction],
+        txs: &[impl SignedMessage],
         execution_results: &[TransactionExecutionResult],
         loaded_txs: &[TransactionLoadResult],
     ) {
@@ -6161,7 +6152,7 @@ impl Bank {
             .filter(|(_, execution_result, _)| execution_result.was_executed_successfully())
             .flat_map(|(tx, _, (load_result, _))| {
                 load_result.iter().flat_map(|loaded_transaction| {
-                    let num_account_keys = tx.message().account_keys().len();
+                    let num_account_keys = tx.account_keys().len();
                     loaded_transaction.accounts.iter().take(num_account_keys)
                 })
             })

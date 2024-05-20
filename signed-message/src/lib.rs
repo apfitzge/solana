@@ -1,4 +1,5 @@
 use solana_sdk::{
+    hash::Hash,
     instruction::CompiledInstruction,
     message::{AccountKeys, SanitizedMessage},
     pubkey::Pubkey,
@@ -14,6 +15,9 @@ pub trait Message {
     /// Return the number of writeable accounts in the message.
     fn num_write_locks(&self) -> u64;
 
+    /// Return the recent blockhash.
+    fn recent_blockhash(&self) -> &Hash;
+
     /// Return the number of instructions in the message.
     fn num_instructions(&self) -> usize;
 
@@ -27,11 +31,21 @@ pub trait Message {
     /// Return the account keys.
     fn account_keys(&self) -> AccountKeys;
 
+    /// Return the fee-payer
+    fn fee_payer(&self) -> &Pubkey;
+
     /// Returns `true` if the account at `index` is writable.
     fn is_writable(&self, index: usize) -> bool;
 
     /// Returns `true` if the account at `index` is signer.
     fn is_signer(&self, index: usize) -> bool;
+
+    /// Returns true if the account at the specified index is invoked as a
+    /// program in this message.
+    fn is_invoked(&self, key_index: usize) -> bool;
+
+    /// Returns `true` if the account at `index` is not a loader key.
+    fn is_non_loader_key(&self, index: usize) -> bool;
 
     /// Decompile message instructions without cloning account keys
     /// TODO: Remove this - there's an allocation!
@@ -68,6 +82,10 @@ pub trait SignedMessage: Message {
 
     /// Get all the signatures of the message.
     fn signatures(&self) -> &[Signature];
+
+    /// Returns the message hash.
+    // TODO: consider moving this to Message
+    fn message_hash(&self) -> &Hash;
 }
 
 /// A non-owning version of [`CompiledInstruction`] that references
@@ -94,6 +112,10 @@ impl Message for SanitizedMessage {
         SanitizedMessage::num_write_locks(self)
     }
 
+    fn recent_blockhash(&self) -> &Hash {
+        SanitizedMessage::recent_blockhash(self)
+    }
+
     fn num_instructions(&self) -> usize {
         self.instructions().len()
     }
@@ -111,12 +133,24 @@ impl Message for SanitizedMessage {
         SanitizedMessage::account_keys(self)
     }
 
+    fn fee_payer(&self) -> &Pubkey {
+        SanitizedMessage::fee_payer(self)
+    }
+
     fn is_writable(&self, index: usize) -> bool {
         SanitizedMessage::is_writable(self, index)
     }
 
     fn is_signer(&self, index: usize) -> bool {
         SanitizedMessage::is_signer(self, index)
+    }
+
+    fn is_invoked(&self, key_index: usize) -> bool {
+        SanitizedMessage::is_invoked(self, key_index)
+    }
+
+    fn is_non_loader_key(&self, index: usize) -> bool {
+        SanitizedMessage::is_non_loader_key(self, index)
     }
 }
 
@@ -127,6 +161,10 @@ impl Message for SanitizedTransaction {
 
     fn num_write_locks(&self) -> u64 {
         Message::num_write_locks(self.message())
+    }
+
+    fn recent_blockhash(&self) -> &Hash {
+        Message::recent_blockhash(self.message())
     }
 
     fn num_instructions(&self) -> usize {
@@ -145,12 +183,25 @@ impl Message for SanitizedTransaction {
         Message::account_keys(self.message())
     }
 
+    fn fee_payer(&self) -> &Pubkey {
+        Message::fee_payer(self.message())
+    }
+
     fn is_writable(&self, index: usize) -> bool {
         Message::is_writable(self.message(), index)
     }
 
     fn is_signer(&self, index: usize) -> bool {
         Message::is_signer(self.message(), index)
+    }
+
+    fn is_invoked(&self, key_index: usize) -> bool {
+        Message::is_invoked(self.message(), key_index)
+    }
+
+    /// Returns `true` if the account at `index` is not a loader key.
+    fn is_non_loader_key(&self, index: usize) -> bool {
+        Message::is_non_loader_key(self.message(), index)
     }
 }
 
@@ -161,6 +212,10 @@ impl SignedMessage for SanitizedTransaction {
 
     fn signatures(&self) -> &[Signature] {
         self.signatures()
+    }
+
+    fn message_hash(&self) -> &Hash {
+        self.message_hash()
     }
 }
 

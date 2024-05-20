@@ -5437,6 +5437,7 @@ dependencies = [
  "solana-program-runtime",
  "solana-rayon-threadlimit",
  "solana-sdk",
+ "solana-signed-message",
  "solana-stake-program",
  "solana-svm",
  "solana-vote-program",

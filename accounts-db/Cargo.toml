@@ -44,6 +44,7 @@ solana-nohash-hasher = { workspace = true }
 solana-program-runtime = { workspace = true }
 solana-rayon-threadlimit = { workspace = true }
 solana-sdk = { workspace = true }
+solana-signed-message = { workspace = true }
 solana-stake-program = { workspace = true, optional = true }
 solana-svm = { workspace = true }
 solana-vote-program = { workspace = true, optional = true }
@@ -80,7 +81,11 @@ targets = ["x86_64-unknown-linux-gnu"]
 rustc_version = { workspace = true }
 
 [features]
-dev-context-only-utils = ["dep:qualifier_attr", "dep:solana-stake-program", "dep:solana-vote-program"]
+dev-context-only-utils = [
+    "dep:qualifier_attr",
+    "dep:solana-stake-program",
+    "dep:solana-vote-program",
+]
 
 [[bench]]
 name = "bench_accounts_file"

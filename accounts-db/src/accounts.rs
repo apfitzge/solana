@@ -25,6 +25,7 @@ use {
         transaction::{Result, SanitizedTransaction, TransactionAccountLocks, TransactionError},
         transaction_context::TransactionAccount,
     },
+    solana_signed_message::SignedMessage,
     solana_svm::{
         account_loader::TransactionLoadResult,
         nonce_info::{NonceFull, NonceInfo},
@@ -32,10 +33,7 @@ use {
     },
     std::{
         cmp::Reverse,
-        collections::{
-            hash_map::{self},
-            BinaryHeap, HashMap, HashSet,
-        },
+        collections::{hash_map, BinaryHeap, HashMap, HashSet},
         ops::RangeBounds,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -670,7 +668,7 @@ impl Accounts {
     pub fn store_cached(
         &self,
         slot: Slot,
-        txs: &[SanitizedTransaction],
+        txs: &[impl SignedMessage],
         res: &[TransactionExecutionResult],
         loaded: &mut [TransactionLoadResult],
         durable_nonce: &DurableNonce,
@@ -692,17 +690,14 @@ impl Accounts {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn collect_accounts_to_store<'a>(
+    fn collect_accounts_to_store<'a, T: SignedMessage>(
         &self,
-        txs: &'a [SanitizedTransaction],
+        txs: &'a [T],
         execution_results: &'a [TransactionExecutionResult],
         load_results: &'a mut [TransactionLoadResult],
         durable_nonce: &DurableNonce,
         lamports_per_signature: u64,
-    ) -> (
-        Vec<(&'a Pubkey, &'a AccountSharedData)>,
-        Vec<Option<&'a SanitizedTransaction>>,
-    ) {
+    ) -> (Vec<(&'a Pubkey, &'a AccountSharedData)>, Vec<Option<&'a T>>) {
         let mut accounts = Vec::with_capacity(load_results.len());
         let mut transactions = Vec::with_capacity(load_results.len());
         for (i, ((tx_load_result, nonce), tx)) in load_results.iter_mut().zip(txs).enumerate() {
@@ -729,13 +724,12 @@ impl Accounts {
                 }
             };
 
-            let message = tx.message();
             let loaded_transaction = tx_load_result.as_mut().unwrap();
-            for (i, (address, account)) in (0..message.account_keys().len())
+            for (i, (address, account)) in (0..tx.account_keys().len())
                 .zip(loaded_transaction.accounts.iter_mut())
-                .filter(|(i, _)| message.is_non_loader_key(*i))
+                .filter(|(i, _)| tx.is_non_loader_key(*i))
             {
-                if message.is_writable(i) {
+                if tx.is_writable(i) {
                     let is_fee_payer = i == 0;
                     let is_nonce_account = prepare_if_nonce_account(
                         address,

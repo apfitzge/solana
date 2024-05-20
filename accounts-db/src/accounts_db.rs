@@ -91,6 +91,7 @@ use {
         timing::AtomicInterval,
         transaction::SanitizedTransaction,
     },
+    solana_signed_message::SignedMessage,
     std::{
         borrow::Cow,
         boxed::Box,
@@ -6456,11 +6457,11 @@ impl AccountsDb {
         }
     }
 
-    fn write_accounts_to_cache<'a, 'b>(
+    fn write_accounts_to_cache<'a, 'b, T: SignedMessage>(
         &self,
         slot: Slot,
         accounts_and_meta_to_store: &impl StorableAccounts<'b>,
-        txn_iter: Box<dyn std::iter::Iterator<Item = &Option<&SanitizedTransaction>> + 'a>,
+        txn_iter: Box<dyn std::iter::Iterator<Item = &Option<&T>> + 'a>,
     ) -> Vec<AccountInfo> {
         let mut write_version_producer: Box<dyn Iterator<Item = u64>> =
             if self.accounts_update_notifier.is_some() {
@@ -6511,11 +6512,11 @@ impl AccountsDb {
         account_infos
     }
 
-    fn store_accounts_to<'a: 'c, 'b, 'c>(
+    fn store_accounts_to<'a: 'c, 'b, 'c, T: SignedMessage>(
         &self,
         accounts: &'c impl StorableAccounts<'b>,
         store_to: &StoreTo,
-        transactions: Option<&[Option<&'a SanitizedTransaction>]>,
+        transactions: Option<&[Option<&'a T>]>,
     ) -> Vec<AccountInfo> {
         let mut calc_stored_meta_time = Measure::start("calc_stored_meta");
         let slot = accounts.target_slot();
@@ -6539,14 +6540,14 @@ impl AccountsDb {
 
         match store_to {
             StoreTo::Cache => {
-                let txn_iter: Box<dyn std::iter::Iterator<Item = &Option<&SanitizedTransaction>>> =
-                    match transactions {
-                        Some(transactions) => {
-                            assert_eq!(transactions.len(), accounts.len());
-                            Box::new(transactions.iter())
-                        }
-                        None => Box::new(std::iter::repeat(&None).take(accounts.len())),
-                    };
+                let txn_iter: Box<dyn std::iter::Iterator<Item = &Option<&T>>> = match transactions
+                {
+                    Some(transactions) => {
+                        assert_eq!(transactions.len(), accounts.len());
+                        Box::new(transactions.iter())
+                    }
+                    None => Box::new(std::iter::repeat(&None).take(accounts.len())),
+                };
 
                 self.write_accounts_to_cache(slot, accounts, txn_iter)
             }
@@ -8188,10 +8189,10 @@ impl AccountsDb {
         );
     }
 
-    pub(crate) fn store_cached_inline_update_index<'a>(
+    pub(crate) fn store_cached_inline_update_index<'a, T: SignedMessage>(
         &self,
         accounts: impl StorableAccounts<'a>,
-        transactions: Option<&'a [Option<&'a SanitizedTransaction>]>,
+        transactions: Option<&'a [Option<&'a T>]>,
     ) {
         self.store(
             accounts,
@@ -8209,7 +8210,7 @@ impl AccountsDb {
         self.store(
             (slot, accounts),
             &StoreTo::Storage(&storage),
-            None,
+            None::<&[Option<&SanitizedTransaction>]>, // use reference type to satisfy compiler
             StoreReclaims::Default,
             UpdateIndexThreadSelection::PoolWithThreshold,
         );
@@ -8219,7 +8220,7 @@ impl AccountsDb {
         &self,
         accounts: impl StorableAccounts<'a>,
         store_to: &StoreTo,
-        transactions: Option<&'a [Option<&'a SanitizedTransaction>]>,
+        transactions: Option<&'a [Option<&'a impl SignedMessage>]>,
         reclaim: StoreReclaims,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
@@ -8408,7 +8409,7 @@ impl AccountsDb {
         &self,
         accounts: impl StorableAccounts<'a>,
         store_to: &StoreTo,
-        transactions: Option<&'a [Option<&'a SanitizedTransaction>]>,
+        transactions: Option<&'a [Option<&'a impl SignedMessage>]>,
         reclaim: StoreReclaims,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) {
@@ -8443,7 +8444,7 @@ impl AccountsDb {
             accounts,
             &StoreTo::Storage(storage),
             reset_accounts,
-            None,
+            None::<&[Option<&SanitizedTransaction>]>, // use reference type to satisfy compiler
             StoreReclaims::Ignore,
             UpdateIndexThreadSelection::PoolWithThreshold,
         )
@@ -8454,7 +8455,7 @@ impl AccountsDb {
         accounts: impl StorableAccounts<'a>,
         store_to: &StoreTo,
         reset_accounts: bool,
-        transactions: Option<&[Option<&SanitizedTransaction>]>,
+        transactions: Option<&[Option<&impl SignedMessage>]>,
         reclaim: StoreReclaims,
         update_index_thread_selection: UpdateIndexThreadSelection,
     ) -> StoreAccountsTiming {
@@ -9353,7 +9354,7 @@ impl AccountsDb {
         self.store(
             (slot, accounts),
             &StoreTo::Cache,
-            None,
+            None::<&[Option<&SanitizedTransaction>]>, // use reference type to satisfy compiler
             StoreReclaims::Default,
             UpdateIndexThreadSelection::PoolWithThreshold,
         );
@@ -12512,7 +12513,7 @@ pub mod tests {
         db.store_accounts_unfrozen(
             (some_slot, accounts),
             &StoreTo::Storage(&db.find_storage_candidate(some_slot)),
-            None,
+            None::<&[Option<&SanitizedTransaction>]>, // use reference type to satisfy compiler
             StoreReclaims::Default,
             UpdateIndexThreadSelection::PoolWithThreshold,
         );
