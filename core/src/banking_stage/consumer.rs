@@ -462,7 +462,7 @@ impl Consumer {
     fn process_and_record_transactions_with_pre_results(
         &self,
         bank: &Arc<Bank>,
-        txs: &[SanitizedTransaction],
+        txs: &[impl SignedMessage],
         chunk_offset: usize,
         pre_results: impl Iterator<Item = Result<(), TransactionError>>,
     ) -> ProcessTransactionBatchOutput {
