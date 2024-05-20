@@ -3411,7 +3411,8 @@ impl Bank {
             mut execution_results,
             ..
         } = self.load_and_execute_transactions(
-            &batch,
+            batch.sanitized_transactions(),
+            batch.lock_results(),
             // After simulation, transactions will need to be forwarded to the leader
             // for processing. During forwarding, the transaction could expire if the
             // delay is not accounted for.
@@ -3667,7 +3668,8 @@ impl Bank {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn load_and_execute_transactions(
         &self,
-        batch: &TransactionBatch,
+        sanitized_txs: &[SanitizedTransaction],
+        lock_results: &[Result<()>],
         max_age: usize,
         recording_config: ExecutionRecordingConfig,
         timings: &mut ExecuteTimings,
@@ -3675,12 +3677,10 @@ impl Bank {
         log_messages_bytes_limit: Option<usize>,
         limit_to_load_programs: bool,
     ) -> LoadAndExecuteTransactionsOutput {
-        let sanitized_txs = batch.sanitized_transactions();
         debug!("processing transactions: {}", sanitized_txs.len());
         let mut error_counters = TransactionErrorMetrics::default();
 
-        let retryable_transaction_indexes: Vec<_> = batch
-            .lock_results()
+        let retryable_transaction_indexes: Vec<_> = lock_results
             .iter()
             .enumerate()
             .filter_map(|(index, res)| match res {
@@ -3716,12 +3716,8 @@ impl Bank {
             .collect();
 
         let mut check_time = Measure::start("check_transactions");
-        let mut check_results = self.check_transactions(
-            sanitized_txs,
-            batch.lock_results(),
-            max_age,
-            &mut error_counters,
-        );
+        let mut check_results =
+            self.check_transactions(sanitized_txs, lock_results, max_age, &mut error_counters);
         check_time.stop();
         debug!("check: {}us", check_time.as_us());
         timings.saturating_add_in_place(ExecuteTimingType::CheckUs, check_time.as_us());
@@ -4868,7 +4864,8 @@ impl Bank {
             signature_count,
             ..
         } = self.load_and_execute_transactions(
-            batch,
+            batch.sanitized_transactions(),
+            batch.lock_results(),
             max_age,
             recording_config,
             timings,

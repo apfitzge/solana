@@ -590,7 +590,8 @@ impl Consumer {
 
         let (load_and_execute_transactions_output, load_execute_us) = measure_us!(bank
             .load_and_execute_transactions(
-                batch,
+                batch.sanitized_transactions(),
+                batch.lock_results(),
                 MAX_PROCESSING_AGE,
                 ExecutionRecordingConfig::new_single_setting(transaction_status_sender_enabled),
                 &mut execute_and_commit_timings.execute_timings,
