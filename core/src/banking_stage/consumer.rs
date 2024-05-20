@@ -404,7 +404,7 @@ impl Consumer {
     pub fn process_and_record_transactions(
         &self,
         bank: &Arc<Bank>,
-        txs: &[SanitizedTransaction],
+        txs: &[impl SignedMessage],
         chunk_offset: usize,
     ) -> ProcessTransactionBatchOutput {
         let mut error_counters = TransactionErrorMetrics::default();
@@ -432,7 +432,7 @@ impl Consumer {
     pub fn process_and_record_aged_transactions(
         &self,
         bank: &Arc<Bank>,
-        txs: &[SanitizedTransaction],
+        txs: &[impl SignedMessage],
         max_slot_ages: &[Slot],
     ) -> ProcessTransactionBatchOutput {
         // Need to filter out transactions since they were sanitized earlier.
