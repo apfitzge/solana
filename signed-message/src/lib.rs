@@ -15,8 +15,9 @@ use {
     },
 };
 
+// - Clone to support possible cloning from holding in Vec
 // - Debug to support legacy logging
-pub trait Message: Debug {
+pub trait Message: Clone + Debug {
     /// Return the number of signatures in the message.
     fn num_signatures(&self) -> u64;
 

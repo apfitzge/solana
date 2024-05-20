@@ -1,6 +1,7 @@
 use {
     super::immutable_deserialized_packet::ImmutableDeserializedPacket,
-    solana_sdk::{clock::Slot, transaction::SanitizedTransaction},
+    solana_sdk::clock::Slot,
+    solana_signed_message::SignedMessage,
     std::{fmt::Display, sync::Arc},
 };
 
@@ -38,10 +39,10 @@ impl Display for TransactionId {
 
 /// Message: [Scheduler -> Worker]
 /// Transactions to be consumed (i.e. executed, recorded, and committed)
-pub struct ConsumeWork {
+pub struct ConsumeWork<T: SignedMessage> {
     pub batch_id: TransactionBatchId,
     pub ids: Vec<TransactionId>,
-    pub transactions: Vec<SanitizedTransaction>,
+    pub transactions: Vec<T>,
     pub max_age_slots: Vec<Slot>,
 }
 
@@ -53,8 +54,8 @@ pub struct ForwardWork {
 
 /// Message: [Worker -> Scheduler]
 /// Processed transactions.
-pub struct FinishedConsumeWork {
-    pub work: ConsumeWork,
+pub struct FinishedConsumeWork<T: SignedMessage> {
+    pub work: ConsumeWork<T>,
     pub retryable_indexes: Vec<usize>,
 }
 

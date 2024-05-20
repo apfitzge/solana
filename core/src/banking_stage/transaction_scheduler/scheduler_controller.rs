@@ -54,7 +54,7 @@ pub(crate) struct SchedulerController {
     /// Shared resource between `packet_receiver` and `scheduler`.
     container: TransactionStateContainer<SanitizedTransaction>,
     /// State for scheduling and communicating with worker threads.
-    scheduler: PrioGraphScheduler,
+    scheduler: PrioGraphScheduler<SanitizedTransaction>,
     /// Metrics tracking time for leader bank detection.
     leader_detection_metrics: SchedulerLeaderDetectionMetrics,
     /// Metrics tracking counts on transactions in different states
@@ -74,7 +74,7 @@ impl SchedulerController {
         decision_maker: DecisionMaker,
         packet_deserializer: PacketDeserializer,
         bank_forks: Arc<RwLock<BankForks>>,
-        scheduler: PrioGraphScheduler,
+        scheduler: PrioGraphScheduler<SanitizedTransaction>,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Forwarder,
     ) -> Self {
@@ -676,8 +676,8 @@ mod tests {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         banking_packet_sender: Sender<Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>>,
 
-        consume_work_receivers: Vec<Receiver<ConsumeWork>>,
-        finished_consume_work_sender: Sender<FinishedConsumeWork>,
+        consume_work_receivers: Vec<Receiver<ConsumeWork<SanitizedTransaction>>>,
+        finished_consume_work_sender: Sender<FinishedConsumeWork<SanitizedTransaction>>,
     }
 
     fn create_test_frame(num_threads: usize) -> (TestFrame, SchedulerController) {
