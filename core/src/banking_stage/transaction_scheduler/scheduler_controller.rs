@@ -8,7 +8,6 @@ use {
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
         },
-        transaction_id_generator::TransactionIdGenerator,
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
@@ -48,8 +47,6 @@ pub(crate) struct SchedulerController {
     /// Packet/Transaction ingress.
     packet_receiver: PacketDeserializer,
     bank_forks: Arc<RwLock<BankForks>>,
-    /// Generates unique IDs for incoming transactions.
-    transaction_id_generator: TransactionIdGenerator,
     /// Container for transaction state.
     /// Shared resource between `packet_receiver` and `scheduler`.
     container: TransactionStateContainer<SanitizedTransaction>,
@@ -82,7 +79,6 @@ impl SchedulerController {
             decision_maker,
             packet_receiver: packet_deserializer,
             bank_forks,
-            transaction_id_generator: TransactionIdGenerator::default(),
             container: TransactionStateContainer::with_capacity(TOTAL_BUFFERED_PACKETS),
             scheduler,
             leader_detection_metrics: SchedulerLeaderDetectionMetrics::default(),
@@ -247,33 +243,35 @@ impl SchedulerController {
         let mut max_time_reached = false;
         while !self.container.is_empty() {
             let mut filter_array = [true; CHUNK_SIZE];
+            let mut priority_ids = Vec::with_capacity(CHUNK_SIZE);
             let mut ids = Vec::with_capacity(CHUNK_SIZE);
-            let mut txs = Vec::with_capacity(CHUNK_SIZE);
 
             for _ in 0..CHUNK_SIZE {
                 if let Some(id) = self.container.pop() {
-                    ids.push(id);
+                    priority_ids.push(id);
+                    ids.push(id.id);
                 } else {
                     break;
                 }
             }
-            let chunk_size = ids.len();
-            ids.iter().for_each(|id| {
-                let transaction = self.container.get_transaction_ttl(&id.id).unwrap();
-                txs.push(&transaction.transaction);
-            });
+            let chunk_size = priority_ids.len();
+            self.container
+                .batched_with_ref_transaction_state::<CHUNK_SIZE, _, _>(
+                    &ids,
+                    |state| &state.transaction_ttl().transaction,
+                    |txs| {
+                        Self::pre_graph_filter(
+                            txs,
+                            &mut filter_array,
+                            &bank,
+                            MAX_PROCESSING_AGE.saturating_sub(
+                                FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET as usize,
+                            ),
+                        );
+                    },
+                );
 
-            // use same filter we use for processing transactions:
-            // age, already processed, fee-check.
-            Self::pre_graph_filter(
-                &txs,
-                &mut filter_array,
-                &bank,
-                MAX_PROCESSING_AGE
-                    .saturating_sub(FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET as usize),
-            );
-
-            for (id, filter_result) in ids.iter().zip(&filter_array[..chunk_size]) {
+            for (id, filter_result) in priority_ids.iter().zip(&filter_array[..chunk_size]) {
                 if !*filter_result {
                     self.container.remove_by_id(&id.id);
                     continue;
@@ -358,10 +356,10 @@ impl SchedulerController {
         // Clean up any transactions that have already been processed, are too old, or do not have
         // valid nonce accounts.
         const MAX_TRANSACTION_CHECKS: usize = 10_000;
-        let mut transaction_ids = Vec::with_capacity(MAX_TRANSACTION_CHECKS);
-
+        let mut priority_ids = Vec::with_capacity(MAX_TRANSACTION_CHECKS);
+        let mut ids = Vec::with_capacity(CHUNK_SIZE);
         while let Some(id) = self.container.pop() {
-            transaction_ids.push(id);
+            priority_ids.push(id);
         }
 
         let bank = self.bank_forks.read().unwrap().working_bank();
@@ -369,26 +367,26 @@ impl SchedulerController {
         const CHUNK_SIZE: usize = 128;
         let mut error_counters = TransactionErrorMetrics::default();
         let mut num_dropped_on_age_and_status: usize = 0;
-        for chunk in transaction_ids.chunks(CHUNK_SIZE) {
+        for chunk in priority_ids.chunks(CHUNK_SIZE) {
             let lock_results = vec![Ok(()); chunk.len()];
-            let sanitized_txs: Vec<_> = chunk
-                .iter()
-                .map(|id| {
-                    &self
-                        .container
-                        .get_transaction_ttl(&id.id)
-                        .expect("transaction must exist")
-                        .transaction
-                })
-                .collect();
+            ids.clear();
+            ids.extend(chunk.iter().map(|id| id.id));
 
-            let check_results = bank
-                .check_transactions::<&SanitizedTransaction, SanitizedTransaction>(
-                    &sanitized_txs,
-                    &lock_results,
-                    MAX_PROCESSING_AGE,
-                    &mut error_counters,
-                );
+            let check_results = self
+                .container
+                .batched_with_ref_transaction_state::<CHUNK_SIZE, _, _>(
+                    &ids,
+                    |state| &state.transaction_ttl().transaction,
+                    |sanitized_txs| {
+                        bank.check_transactions::<&SanitizedTransaction, SanitizedTransaction>(
+                            sanitized_txs,
+                            &lock_results,
+                            MAX_PROCESSING_AGE,
+                            &mut error_counters,
+                        )
+                    },
+                )
+                .expect("transactions must exist");
 
             for ((result, _nonce, _lamports), id) in check_results.into_iter().zip(chunk.iter()) {
                 if result.is_err() {
@@ -541,7 +539,6 @@ impl SchedulerController {
                 .filter(|(_, check_result)| check_result.0.is_ok())
             {
                 saturating_add_assign!(post_transaction_check_count, 1);
-                let transaction_id = self.transaction_id_generator.next();
 
                 let (priority, cost) =
                     Self::calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
@@ -550,13 +547,10 @@ impl SchedulerController {
                     max_age_slot: last_slot_in_epoch,
                 };
 
-                if self.container.insert_new_transaction(
-                    transaction_id,
-                    transaction_ttl,
-                    packet,
-                    priority,
-                    cost,
-                ) {
+                if self
+                    .container
+                    .insert_new_transaction(transaction_ttl, packet, priority, cost)
+                {
                     saturating_add_assign!(num_dropped_on_capacity, 1);
                 }
                 saturating_add_assign!(num_buffered, 1);

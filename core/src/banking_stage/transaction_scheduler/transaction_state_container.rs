@@ -10,7 +10,8 @@ use {
     itertools::MinMaxResult,
     min_max_heap::MinMaxHeap,
     solana_signed_message::SignedMessage,
-    std::{collections::HashMap, sync::Arc},
+    std::sync::Arc,
+    valet::Valet,
 };
 
 /// This structure will hold `TransactionState` for the entirety of a
@@ -40,14 +41,14 @@ use {
 /// a new transaction, the lowest priority transaction will be dropped.
 pub(crate) struct TransactionStateContainer<T: SignedMessage> {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
-    id_to_transaction_state: HashMap<TransactionId, TransactionState<T>>,
+    id_to_transaction_state: Valet<TransactionState<T>>,
 }
 
 impl<T: SignedMessage> TransactionStateContainer<T> {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),
-            id_to_transaction_state: HashMap::with_capacity(capacity),
+            id_to_transaction_state: Valet::with_capacity(2 * capacity),
         }
     }
 
@@ -67,47 +68,54 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
     }
 
     /// Perform operation with immutable transaction state.
-    pub(crate) fn with_transaction_state<F, R>(&self, id: &TransactionId, f: F) -> Option<R>
-    where
-        F: FnOnce(&TransactionState<T>) -> R,
-    {
-        self.id_to_transaction_state.get(id).map(f)
+    pub(crate) fn with_transaction_state<R>(
+        &self,
+        id: &TransactionId,
+        f: impl FnOnce(&TransactionState<T>) -> R,
+    ) -> Option<R> {
+        self.id_to_transaction_state.with(*id, f).ok()
+    }
+
+    /// Perform batch operation with immutable transaction state.
+    pub(crate) fn batched_with_ref_transaction_state<const SIZE: usize, M, R>(
+        &self,
+        ids: &[TransactionId],
+        m: impl Fn(&TransactionState<T>) -> &M,
+        f: impl FnOnce(&[&M]) -> R,
+    ) -> Option<R> {
+        self.id_to_transaction_state
+            .batched_with_ref::<SIZE, _, _>(ids, m, f)
+            .ok()
     }
 
     /// Perform operation with mutable transaction state.
-    pub(crate) fn with_mut_transaction_state<F, R>(&mut self, id: &TransactionId, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut TransactionState<T>) -> R,
-    {
-        self.id_to_transaction_state.get_mut(id).map(f)
-    }
-
-    /// Get reference to `SanitizedTransactionTTL` by id.
-    /// Panics if the transaction does not exist.
-    pub(crate) fn get_transaction_ttl(
-        &self,
+    pub(crate) fn with_mut_transaction_state<R>(
+        &mut self,
         id: &TransactionId,
-    ) -> Option<&SanitizedTransactionTTL<T>> {
-        self.id_to_transaction_state
-            .get(id)
-            .map(|state| state.transaction_ttl())
+        f: impl FnOnce(&mut TransactionState<T>) -> R,
+    ) -> Option<R> {
+        self.id_to_transaction_state.with_mut(*id, f).ok()
     }
 
     /// Insert a new transaction into the container's queues and maps.
     /// Returns `true` if a packet was dropped due to capacity limits.
     pub(crate) fn insert_new_transaction(
         &mut self,
-        transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL<T>,
         packet: Arc<ImmutableDeserializedPacket>,
         priority: u64,
         cost: u64,
     ) -> bool {
+        let transaction_id = self
+            .id_to_transaction_state
+            .insert(TransactionState::new(
+                transaction_ttl,
+                packet,
+                priority,
+                cost,
+            ))
+            .unwrap_or_else(|_| panic!("container must not be full"));
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
-        self.id_to_transaction_state.insert(
-            transaction_id,
-            TransactionState::new(transaction_ttl, packet, priority, cost),
-        );
         self.push_id_into_queue(priority_id)
     }
 
@@ -144,7 +152,7 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
     /// Remove transaction by id.
     pub(crate) fn remove_by_id(&mut self, id: &TransactionId) {
         self.id_to_transaction_state
-            .remove(id)
+            .remove(*id)
             .expect("transaction must exist");
     }
 
@@ -218,10 +226,9 @@ mod tests {
         container: &mut TransactionStateContainer<SanitizedTransaction>,
         num: usize,
     ) {
-        for id in 0..num {
-            let priority = id as u64;
+        for priority in 0..num as u64 {
             let (transaction_ttl, packet, priority, cost) = test_transaction(priority);
-            container.insert_new_transaction(id, transaction_ttl, packet, priority, cost);
+            container.insert_new_transaction(transaction_ttl, packet, priority, cost);
         }
     }
 
@@ -241,15 +248,6 @@ mod tests {
 
         assert_eq!(container.priority_queue.len(), 1);
         assert_eq!(container.id_to_transaction_state.len(), 1);
-        assert_eq!(
-            container
-                .id_to_transaction_state
-                .iter()
-                .map(|ts| ts.1.priority())
-                .next()
-                .unwrap(),
-            4
-        );
     }
 
     #[test]

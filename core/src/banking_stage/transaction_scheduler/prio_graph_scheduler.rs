@@ -106,29 +106,31 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
             while *window_budget > 0 {
                 const MAX_FILTER_CHUNK_SIZE: usize = 128;
                 let mut filter_array = [true; MAX_FILTER_CHUNK_SIZE];
+                let mut priority_ids = Vec::with_capacity(MAX_FILTER_CHUNK_SIZE);
                 let mut ids = Vec::with_capacity(MAX_FILTER_CHUNK_SIZE);
-                let mut txs = Vec::with_capacity(MAX_FILTER_CHUNK_SIZE);
 
                 let chunk_size = (*window_budget).min(MAX_FILTER_CHUNK_SIZE);
                 for _ in 0..chunk_size {
                     if let Some(id) = container.pop() {
-                        ids.push(id);
+                        priority_ids.push(id);
+                        ids.push(id.id);
                     } else {
                         break;
                     }
                 }
                 *window_budget = window_budget.saturating_sub(chunk_size);
 
-                ids.iter().for_each(|id| {
-                    let transaction = container.get_transaction_ttl(&id.id).unwrap();
-                    txs.push(&transaction.transaction);
-                });
-
-                let (_, filter_us) =
-                    measure_us!(pre_graph_filter(&txs, &mut filter_array[..chunk_size]));
+                let (_, filter_us) = measure_us!(container
+                    .batched_with_ref_transaction_state::<MAX_FILTER_CHUNK_SIZE, _, _>(
+                        &ids,
+                        |transaction_state| &transaction_state.transaction_ttl().transaction,
+                        |transactions| {
+                            pre_graph_filter(transactions, &mut filter_array[..chunk_size]);
+                        },
+                    ));
                 saturating_add_assign!(total_filter_time_us, filter_us);
 
-                for (id, filter_result) in ids.iter().zip(&filter_array[..chunk_size]) {
+                for (id, filter_result) in priority_ids.iter().zip(&filter_array[..chunk_size]) {
                     if *filter_result {
                         container
                             .with_transaction_state(&id.id, |transaction_state| {
@@ -145,7 +147,7 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
                     }
                 }
 
-                if ids.len() != chunk_size {
+                if priority_ids.len() != chunk_size {
                     break;
                 }
             }
@@ -638,10 +640,7 @@ mod tests {
         >,
     ) -> TransactionStateContainer<SanitizedTransaction> {
         let mut container = TransactionStateContainer::with_capacity(10 * 1024);
-        for (index, (from_keypair, to_pubkeys, lamports, compute_unit_price)) in
-            tx_infos.into_iter().enumerate()
-        {
-            let id = index;
+        for (from_keypair, to_pubkeys, lamports, compute_unit_price) in tx_infos.into_iter() {
             let transaction = prioritized_tranfers(
                 from_keypair.borrow(),
                 to_pubkeys,
@@ -660,7 +659,6 @@ mod tests {
             };
             const TEST_TRANSACTION_COST: u64 = 5000;
             container.insert_new_transaction(
-                id,
                 transaction_ttl,
                 packet,
                 compute_unit_price,
