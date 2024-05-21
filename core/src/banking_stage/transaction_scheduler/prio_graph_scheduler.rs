@@ -168,26 +168,28 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
 
                 // Should always be in the container, during initial testing phase panic.
                 // Later, we can replace with a continue in case this does happen.
-                let Some(transaction_state) = container.get_mut_transaction_state(&id.id) else {
-                    panic!("transaction state must exist")
-                };
-
-                let maybe_schedule_info = try_schedule_transaction(
-                    transaction_state,
-                    &pre_lock_filter,
-                    &mut blocking_locks,
-                    &mut self.account_locks,
-                    num_threads,
-                    |thread_set| {
-                        Self::select_thread(
-                            thread_set,
-                            &batches.total_cus,
-                            self.in_flight_tracker.cus_in_flight_per_thread(),
-                            &batches.transactions,
-                            self.in_flight_tracker.num_in_flight_per_thread(),
+                let Some(maybe_schedule_info) =
+                    container.with_mut_transaction_state(&id.id, |transaction_state| {
+                        try_schedule_transaction(
+                            transaction_state,
+                            &pre_lock_filter,
+                            &mut blocking_locks,
+                            &mut self.account_locks,
+                            num_threads,
+                            |thread_set| {
+                                Self::select_thread(
+                                    thread_set,
+                                    &batches.total_cus,
+                                    self.in_flight_tracker.cus_in_flight_per_thread(),
+                                    &batches.transactions,
+                                    self.in_flight_tracker.num_in_flight_per_thread(),
+                                )
+                            },
                         )
-                    },
-                );
+                    })
+                else {
+                    panic!("transaction must exist");
+                };
 
                 match maybe_schedule_info {
                     Err(TransactionSchedulingError::Filtered) => {
