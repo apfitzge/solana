@@ -130,11 +130,15 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
 
                 for (id, filter_result) in ids.iter().zip(&filter_array[..chunk_size]) {
                     if *filter_result {
-                        let transaction = container.get_transaction_ttl(&id.id).unwrap();
-                        prio_graph.insert_transaction(
-                            *id,
-                            Self::get_transaction_account_access(transaction),
-                        );
+                        container
+                            .with_transaction_state(&id.id, |transaction_state| {
+                                let transaction = transaction_state.transaction_ttl();
+                                prio_graph.insert_transaction(
+                                    *id,
+                                    Self::get_transaction_account_access(transaction),
+                                );
+                            })
+                            .expect("transaction must exist");
                     } else {
                         saturating_add_assign!(num_filtered_out, 1);
                         container.remove_by_id(&id.id);

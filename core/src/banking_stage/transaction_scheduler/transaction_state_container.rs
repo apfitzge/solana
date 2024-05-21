@@ -66,6 +66,14 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
         self.priority_queue.pop_max()
     }
 
+    /// Perform operation with immutable transaction state.
+    pub(crate) fn with_transaction_state<F, R>(&self, id: &TransactionId, f: F) -> Option<R>
+    where
+        F: FnOnce(&TransactionState<T>) -> R,
+    {
+        self.id_to_transaction_state.get(id).map(f)
+    }
+
     /// Perform operation with mutable transaction state.
     pub(crate) fn with_mut_transaction_state<F, R>(&mut self, id: &TransactionId, f: F) -> Option<R>
     where
