@@ -1,16 +1,26 @@
-use solana_sdk::{
-    hash::Hash, message::MESSAGE_VERSION_PREFIX, packet::Packet, pubkey::Pubkey,
-    sanitize::SanitizeError, short_vec::decode_shortu16_len, signature::Signature,
+use {
+    solana_sdk::{
+        hash::Hash,
+        message::{AccountKeys, MESSAGE_VERSION_PREFIX},
+        packet::Packet,
+        pubkey::Pubkey,
+        sanitize::SanitizeError,
+        short_vec::decode_shortu16_len,
+        signature::Signature,
+    },
+    solana_signed_message::{Instruction, Message, MessageAddressTableLookup},
 };
 
 const MAX_TRASACTION_SIZE: usize = 4096; // not sure this is actually true
 
+#[derive(Clone, Debug)]
 #[repr(u8)]
 pub enum TransactionVersion {
     Legacy = u8::MAX,
     V0 = 0,
 }
 
+#[derive(Clone, Debug)]
 pub enum TransactionStatus {
     Uninitialized,
     Raw,
@@ -25,6 +35,7 @@ pub enum TransactionStatus {
 /// in the packet itself.
 /// This view struct allows calling code to access information
 /// about the transaction without needing to do slow deserialization.
+#[derive(Clone, Debug)]
 pub struct TransactionView {
     status: TransactionStatus,
 
@@ -262,8 +273,8 @@ impl TransactionView {
         }
     }
 
-    pub fn address_lookups(&self) -> impl Iterator<Item = AddressLookupEntry> {
-        AddressLookupIterator {
+    pub fn address_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup> {
+        MessageAddressTableLookupIterator {
             buffer: &self.buffer[..usize::from(self.packet_len)], // all address lookups are within original packet
             current_offset: self.address_lookups_offset as usize,
             address_lookup_count: usize::from(self.address_lookups_len),
@@ -368,7 +379,7 @@ impl TransactionView {
             if instruction.program_id_index == 0 {
                 return Err(SanitizeError::IndexOutOfBounds);
             }
-            for account_index in instruction.accounts_indexes {
+            for account_index in instruction.accounts {
                 if usize::from(*account_index) > max_account_ix {
                     return Err(SanitizeError::IndexOutOfBounds);
                 }
@@ -376,6 +387,91 @@ impl TransactionView {
         }
 
         Ok(())
+    }
+}
+
+impl Message for TransactionView {
+    fn num_signatures(&self) -> u64 {
+        u64::from(self.num_required_signatures)
+    }
+
+    fn num_write_locks(&self) -> u64 {
+        todo!()
+    }
+
+    fn recent_blockhash(&self) -> &Hash {
+        TransactionView::recent_blockhash(self)
+    }
+
+    fn num_instructions(&self) -> usize {
+        usize::from(self.instructions_len)
+    }
+
+    fn instructions_iter(&self) -> impl Iterator<Item = Instruction> {
+        TransactionView::instructions(self)
+    }
+
+    fn program_instructions_iter(
+        &self,
+    ) -> impl Iterator<Item = (&Pubkey, solana_signed_message::Instruction)> {
+        let accounts = self.static_account_keys();
+        Message::instructions_iter(self).map(move |instruction| {
+            (
+                &accounts[usize::from(instruction.program_id_index)],
+                instruction,
+            )
+        })
+    }
+
+    fn account_keys(&self) -> AccountKeys {
+        AccountKeys {
+            static_keys: TransactionView::static_account_keys(self),
+            dynamic_keys: todo!(),
+        }
+    }
+
+    fn fee_payer(&self) -> &Pubkey {
+        &TransactionView::static_account_keys(self)[0]
+    }
+
+    fn is_writable(&self, index: usize) -> bool {
+        todo!()
+    }
+
+    fn is_signer(&self, index: usize) -> bool {
+        todo!()
+    }
+
+    fn is_invoked(&self, key_index: usize) -> bool {
+        todo!()
+    }
+
+    fn is_non_loader_key(&self, index: usize) -> bool {
+        todo!()
+    }
+
+    fn get_signature_details(&self) -> solana_sdk::message::TransactionSignatureDetails {
+        todo!()
+    }
+
+    fn get_durable_nonce(&self) -> Option<&Pubkey> {
+        todo!()
+    }
+
+    fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
+        todo!()
+    }
+
+    fn has_duplicates(&self) -> bool {
+        todo!()
+    }
+
+    fn num_lookup_tables(&self) -> usize {
+        usize::from(self.address_lookups_len)
+    }
+
+    fn message_address_table_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup> {
+        TransactionView::address_lookups(self)
     }
 }
 
@@ -398,7 +494,7 @@ impl<'a> Iterator for InstructionIterator<'a> {
         let program_id_index = read_byte(self.buffer, &mut self.current_offset)?;
         // u16 for accounts len
         let accounts_indexes_len = read_compressed_u16(self.buffer, &mut self.current_offset)?;
-        let accounts_indexes =
+        let accounts =
             read_array::<u8>(self.buffer, &mut self.current_offset, accounts_indexes_len)?;
         // u16 for data len
         let data_len = read_compressed_u16(self.buffer, &mut self.current_offset)?;
@@ -408,27 +504,21 @@ impl<'a> Iterator for InstructionIterator<'a> {
 
         Some(Instruction {
             program_id_index,
-            accounts_indexes,
+            accounts,
             data,
         })
     }
 }
 
-pub struct Instruction<'a> {
-    pub program_id_index: u8,
-    pub accounts_indexes: &'a [u8],
-    pub data: &'a [u8],
-}
-
-struct AddressLookupIterator<'a> {
+struct MessageAddressTableLookupIterator<'a> {
     buffer: &'a [u8],
     current_offset: usize,
     address_lookup_count: usize,
     current_count: usize,
 }
 
-impl<'a> Iterator for AddressLookupIterator<'a> {
-    type Item = AddressLookupEntry<'a>;
+impl<'a> Iterator for MessageAddressTableLookupIterator<'a> {
+    type Item = MessageAddressTableLookup<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_count >= self.address_lookup_count {
@@ -448,18 +538,12 @@ impl<'a> Iterator for AddressLookupIterator<'a> {
 
         self.current_count += 1;
 
-        Some(AddressLookupEntry {
+        Some(MessageAddressTableLookup {
             account_key,
             writable_indexes,
             readonly_indexes,
         })
     }
-}
-
-pub struct AddressLookupEntry<'a> {
-    pub account_key: &'a Pubkey,
-    pub writable_indexes: &'a [u8],
-    pub readonly_indexes: &'a [u8],
 }
 
 #[inline(always)]
