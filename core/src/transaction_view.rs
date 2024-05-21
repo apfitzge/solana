@@ -1,19 +1,23 @@
 use {
+    solana_runtime::bank::Bank,
     solana_sdk::{
+        bpf_loader_upgradeable,
         hash::Hash,
-        message::{AccountKeys, MESSAGE_VERSION_PREFIX},
+        message::{v0::LoadedAddresses, AccountKeys, MESSAGE_VERSION_PREFIX},
         packet::Packet,
         pubkey::Pubkey,
         sanitize::SanitizeError,
         short_vec::decode_shortu16_len,
         signature::Signature,
+        transaction::TransactionError,
     },
     solana_signed_message::{Instruction, Message, MessageAddressTableLookup},
+    std::collections::HashSet,
 };
 
 const MAX_TRASACTION_SIZE: usize = 4096; // not sure this is actually true
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TransactionVersion {
     Legacy = u8::MAX,
@@ -80,6 +84,15 @@ pub struct TransactionView {
     /// Offset of the address lookup entries in the packet.
     /// This is **not** a slice, as the entry size is not known.
     address_lookups_offset: u16,
+
+    /// The number of loaded writable accounts.
+    num_loaded_writable_accounts: u8,
+    /// The number of loaded readonly accounts.
+    num_loaded_readonly_accounts: u8,
+
+    /// Cache of whether accounts are writable or not.
+    /// Implied length of 256 bits (32 bytes).
+    is_writable_offset: u16,
 }
 
 impl Default for TransactionView {
@@ -102,6 +115,9 @@ impl Default for TransactionView {
             instructions_offset: 0,
             address_lookups_len: 0,
             address_lookups_offset: 0,
+            num_loaded_writable_accounts: 0,
+            num_loaded_readonly_accounts: 0,
+            is_writable_offset: 0,
         }
     }
 }
@@ -290,6 +306,62 @@ impl TransactionView {
         Ok(())
     }
 
+    // TODO: Refactor load_addresses to allow it to populate existing Vecs.
+    pub fn resolve_addresses(&mut self, bank: &Bank) -> Result<(), TransactionError> {
+        let loaded_addresses = bank.load_addresses(self.address_lookups())?;
+
+        // Set the number of loaded accounts
+        self.num_loaded_writable_accounts = u8::try_from(loaded_addresses.writable.len())
+            .map_err(|_| TransactionError::TooManyAccountLocks)?;
+        self.num_loaded_readonly_accounts = u8::try_from(loaded_addresses.readonly.len())
+            .map_err(|_| TransactionError::TooManyAccountLocks)?;
+
+        // Copy in the loaded addresses starting at the end of the packet.
+        // Writable then readonly
+        let mut offset = usize::from(self.packet_len);
+        if offset
+            + (usize::from(self.num_loaded_writable_accounts)
+                + usize::from(self.num_loaded_readonly_accounts))
+                * core::mem::size_of::<Pubkey>()
+            >= self.buffer.len()
+        {
+            return Err(TransactionError::TooManyAccountLocks);
+        }
+        for account in loaded_addresses
+            .writable
+            .iter()
+            .chain(loaded_addresses.readonly.iter())
+        {
+            self.buffer[offset..offset + core::mem::size_of::<Pubkey>()]
+                .copy_from_slice(account.as_ref());
+            offset += core::mem::size_of::<Pubkey>();
+        }
+
+        // Check that there is enough room for the is_writable bitset
+        self.is_writable_offset =
+            u16::try_from(offset).map_err(|_| TransactionError::TooManyAccountLocks)?;
+        if offset + 32 >= self.buffer.len() {
+            return Err(TransactionError::TooManyAccountLocks);
+        }
+
+        // Set status to resolved
+        self.status = TransactionStatus::AddressResolved;
+
+        // Loop through all accounts to check if they are writable.
+        // Default to all readable.
+        let mut is_writable_array = [0u8; 32];
+        let account_keys = self.account_keys();
+        let reserved_account_keys = bank.get_reserved_account_keys();
+        for (index, _account) in account_keys.iter().enumerate() {
+            if self.is_writable_internal(index, reserved_account_keys) {
+                is_writable_array[index / 8] |= 1 << (index % 8);
+            }
+        }
+        self.buffer[offset..offset + 32].copy_from_slice(&is_writable_array);
+
+        Ok(())
+    }
+
     fn sanitize_signatures(&self) -> Result<(), SanitizeError> {
         let num_required_signatures = usize::from(self.num_required_signatures);
         match num_required_signatures.cmp(&usize::from(self.signature_len)) {
@@ -388,6 +460,101 @@ impl TransactionView {
 
         Ok(())
     }
+
+    /// Returns true if the account at the specified index was loaded as writable
+    fn is_writable_internal(
+        &self,
+        key_index: usize,
+        reserved_account_keys: &HashSet<Pubkey>,
+    ) -> bool {
+        if self.is_writable_index(key_index) {
+            if let Some(key) = self.account_keys().get(key_index) {
+                return !(reserved_account_keys.contains(key) || self.demote_program_id(key_index));
+            }
+        }
+        false
+    }
+
+    /// Returns true if the account at the specified index was requested to be
+    /// writable.  This method should not be used directly.
+    fn is_writable_index(&self, key_index: usize) -> bool {
+        let num_account_keys = self.account_keys().len();
+        let num_signed_accounts = usize::from(self.num_required_signatures);
+        if key_index >= num_account_keys {
+            let loaded_addresses_index = key_index.saturating_sub(num_account_keys);
+            loaded_addresses_index < self.loaded_writable_slice().len()
+        } else if key_index >= num_signed_accounts {
+            let num_unsigned_accounts = num_account_keys.saturating_sub(num_signed_accounts);
+            let num_writable_unsigned_accounts = num_unsigned_accounts
+                .saturating_sub(usize::from(self.num_readonly_unsigned_accounts));
+            let unsigned_account_index = key_index.saturating_sub(num_signed_accounts);
+            unsigned_account_index < num_writable_unsigned_accounts
+        } else {
+            let num_writable_signed_accounts =
+                num_signed_accounts.saturating_sub(usize::from(self.num_readonly_signed_accounts));
+            key_index < num_writable_signed_accounts
+        }
+    }
+
+    fn demote_program_id(&self, i: usize) -> bool {
+        self.is_key_called_as_program(i) && !self.is_upgradeable_loader_present()
+    }
+
+    /// Returns true if the account at the specified index is called as a program by an instruction
+    fn is_key_called_as_program(&self, key_index: usize) -> bool {
+        if let Ok(key_index) = u8::try_from(key_index) {
+            self.instructions_iter()
+                .any(|ix| ix.program_id_index == key_index)
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if any account is the bpf upgradeable loader
+    fn is_upgradeable_loader_present(&self) -> bool {
+        self.account_keys()
+            .iter()
+            .any(|&key| key == bpf_loader_upgradeable::id())
+    }
+
+    fn loaded_writable_slice(&self) -> &[Pubkey] {
+        let mut offset = usize::from(self.packet_len);
+        read_array::<Pubkey>(
+            &self.buffer,
+            &mut offset,
+            u16::from(self.num_loaded_writable_accounts),
+        )
+        .expect("loaded account keys verified in construction")
+    }
+
+    fn loaded_readonly_slice(&self) -> &[Pubkey] {
+        let mut offset = usize::from(self.packet_len)
+            + usize::from(self.num_loaded_writable_accounts) * core::mem::size_of::<Pubkey>();
+        read_array::<Pubkey>(
+            &self.buffer,
+            &mut offset,
+            u16::from(self.num_loaded_readonly_accounts),
+        )
+        .expect("loaded account keys verified in construction")
+    }
+
+    fn num_readonly_accounts(&self) -> usize {
+        let loaded_readonly_addresses = self.num_loaded_readonly_accounts as usize;
+        loaded_readonly_addresses
+            .saturating_add(usize::from(self.num_readonly_signed_accounts))
+            .saturating_add(usize::from(self.num_readonly_unsigned_accounts))
+    }
+
+    /// Returns true if the account at the specified index is an input to some
+    /// program instruction in this message.
+    fn is_key_passed_to_program(&self, key_index: usize) -> bool {
+        if let Ok(key_index) = u8::try_from(key_index) {
+            self.instructions_iter()
+                .any(|ix| ix.accounts.contains(&key_index))
+        } else {
+            false
+        }
+    }
 }
 
 impl Message for TransactionView {
@@ -396,7 +563,9 @@ impl Message for TransactionView {
     }
 
     fn num_write_locks(&self) -> u64 {
-        todo!()
+        self.account_keys()
+            .len()
+            .saturating_sub(self.num_readonly_accounts()) as u64
     }
 
     fn recent_blockhash(&self) -> &Hash {
@@ -423,47 +592,50 @@ impl Message for TransactionView {
         })
     }
 
+    // TODO: Fix `AccountKeys` interface so we don't need to allocate
     fn account_keys(&self) -> AccountKeys {
-        AccountKeys {
-            static_keys: TransactionView::static_account_keys(self),
-            dynamic_keys: todo!(),
-        }
+        AccountKeys::new(
+            TransactionView::static_account_keys(self),
+            (self.version == TransactionVersion::V0).then(|| &LoadedAddresses {
+                writable: Vec::from(TransactionView::loaded_writable_slice(self)),
+                readonly: Vec::from(TransactionView::loaded_readonly_slice(self)),
+            }),
+        )
     }
 
     fn fee_payer(&self) -> &Pubkey {
         &TransactionView::static_account_keys(self)[0]
     }
 
-    fn is_writable(&self, index: usize) -> bool {
-        todo!()
+    fn is_writable(&self, key_index: usize) -> bool {
+        // Calculate offset into the is_writable cache
+        // Load the bit from the cache.
+        // If the bit is set, the account is writable.
+        self.buffer[usize::from(self.is_writable_offset) + key_index / 8] & (1 << (key_index % 8))
+            != 0
     }
 
-    fn is_signer(&self, index: usize) -> bool {
-        todo!()
+    fn is_signer(&self, i: usize) -> bool {
+        i < usize::from(self.num_required_signatures)
     }
 
     fn is_invoked(&self, key_index: usize) -> bool {
-        todo!()
+        if let Ok(key_index) = u8::try_from(key_index) {
+            self.instructions_iter()
+                .any(|ix| ix.program_id_index == key_index)
+        } else {
+            false
+        }
     }
 
     fn is_non_loader_key(&self, index: usize) -> bool {
-        todo!()
-    }
-
-    fn get_signature_details(&self) -> solana_sdk::message::TransactionSignatureDetails {
-        todo!()
-    }
-
-    fn get_durable_nonce(&self) -> Option<&Pubkey> {
-        todo!()
-    }
-
-    fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
-        todo!()
+        !self.is_invoked(index) || self.is_key_passed_to_program(index)
     }
 
     fn has_duplicates(&self) -> bool {
-        todo!()
+        let account_keys = self.account_keys();
+        let mut uniq = HashSet::with_capacity(account_keys.len());
+        account_keys.iter().any(|x| !uniq.insert(x))
     }
 
     fn num_lookup_tables(&self) -> usize {

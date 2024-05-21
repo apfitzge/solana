@@ -5,6 +5,7 @@ use {
         hash::Hash,
         instruction::CompiledInstruction,
         message::{AccountKeys, SanitizedMessage, TransactionSignatureDetails},
+        nonce::NONCED_TX_MARKER_IX_INDEX,
         precompiles::{get_precompiles, is_precompile},
         pubkey::Pubkey,
         signature::Signature,
@@ -57,13 +58,78 @@ pub trait Message: Clone + Debug {
     fn is_non_loader_key(&self, index: usize) -> bool;
 
     /// Return signature details.
-    fn get_signature_details(&self) -> TransactionSignatureDetails;
+    fn get_signature_details(&self) -> TransactionSignatureDetails {
+        let mut transaction_signature_details = TransactionSignatureDetails {
+            num_transaction_signatures: self.num_signatures(),
+            ..TransactionSignatureDetails::default()
+        };
+
+        // counting the number of pre-processor operations separately
+        for (program_id, instruction) in self.program_instructions_iter() {
+            if solana_sdk::secp256k1_program::check_id(program_id) {
+                if let Some(num_verifies) = instruction.data.first() {
+                    transaction_signature_details.num_secp256k1_instruction_signatures =
+                        transaction_signature_details
+                            .num_secp256k1_instruction_signatures
+                            .saturating_add(u64::from(*num_verifies));
+                }
+            } else if solana_sdk::ed25519_program::check_id(program_id) {
+                if let Some(num_verifies) = instruction.data.first() {
+                    transaction_signature_details.num_ed25519_instruction_signatures =
+                        transaction_signature_details
+                            .num_ed25519_instruction_signatures
+                            .saturating_add(u64::from(*num_verifies));
+                }
+            }
+        }
+
+        transaction_signature_details
+    }
 
     /// Return the durable nonce for the message if it exists
-    fn get_durable_nonce(&self) -> Option<&Pubkey>;
+    fn get_durable_nonce(&self) -> Option<&Pubkey> {
+        self.instructions_iter()
+            .nth(NONCED_TX_MARKER_IX_INDEX as usize)
+            .filter(
+                |ix| match self.account_keys().get(ix.program_id_index as usize) {
+                    Some(program_id) => solana_sdk::system_program::check_id(program_id),
+                    _ => false,
+                },
+            )
+            .filter(|ix| {
+                matches!(
+                    solana_program::program_utils::limited_deserialize(
+                        ix.data, 4 /* serialized size of AdvanceNonceAccount */
+                    ),
+                    Ok(solana_sdk::system_instruction::SystemInstruction::AdvanceNonceAccount)
+                )
+            })
+            .and_then(|ix| {
+                ix.accounts.first().and_then(|idx| {
+                    let idx = *idx as usize;
+                    if !self.is_writable(idx) {
+                        None
+                    } else {
+                        self.account_keys().get(idx)
+                    }
+                })
+            })
+    }
 
     /// Return the signers for the instruction at the given index.
-    fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey>;
+    fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
+        self.instructions_iter()
+            .nth(index)
+            .into_iter()
+            .flat_map(|ix| {
+                ix.accounts
+                    .iter()
+                    .copied()
+                    .map(usize::from)
+                    .filter(|index| self.is_signer(*index))
+                    .filter_map(|signer_index| self.account_keys().get(signer_index))
+            })
+    }
 
     /// Checks for duplicate accounts in the message
     fn has_duplicates(&self) -> bool;
@@ -251,18 +317,6 @@ impl Message for SanitizedMessage {
         SanitizedMessage::is_non_loader_key(self, index)
     }
 
-    fn get_signature_details(&self) -> TransactionSignatureDetails {
-        SanitizedMessage::get_signature_details(self)
-    }
-
-    fn get_durable_nonce(&self) -> Option<&Pubkey> {
-        SanitizedMessage::get_durable_nonce(self)
-    }
-
-    fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
-        SanitizedMessage::get_ix_signers(self, index)
-    }
-
     fn has_duplicates(&self) -> bool {
         SanitizedMessage::has_duplicates(self)
     }
@@ -330,18 +384,6 @@ impl Message for SanitizedTransaction {
     /// Returns `true` if the account at `index` is not a loader key.
     fn is_non_loader_key(&self, index: usize) -> bool {
         Message::is_non_loader_key(self.message(), index)
-    }
-
-    fn get_signature_details(&self) -> TransactionSignatureDetails {
-        Message::get_signature_details(self.message())
-    }
-
-    fn get_durable_nonce(&self) -> Option<&Pubkey> {
-        Message::get_durable_nonce(self.message())
-    }
-
-    fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
-        Message::get_ix_signers(self.message(), index)
     }
 
     fn has_duplicates(&self) -> bool {

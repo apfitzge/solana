@@ -7210,6 +7210,7 @@ dependencies = [
 name = "solana-signed-message"
 version = "2.0.0"
 dependencies = [
+ "solana-program",
  "solana-sdk",
 ]
 
