@@ -3,15 +3,20 @@ use {
     solana_sdk::{
         bpf_loader_upgradeable,
         hash::Hash,
-        message::{v0::LoadedAddresses, AccountKeys, MESSAGE_VERSION_PREFIX},
+        instruction::CompiledInstruction,
+        message::{
+            legacy,
+            v0::{self, LoadedAddresses},
+            AccountKeys, MessageHeader, VersionedMessage, MESSAGE_VERSION_PREFIX,
+        },
         packet::{Packet, PACKET_DATA_SIZE},
         pubkey::Pubkey,
         sanitize::SanitizeError,
         short_vec::decode_shortu16_len,
         signature::Signature,
-        transaction::TransactionError,
+        transaction::{TransactionAccountLocks, TransactionError, VersionedTransaction},
     },
-    solana_signed_message::{Instruction, Message, MessageAddressTableLookup},
+    solana_signed_message::{Instruction, Message, MessageAddressTableLookup, SignedMessage},
     std::collections::HashSet,
 };
 
@@ -97,6 +102,9 @@ pub struct TransactionView {
     // /// Implied length of 256 bits (32 bytes).
     // is_writable_offset: u16,
     is_writable_cache: [u8; 32],
+
+    /// Message hash.
+    message_hash: Hash,
 }
 
 impl Default for TransactionView {
@@ -124,6 +132,7 @@ impl Default for TransactionView {
                 readonly: vec![],
             },
             is_writable_cache: [0; 32],
+            message_hash: Hash::default(),
         }
     }
 }
@@ -307,6 +316,9 @@ impl TransactionView {
     pub fn sanitize(&mut self) -> Result<(), SanitizeError> {
         self.sanitize_signatures()?;
         self.sanitize_message()?;
+
+        self.message_hash =
+            VersionedMessage::hash_raw_message(&self.buffer[..usize::from(self.packet_len)]);
 
         self.status = TransactionStatus::Sanitized;
         Ok(())
@@ -652,6 +664,104 @@ impl Message for TransactionView {
 
     fn message_address_table_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup> {
         TransactionView::address_lookups(self)
+    }
+}
+
+impl SignedMessage for TransactionView {
+    fn signature(&self) -> &Signature {
+        &TransactionView::signatures(self)[0]
+    }
+
+    fn signatures(&self) -> &[Signature] {
+        TransactionView::signatures(self)
+    }
+
+    fn message_hash(&self) -> &Hash {
+        &self.message_hash
+    }
+
+    fn is_simple_vote_transaction(&self) -> bool {
+        let signatures_count = usize::from(self.num_required_signatures);
+        let is_legacy_message = self.version == TransactionVersion::Legacy;
+        let mut instructions = self.program_instructions_iter();
+        signatures_count < 3
+            && is_legacy_message
+            && instructions
+                .next()
+                .xor(instructions.next())
+                .map(|(program_id, _ix)| program_id == &solana_sdk::vote::program::id())
+                .unwrap_or(false)
+    }
+
+    fn get_account_locks_unchecked(&self) -> TransactionAccountLocks {
+        let account_keys = self.account_keys();
+        let num_readonly_accounts = self.num_readonly_accounts();
+        let num_writable_accounts = account_keys.len().saturating_sub(num_readonly_accounts);
+
+        let mut account_locks = TransactionAccountLocks {
+            writable: Vec::with_capacity(num_writable_accounts),
+            readonly: Vec::with_capacity(num_readonly_accounts),
+        };
+
+        for (i, key) in account_keys.iter().enumerate() {
+            if self.is_writable(i) {
+                account_locks.writable.push(key);
+            } else {
+                account_locks.readonly.push(key);
+            }
+        }
+
+        account_locks
+    }
+
+    fn to_versioned_transaction(&self) -> VersionedTransaction {
+        VersionedTransaction {
+            signatures: Vec::from(self.signatures()),
+            message: match self.version {
+                TransactionVersion::Legacy => VersionedMessage::Legacy(legacy::Message {
+                    header: MessageHeader {
+                        num_required_signatures: self.num_required_signatures,
+                        num_readonly_signed_accounts: self.num_readonly_signed_accounts,
+                        num_readonly_unsigned_accounts: self.num_readonly_unsigned_accounts,
+                    },
+                    account_keys: Vec::from(self.static_account_keys()),
+                    recent_blockhash: *self.recent_blockhash(),
+                    instructions: self
+                        .instructions_iter()
+                        .map(|instruction| CompiledInstruction {
+                            program_id_index: instruction.program_id_index,
+                            accounts: Vec::from(instruction.accounts),
+                            data: Vec::from(instruction.data),
+                        })
+                        .collect(),
+                }),
+                TransactionVersion::V0 => VersionedMessage::V0(v0::Message {
+                    header: MessageHeader {
+                        num_required_signatures: self.num_required_signatures,
+                        num_readonly_signed_accounts: self.num_readonly_signed_accounts,
+                        num_readonly_unsigned_accounts: self.num_readonly_unsigned_accounts,
+                    },
+                    account_keys: Vec::from(self.static_account_keys()),
+                    recent_blockhash: *self.recent_blockhash(),
+                    instructions: self
+                        .instructions_iter()
+                        .map(|instruction| CompiledInstruction {
+                            program_id_index: instruction.program_id_index,
+                            accounts: Vec::from(instruction.accounts),
+                            data: Vec::from(instruction.data),
+                        })
+                        .collect(),
+                    address_table_lookups: self
+                        .address_lookups()
+                        .map(|lookup| v0::MessageAddressTableLookup {
+                            account_key: *lookup.account_key,
+                            writable_indexes: Vec::from(lookup.writable_indexes),
+                            readonly_indexes: Vec::from(lookup.readonly_indexes),
+                        })
+                        .collect(),
+                }),
+            },
+        }
     }
 }
 
