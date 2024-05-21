@@ -4,13 +4,13 @@ use crate::banking_stage::scheduler_messages::TransactionId;
 /// These IDs uniquely identify transactions during the scheduling process.
 #[derive(Default)]
 pub struct TransactionIdGenerator {
-    next_id: u64,
+    next_id: usize,
 }
 
 impl TransactionIdGenerator {
     pub fn next(&mut self) -> TransactionId {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        TransactionId::new(id)
+        id
     }
 }
