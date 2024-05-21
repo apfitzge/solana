@@ -436,6 +436,7 @@ trees = "0.4.2"
 tungstenite = "0.20.1"
 uriparse = "0.6.4"
 url = "2.5.0"
+valet = { git = "https://github.com/apfitzge/valet.git", rev = "b0130d78043cf3620b0971503aee2b1d047c22c5" }
 wasm-bindgen = "0.2"
 winapi = "0.3.8"
 winreg = "0.50"
