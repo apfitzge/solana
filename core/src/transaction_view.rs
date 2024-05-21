@@ -4,7 +4,7 @@ use {
         bpf_loader_upgradeable,
         hash::Hash,
         message::{v0::LoadedAddresses, AccountKeys, MESSAGE_VERSION_PREFIX},
-        packet::Packet,
+        packet::{Packet, PACKET_DATA_SIZE},
         pubkey::Pubkey,
         sanitize::SanitizeError,
         short_vec::decode_shortu16_len,
@@ -15,7 +15,7 @@ use {
     std::collections::HashSet,
 };
 
-const MAX_TRASACTION_SIZE: usize = 4096; // not sure this is actually true
+const MAX_TRASACTION_SIZE: usize = PACKET_DATA_SIZE; // not sure this is actually true
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -85,14 +85,18 @@ pub struct TransactionView {
     /// This is **not** a slice, as the entry size is not known.
     address_lookups_offset: u16,
 
-    /// The number of loaded writable accounts.
-    num_loaded_writable_accounts: u8,
-    /// The number of loaded readonly accounts.
-    num_loaded_readonly_accounts: u8,
+    // /// The number of loaded writable accounts.
+    // num_loaded_writable_accounts: u8,
+    // /// The number of loaded readonly accounts.
+    // num_loaded_readonly_accounts: u8,
+    // TODO: FIX terrible AccountKeys interface
+    // need to have this due to shitty interface
+    loaded_addresses: LoadedAddresses,
 
-    /// Cache of whether accounts are writable or not.
-    /// Implied length of 256 bits (32 bytes).
-    is_writable_offset: u16,
+    // /// Cache of whether accounts are writable or not.
+    // /// Implied length of 256 bits (32 bytes).
+    // is_writable_offset: u16,
+    is_writable_cache: [u8; 32],
 }
 
 impl Default for TransactionView {
@@ -115,9 +119,11 @@ impl Default for TransactionView {
             instructions_offset: 0,
             address_lookups_len: 0,
             address_lookups_offset: 0,
-            num_loaded_writable_accounts: 0,
-            num_loaded_readonly_accounts: 0,
-            is_writable_offset: 0,
+            loaded_addresses: LoadedAddresses {
+                writable: vec![],
+                readonly: vec![],
+            },
+            is_writable_cache: [0; 32],
         }
     }
 }
@@ -308,41 +314,41 @@ impl TransactionView {
 
     // TODO: Refactor load_addresses to allow it to populate existing Vecs.
     pub fn resolve_addresses(&mut self, bank: &Bank) -> Result<(), TransactionError> {
-        let loaded_addresses = bank.load_addresses(self.address_lookups())?;
+        self.loaded_addresses = bank.load_addresses(self.address_lookups())?;
 
-        // Set the number of loaded accounts
-        self.num_loaded_writable_accounts = u8::try_from(loaded_addresses.writable.len())
-            .map_err(|_| TransactionError::TooManyAccountLocks)?;
-        self.num_loaded_readonly_accounts = u8::try_from(loaded_addresses.readonly.len())
-            .map_err(|_| TransactionError::TooManyAccountLocks)?;
+        // // Set the number of loaded accounts
+        // self.num_loaded_writable_accounts = u8::try_from(loaded_addresses.writable.len())
+        //     .map_err(|_| TransactionError::TooManyAccountLocks)?;
+        // self.num_loaded_readonly_accounts = u8::try_from(loaded_addresses.readonly.len())
+        //     .map_err(|_| TransactionError::TooManyAccountLocks)?;
 
-        // Copy in the loaded addresses starting at the end of the packet.
-        // Writable then readonly
-        let mut offset = usize::from(self.packet_len);
-        if offset
-            + (usize::from(self.num_loaded_writable_accounts)
-                + usize::from(self.num_loaded_readonly_accounts))
-                * core::mem::size_of::<Pubkey>()
-            >= self.buffer.len()
-        {
-            return Err(TransactionError::TooManyAccountLocks);
-        }
-        for account in loaded_addresses
-            .writable
-            .iter()
-            .chain(loaded_addresses.readonly.iter())
-        {
-            self.buffer[offset..offset + core::mem::size_of::<Pubkey>()]
-                .copy_from_slice(account.as_ref());
-            offset += core::mem::size_of::<Pubkey>();
-        }
+        // // Copy in the loaded addresses starting at the end of the packet.
+        // // Writable then readonly
+        // let mut offset = usize::from(self.packet_len);
+        // if offset
+        //     + (usize::from(self.num_loaded_writable_accounts)
+        //         + usize::from(self.num_loaded_readonly_accounts))
+        //         * core::mem::size_of::<Pubkey>()
+        //     >= self.buffer.len()
+        // {
+        //     return Err(TransactionError::TooManyAccountLocks);
+        // }
+        // for account in loaded_addresses
+        //     .writable
+        //     .iter()
+        //     .chain(loaded_addresses.readonly.iter())
+        // {
+        //     self.buffer[offset..offset + core::mem::size_of::<Pubkey>()]
+        //         .copy_from_slice(account.as_ref());
+        //     offset += core::mem::size_of::<Pubkey>();
+        // }
 
-        // Check that there is enough room for the is_writable bitset
-        self.is_writable_offset =
-            u16::try_from(offset).map_err(|_| TransactionError::TooManyAccountLocks)?;
-        if offset + 32 >= self.buffer.len() {
-            return Err(TransactionError::TooManyAccountLocks);
-        }
+        // // Check that there is enough room for the is_writable bitset
+        // self.is_writable_offset =
+        //     u16::try_from(offset).map_err(|_| TransactionError::TooManyAccountLocks)?;
+        // if offset + 32 >= self.buffer.len() {
+        //     return Err(TransactionError::TooManyAccountLocks);
+        // }
 
         // Set status to resolved
         self.status = TransactionStatus::AddressResolved;
@@ -357,7 +363,8 @@ impl TransactionView {
                 is_writable_array[index / 8] |= 1 << (index % 8);
             }
         }
-        self.buffer[offset..offset + 32].copy_from_slice(&is_writable_array);
+        // self.buffer[offset..offset + 32].copy_from_slice(&is_writable_array);
+        self.is_writable_cache = is_writable_array;
 
         Ok(())
     }
@@ -518,28 +525,31 @@ impl TransactionView {
     }
 
     fn loaded_writable_slice(&self) -> &[Pubkey] {
-        let mut offset = usize::from(self.packet_len);
-        read_array::<Pubkey>(
-            &self.buffer,
-            &mut offset,
-            u16::from(self.num_loaded_writable_accounts),
-        )
-        .expect("loaded account keys verified in construction")
+        // let mut offset = usize::from(self.packet_len);
+        // read_array::<Pubkey>(
+        //     &self.buffer,
+        //     &mut offset,
+        //     u16::from(self.num_loaded_writable_accounts),
+        // )
+        // .expect("loaded account keys verified in construction")
+        &self.loaded_addresses.writable
     }
 
     fn loaded_readonly_slice(&self) -> &[Pubkey] {
-        let mut offset = usize::from(self.packet_len)
-            + usize::from(self.num_loaded_writable_accounts) * core::mem::size_of::<Pubkey>();
-        read_array::<Pubkey>(
-            &self.buffer,
-            &mut offset,
-            u16::from(self.num_loaded_readonly_accounts),
-        )
-        .expect("loaded account keys verified in construction")
+        // let mut offset = usize::from(self.packet_len)
+        //     + usize::from(self.num_loaded_writable_accounts) * core::mem::size_of::<Pubkey>();
+        // read_array::<Pubkey>(
+        //     &self.buffer,
+        //     &mut offset,
+        //     u16::from(self.num_loaded_readonly_accounts),
+        // )
+        // .expect("loaded account keys verified in construction")
+        &self.loaded_addresses.readonly
     }
 
     fn num_readonly_accounts(&self) -> usize {
-        let loaded_readonly_addresses = self.num_loaded_readonly_accounts as usize;
+        // let loaded_readonly_addresses = self.num_loaded_readonly_accounts as usize;
+        let loaded_readonly_addresses = self.loaded_readonly_slice().len();
         loaded_readonly_addresses
             .saturating_add(usize::from(self.num_readonly_signed_accounts))
             .saturating_add(usize::from(self.num_readonly_unsigned_accounts))
@@ -592,14 +602,10 @@ impl Message for TransactionView {
         })
     }
 
-    // TODO: Fix `AccountKeys` interface so we don't need to allocate
     fn account_keys(&self) -> AccountKeys {
         AccountKeys::new(
             TransactionView::static_account_keys(self),
-            (self.version == TransactionVersion::V0).then(|| &LoadedAddresses {
-                writable: Vec::from(TransactionView::loaded_writable_slice(self)),
-                readonly: Vec::from(TransactionView::loaded_readonly_slice(self)),
-            }),
+            (self.version == TransactionVersion::V0).then_some(&self.loaded_addresses),
         )
     }
 
@@ -611,8 +617,10 @@ impl Message for TransactionView {
         // Calculate offset into the is_writable cache
         // Load the bit from the cache.
         // If the bit is set, the account is writable.
-        self.buffer[usize::from(self.is_writable_offset) + key_index / 8] & (1 << (key_index % 8))
-            != 0
+
+        // self.buffer[usize::from(self.is_writable_offset) + key_index / 8] & (1 << (key_index % 8))
+        //     != 0
+        (self.is_writable_cache[key_index / 8] & 1 << (key_index % 8)) != 0
     }
 
     fn is_signer(&self, i: usize) -> bool {
@@ -814,7 +822,7 @@ mod tests {
                 instruction.program_id_index,
                 instruction_view.program_id_index
             );
-            assert_eq!(instruction.accounts, instruction_view.accounts_indexes);
+            assert_eq!(instruction.accounts, instruction_view.accounts);
             assert_eq!(instruction.data, instruction_view.data);
         }
         assert!(instruction_view_iter.next().is_none());
