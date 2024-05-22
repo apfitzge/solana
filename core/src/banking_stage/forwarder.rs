@@ -6,7 +6,6 @@ use {
         ForwardOption,
     },
     crate::{
-        banking_stage::immutable_deserialized_packet::ImmutableDeserializedPacket,
         next_leader::{next_leader, next_leader_tpu_vote},
         tracer_packet_stats::TracerPacketStats,
     },
@@ -63,14 +62,10 @@ impl Forwarder {
     pub fn try_add_packet(
         &mut self,
         sanitized_transaction: &impl SignedMessage,
-        immutable_packet: Arc<ImmutableDeserializedPacket>,
         feature_set: &FeatureSet,
     ) -> bool {
-        self.forward_packet_batches_by_accounts.try_add_packet(
-            sanitized_transaction,
-            immutable_packet,
-            feature_set,
-        )
+        self.forward_packet_batches_by_accounts
+            .try_add_packet(sanitized_transaction, feature_set)
     }
 
     pub fn forward_batched_packets(&self, forward_option: &ForwardOption) {

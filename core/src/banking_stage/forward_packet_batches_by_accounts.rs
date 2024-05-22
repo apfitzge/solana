@@ -1,5 +1,4 @@
 use {
-    super::immutable_deserialized_packet::ImmutableDeserializedPacket,
     solana_cost_model::{
         block_cost_limits,
         cost_model::CostModel,
@@ -9,7 +8,6 @@ use {
     solana_perf::packet::Packet,
     solana_sdk::feature_set::FeatureSet,
     solana_signed_message::SignedMessage,
-    std::sync::Arc,
 };
 
 /// `ForwardBatch` to have half of default cost_tracker limits, as smaller batch
@@ -29,14 +27,12 @@ const DEFAULT_NUMBER_OF_BATCHES: u32 = 100;
 pub struct ForwardBatch {
     // `forwardable_packets` keeps forwardable packets in a vector in its
     // original fee prioritized order
-    forwardable_packets: Vec<Arc<ImmutableDeserializedPacket>>,
+    forwardable_packets: Vec<Packet>,
 }
 
 impl ForwardBatch {
     pub fn get_forwardable_packets(&self) -> impl Iterator<Item = &Packet> {
-        self.forwardable_packets
-            .iter()
-            .map(|immutable_packet| immutable_packet.original_packet())
+        self.forwardable_packets.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -106,7 +102,6 @@ impl ForwardPacketBatchesByAccounts {
     pub fn try_add_packet(
         &mut self,
         sanitized_transaction: &impl SignedMessage,
-        immutable_packet: Arc<ImmutableDeserializedPacket>,
         feature_set: &FeatureSet,
     ) -> bool {
         let tx_cost = CostModel::calculate_cost(sanitized_transaction, feature_set);
@@ -115,7 +110,9 @@ impl ForwardPacketBatchesByAccounts {
             let batch_index = self.get_batch_index_by_updated_costs(&tx_cost, &updated_costs);
 
             if let Some(forward_batch) = self.forward_batches.get_mut(batch_index) {
-                forward_batch.forwardable_packets.push(immutable_packet);
+                forward_batch
+                    .forwardable_packets
+                    .push(sanitized_transaction.to_packet());
             } else {
                 // A successfully added tx_cost means it does not exceed block limit, nor vote
                 // limit, nor account limit. batch_index calculated as quotient from division
@@ -169,7 +166,6 @@ impl ForwardPacketBatchesByAccounts {
 mod tests {
     use {
         super::*,
-        crate::banking_stage::unprocessed_packet_batches::DeserializedPacket,
         solana_cost_model::transaction_cost::UsageCostDetails,
         solana_sdk::{
             compute_budget::ComputeBudgetInstruction,
@@ -181,12 +177,12 @@ mod tests {
         },
     };
 
-    /// build test transaction, return corresponding sanitized_transaction and deserialized_packet,
+    /// build test transaction, return corresponding sanitized_transaction,
     /// and the batch limit_ratio that would only allow one transaction per bucket.
-    fn build_test_transaction_and_packet(
+    fn build_test_transaction(
         priority: u64,
         write_to_account: &Pubkey,
-    ) -> (SanitizedTransaction, DeserializedPacket, u32) {
+    ) -> (SanitizedTransaction, u32) {
         let from_account = solana_sdk::pubkey::new_rand();
 
         let transaction = Transaction::new_unsigned(Message::new(
@@ -200,13 +196,11 @@ mod tests {
             SanitizedTransaction::from_transaction_for_tests(transaction.clone());
         let tx_cost = CostModel::calculate_cost(&sanitized_transaction, &FeatureSet::all_enabled());
         let cost = tx_cost.sum();
-        let deserialized_packet =
-            DeserializedPacket::new(Packet::from_data(None, transaction).unwrap()).unwrap();
 
         // set limit ratio so each batch can only have one test transaction
         let limit_ratio: u32 =
             ((block_cost_limits::MAX_WRITABLE_ACCOUNT_UNITS - cost + 1) / cost) as u32;
-        (sanitized_transaction, deserialized_packet, limit_ratio)
+        (sanitized_transaction, limit_ratio)
     }
 
     #[test]
@@ -215,10 +209,8 @@ mod tests {
         // other write to non-contentious account with no priority
         let hot_account = solana_sdk::pubkey::new_rand();
         let other_account = solana_sdk::pubkey::new_rand();
-        let (tx_high_priority, packet_high_priority, limit_ratio) =
-            build_test_transaction_and_packet(10, &hot_account);
-        let (tx_low_priority, packet_low_priority, _) =
-            build_test_transaction_and_packet(0, &other_account);
+        let (tx_high_priority, limit_ratio) = build_test_transaction(10, &hot_account);
+        let (tx_low_priority, _) = build_test_transaction(0, &other_account);
 
         // setup forwarding with 2 buckets, each only allow one transaction
         let number_of_batches = 2;
@@ -235,11 +227,8 @@ mod tests {
 
         // Assert one high-priority packet will be added to 1st bucket successfully
         {
-            assert!(forward_packet_batches_by_accounts.try_add_packet(
-                &tx_high_priority,
-                packet_high_priority.immutable_section().clone(),
-                &FeatureSet::all_enabled(),
-            ));
+            assert!(forward_packet_batches_by_accounts
+                .try_add_packet(&tx_high_priority, &FeatureSet::all_enabled(),));
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
             assert_eq!(1, batches.next().unwrap().len());
             assert_eq!(0, batches.next().unwrap().len());
@@ -249,11 +238,8 @@ mod tests {
         // Assert second high-priority packet will not fit in first bucket, but will
         // be added to 2nd bucket
         {
-            assert!(forward_packet_batches_by_accounts.try_add_packet(
-                &tx_high_priority,
-                packet_high_priority.immutable_section().clone(),
-                &FeatureSet::all_enabled(),
-            ));
+            assert!(forward_packet_batches_by_accounts
+                .try_add_packet(&tx_high_priority, &FeatureSet::all_enabled(),));
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
             assert_eq!(1, batches.next().unwrap().len());
             assert_eq!(1, batches.next().unwrap().len());
@@ -262,11 +248,8 @@ mod tests {
         // Assert 3rd high-priority packet can not added since both buckets would
         // exceed hot-account limit
         {
-            assert!(!forward_packet_batches_by_accounts.try_add_packet(
-                &tx_high_priority,
-                packet_high_priority.immutable_section().clone(),
-                &FeatureSet::all_enabled(),
-            ));
+            assert!(!forward_packet_batches_by_accounts
+                .try_add_packet(&tx_high_priority, &FeatureSet::all_enabled(),));
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
             assert_eq!(1, batches.next().unwrap().len());
             assert_eq!(1, batches.next().unwrap().len());
@@ -276,11 +259,8 @@ mod tests {
         // Assert lower priority packet will be successfully added to first bucket
         // since non-contentious account is still free
         {
-            assert!(forward_packet_batches_by_accounts.try_add_packet(
-                &tx_low_priority,
-                packet_low_priority.immutable_section().clone(),
-                &FeatureSet::all_enabled(),
-            ));
+            assert!(forward_packet_batches_by_accounts
+                .try_add_packet(&tx_low_priority, &FeatureSet::all_enabled(),));
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
             assert_eq!(2, batches.next().unwrap().len());
             assert_eq!(1, batches.next().unwrap().len());
@@ -290,8 +270,7 @@ mod tests {
 
     #[test]
     fn test_try_add_packet_to_single_batch() {
-        let (tx, packet, limit_ratio) =
-            build_test_transaction_and_packet(10, &solana_sdk::pubkey::new_rand());
+        let (tx, limit_ratio) = build_test_transaction(10, &solana_sdk::pubkey::new_rand());
         let number_of_batches = 1;
         let mut forward_packet_batches_by_accounts =
             ForwardPacketBatchesByAccounts::new(limit_ratio, number_of_batches);
@@ -305,11 +284,9 @@ mod tests {
 
         // Assert can successfully add first packet to forwarding buffer
         {
-            assert!(forward_packet_batches_by_accounts.try_add_packet(
-                &tx,
-                packet.immutable_section().clone(),
-                &FeatureSet::all_enabled()
-            ));
+            assert!(
+                forward_packet_batches_by_accounts.try_add_packet(&tx, &FeatureSet::all_enabled())
+            );
 
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
             assert_eq!(1, batches.next().unwrap().len());
@@ -317,11 +294,9 @@ mod tests {
 
         // Assert cannot add same packet to forwarding buffer again, due to reached account limit;
         {
-            assert!(!forward_packet_batches_by_accounts.try_add_packet(
-                &tx,
-                packet.immutable_section().clone(),
-                &FeatureSet::all_enabled()
-            ));
+            assert!(
+                !forward_packet_batches_by_accounts.try_add_packet(&tx, &FeatureSet::all_enabled())
+            );
 
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
             assert_eq!(1, batches.next().unwrap().len());
@@ -330,14 +305,11 @@ mod tests {
         // Assert can still add non-contentious packet to same batch
         {
             // build a small packet to a non-contentious account with high priority
-            let (tx2, packet2, _) =
-                build_test_transaction_and_packet(100, &solana_sdk::pubkey::new_rand());
+            let (tx2, _) = build_test_transaction(100, &solana_sdk::pubkey::new_rand());
 
-            assert!(forward_packet_batches_by_accounts.try_add_packet(
-                &tx2,
-                packet2.immutable_section().clone(),
-                &FeatureSet::all_enabled()
-            ));
+            assert!(
+                forward_packet_batches_by_accounts.try_add_packet(&tx2, &FeatureSet::all_enabled())
+            );
 
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
             assert_eq!(2, batches.next().unwrap().len());

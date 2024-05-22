@@ -286,11 +286,9 @@ impl LatestUnprocessedVotes {
                                 bank.get_reserved_account_keys(),
                             )
                         {
-                            if forward_packet_batches_by_accounts.try_add_packet(
-                                &sanitized_vote_transaction,
-                                deserialized_vote_packet,
-                                &bank.feature_set,
-                            ) {
+                            if forward_packet_batches_by_accounts
+                                .try_add_packet(&sanitized_vote_transaction, &bank.feature_set)
+                            {
                                 vote.forwarded = true;
                             } else {
                                 // To match behavior of regular transactions we stop

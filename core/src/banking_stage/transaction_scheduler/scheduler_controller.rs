@@ -283,15 +283,12 @@ impl SchedulerController {
                 self.container
                     .with_mut_transaction_state(&id.id, |state| {
                         let sanitized_transaction = &state.transaction_ttl().transaction;
-                        let immutable_packet = state.packet().clone();
 
                         // If not already forwarded and can be forwarded, add to forwardable packets.
                         if state.should_forward()
-                            && self.forwarder.try_add_packet(
-                                sanitized_transaction,
-                                immutable_packet,
-                                feature_set,
-                            )
+                            && self
+                                .forwarder
+                                .try_add_packet(sanitized_transaction, feature_set)
                         {
                             saturating_add_assign!(num_forwarded, 1);
                             state.mark_forwarded();
@@ -549,10 +546,12 @@ impl SchedulerController {
                     max_age_slot: last_slot_in_epoch,
                 };
 
-                if self
-                    .container
-                    .insert_new_transaction(transaction_ttl, packet, priority, cost)
-                {
+                if self.container.insert_new_transaction(
+                    packet.original_packet().meta().flags,
+                    transaction_ttl,
+                    priority,
+                    cost,
+                ) {
                     saturating_add_assign!(num_dropped_on_capacity, 1);
                 }
                 saturating_add_assign!(num_buffered, 1);

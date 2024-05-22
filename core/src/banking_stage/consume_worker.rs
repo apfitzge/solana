@@ -731,8 +731,9 @@ mod tests {
         solana_poh::poh_recorder::{PohRecorder, WorkingBankEntry},
         solana_runtime::prioritization_fee_cache::PrioritizationFeeCache,
         solana_sdk::{
-            genesis_config::GenesisConfig, poh_config::PohConfig, pubkey::Pubkey,
-            signature::Keypair, system_transaction, transaction::SanitizedTransaction,
+            genesis_config::GenesisConfig, packet::PacketFlags, poh_config::PohConfig,
+            pubkey::Pubkey, signature::Keypair, system_transaction,
+            transaction::SanitizedTransaction,
         },
         solana_vote::vote_sender_types::ReplayVoteReceiver,
         std::{
@@ -848,11 +849,11 @@ mod tests {
 
         for transaction in transactions {
             container.insert_new_transaction(
+                PacketFlags::empty(),
                 SanitizedTransactionTTL {
                     transaction,
                     max_age_slot: bank.slot(),
                 },
-                todo!("fix forwarding"),
                 0,
                 1,
             );
@@ -903,11 +904,11 @@ mod tests {
         )]);
         for transaction in transactions {
             container.insert_new_transaction(
+                PacketFlags::empty(),
                 SanitizedTransactionTTL {
                     transaction,
                     max_age_slot: bank.slot(),
                 },
-                todo!("fix forwarding"),
                 0,
                 1,
             );
@@ -957,11 +958,11 @@ mod tests {
         ]);
         for transaction in txs {
             container.insert_new_transaction(
+                PacketFlags::empty(),
                 SanitizedTransactionTTL {
                     transaction,
                     max_age_slot: bank.slot(),
                 },
-                todo!("fix forwarding"),
                 0,
                 1,
             );
@@ -1022,11 +1023,11 @@ mod tests {
         )]);
         for transaction in txs1.into_iter().chain(txs2.into_iter()) {
             container.insert_new_transaction(
+                PacketFlags::empty(),
                 SanitizedTransactionTTL {
                     transaction,
                     max_age_slot: bank.slot(),
                 },
-                todo!("fix forwarding"),
                 0,
                 1,
             );

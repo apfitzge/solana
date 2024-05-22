@@ -1,6 +1,6 @@
 use {
-    crate::banking_stage::immutable_deserialized_packet::ImmutableDeserializedPacket,
-    solana_sdk::clock::Slot, solana_signed_message::SignedMessage, std::sync::Arc,
+    solana_sdk::{clock::Slot, packet::PacketFlags},
+    solana_signed_message::SignedMessage,
 };
 
 /// Simple wrapper type to tie a sanitized transaction to max age slot.
@@ -28,10 +28,8 @@ pub(crate) struct SanitizedTransactionTTL<T: SignedMessage> {
 ///   internal `SanitizedTransaction` is moved out of the `TransactionState` and sent
 ///   to the appropriate thread for processing. This is done to avoid cloning the
 ///  `SanitizedTransaction`.
-#[allow(clippy::large_enum_variant)]
 pub(crate) struct TransactionState<T: SignedMessage> {
     transaction_ttl: SanitizedTransactionTTL<T>,
-    packet: Arc<ImmutableDeserializedPacket>,
     priority: u64,
     cost: u64,
     should_forward: bool,
@@ -40,16 +38,15 @@ pub(crate) struct TransactionState<T: SignedMessage> {
 impl<T: SignedMessage> TransactionState<T> {
     /// Creates a new `TransactionState` in the `Unprocessed` state.
     pub(crate) fn new(
+        packet_flags: PacketFlags,
         transaction_ttl: SanitizedTransactionTTL<T>,
-        packet: Arc<ImmutableDeserializedPacket>,
         priority: u64,
         cost: u64,
     ) -> Self {
-        let should_forward = !packet.original_packet().meta().forwarded()
-            && packet.original_packet().meta().is_from_staked_node();
+        let should_forward = !packet_flags.contains(PacketFlags::FORWARDED)
+            && packet_flags.contains(PacketFlags::FROM_STAKED_NODE);
         Self {
             transaction_ttl,
-            packet,
             priority,
             cost,
             should_forward,
@@ -79,11 +76,6 @@ impl<T: SignedMessage> TransactionState<T> {
         self.should_forward = false;
     }
 
-    /// Return the packet of the transaction.
-    pub(crate) fn packet(&self) -> &Arc<ImmutableDeserializedPacket> {
-        &self.packet
-    }
-
     /// Get a reference to the `SanitizedTransactionTTL` for the transaction.
     ///
     /// # Panics
@@ -101,7 +93,6 @@ mod tests {
             compute_budget::ComputeBudgetInstruction,
             hash::Hash,
             message::Message,
-            packet::Packet,
             signature::Keypair,
             signer::Signer,
             system_instruction,
@@ -122,17 +113,14 @@ mod tests {
         let message = Message::new(&ixs, Some(&from_keypair.pubkey()));
         let tx = Transaction::new(&[&from_keypair], message, Hash::default());
 
-        let packet = Arc::new(
-            ImmutableDeserializedPacket::new(Packet::from_data(None, tx.clone()).unwrap()).unwrap(),
-        );
         let transaction_ttl = SanitizedTransactionTTL {
             transaction: SanitizedTransaction::from_transaction_for_tests(tx),
             max_age_slot: Slot::MAX,
         };
         const TEST_TRANSACTION_COST: u64 = 5000;
         TransactionState::new(
+            PacketFlags::empty(),
             transaction_ttl,
-            packet,
             compute_unit_price,
             TEST_TRANSACTION_COST,
         )

@@ -679,7 +679,6 @@ impl ThreadLocalUnprocessedPackets {
                             let accepted_packet_indexes =
                                 Self::add_filtered_packets_to_forward_buffer(
                                     forward_buffer,
-                                    &packets_to_forward,
                                     &sanitized_transactions,
                                     &transaction_to_packet_indexes,
                                     &forwardable_transaction_indexes,
@@ -829,7 +828,6 @@ impl ThreadLocalUnprocessedPackets {
     /// returns vector of packet indexes that were accepted for forwarding.
     fn add_filtered_packets_to_forward_buffer(
         forward_buffer: &mut ForwardPacketBatchesByAccounts,
-        packets_to_process: &[Arc<ImmutableDeserializedPacket>],
         transactions: &[SanitizedTransaction],
         transaction_to_packet_indexes: &[usize],
         forwardable_transaction_indexes: &[usize],
@@ -842,13 +840,7 @@ impl ThreadLocalUnprocessedPackets {
             let sanitized_transaction = &transactions[*forwardable_transaction_index];
             let forwardable_packet_index =
                 transaction_to_packet_indexes[*forwardable_transaction_index];
-            let immutable_deserialized_packet =
-                packets_to_process[forwardable_packet_index].clone();
-            if !forward_buffer.try_add_packet(
-                sanitized_transaction,
-                immutable_deserialized_packet,
-                feature_set,
-            ) {
+            if !forward_buffer.try_add_packet(sanitized_transaction, feature_set) {
                 break;
             }
             accepted_packet_indexes.push(forwardable_packet_index);

@@ -534,10 +534,7 @@ fn try_schedule_transaction<T: SignedMessage>(
 mod tests {
     use {
         super::*,
-        crate::banking_stage::{
-            consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
-            immutable_deserialized_packet::ImmutableDeserializedPacket,
-        },
+        crate::banking_stage::consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
         crossbeam_channel::{unbounded, Receiver},
         itertools::Itertools,
         solana_sdk::{
@@ -545,14 +542,14 @@ mod tests {
             compute_budget::ComputeBudgetInstruction,
             hash::Hash,
             message::Message,
-            packet::Packet,
+            packet::PacketFlags,
             pubkey::Pubkey,
             signature::Keypair,
             signer::Signer,
             system_instruction,
             transaction::{SanitizedTransaction, Transaction},
         },
-        std::{borrow::Borrow, sync::Arc},
+        std::borrow::Borrow,
     };
 
     #[allow(clippy::type_complexity)]
@@ -613,20 +610,14 @@ mod tests {
                 lamports,
                 compute_unit_price,
             );
-            let packet = Arc::new(
-                ImmutableDeserializedPacket::new(
-                    Packet::from_data(None, transaction.to_versioned_transaction()).unwrap(),
-                )
-                .unwrap(),
-            );
             let transaction_ttl = SanitizedTransactionTTL {
                 transaction,
                 max_age_slot: Slot::MAX,
             };
             const TEST_TRANSACTION_COST: u64 = 5000;
             container.insert_new_transaction(
+                PacketFlags::empty(),
                 transaction_ttl,
-                packet,
                 compute_unit_price,
                 TEST_TRANSACTION_COST,
             );

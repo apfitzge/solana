@@ -6,6 +6,7 @@ use {
         instruction::CompiledInstruction,
         message::{AccountKeys, SanitizedMessage, TransactionSignatureDetails},
         nonce::NONCED_TX_MARKER_IX_INDEX,
+        packet::Packet,
         precompiles::{get_precompiles, is_precompile},
         pubkey::Pubkey,
         signature::Signature,
@@ -238,6 +239,16 @@ pub trait SignedMessage: Message {
     /// Make a versioned transaction copy of the transaction.
     // TODO: get rid of this.
     fn to_versioned_transaction(&self) -> VersionedTransaction;
+
+    // Default implementation is to convert to versioned tx then fill packet
+    fn to_packet(&self) -> Packet {
+        let mut packet = Packet::default();
+        let versioned_tx = self.to_versioned_transaction();
+        packet
+            .populate_packet(None, &versioned_tx)
+            .expect("populate a packet");
+        packet
+    }
 }
 
 /// A non-owning version of [`CompiledInstruction`] that references
