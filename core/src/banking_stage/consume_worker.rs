@@ -3,6 +3,7 @@ use {
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
         scheduler_messages::{ConsumeWork, FinishedConsumeWork},
+        transaction_scheduler::transaction_state::TransactionState,
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
     solana_measure::measure_us,
@@ -19,6 +20,7 @@ use {
         time::Duration,
     },
     thiserror::Error,
+    valet::ConcurrentValet,
 };
 
 #[derive(Debug, Error)]
@@ -36,6 +38,7 @@ pub(crate) struct ConsumeWorker<T: SignedMessage> {
 
     leader_bank_notifier: Arc<LeaderBankNotifier>,
     metrics: Arc<ConsumeWorkerMetrics>,
+    _id_to_state: Arc<ConcurrentValet<TransactionState<T>>>,
 }
 
 impl<T: SignedMessage> ConsumeWorker<T> {
@@ -45,6 +48,7 @@ impl<T: SignedMessage> ConsumeWorker<T> {
         consumer: Consumer,
         consumed_sender: Sender<FinishedConsumeWork<T>>,
         leader_bank_notifier: Arc<LeaderBankNotifier>,
+        id_to_state: Arc<ConcurrentValet<TransactionState<T>>>,
     ) -> Self {
         Self {
             consume_receiver,
@@ -52,6 +56,7 @@ impl<T: SignedMessage> ConsumeWorker<T> {
             consumed_sender,
             leader_bank_notifier,
             metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
+            _id_to_state: id_to_state,
         }
     }
 
@@ -764,12 +769,14 @@ mod tests {
 
         let (consume_sender, consume_receiver) = unbounded();
         let (consumed_sender, consumed_receiver) = unbounded();
+        let valet = Arc::new(ConcurrentValet::with_capacity(4096));
         let worker = ConsumeWorker::new(
             0,
             consume_receiver,
             consumer,
             consumed_sender,
             poh_recorder.read().unwrap().new_leader_bank_notifier(),
+            valet,
         );
 
         (
