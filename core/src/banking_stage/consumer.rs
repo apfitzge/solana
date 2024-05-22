@@ -5,6 +5,7 @@ use {
         leader_slot_metrics::{LeaderSlotMetricsTracker, ProcessTransactionsSummary},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
         qos_service::QosService,
+        scheduler_messages::MAX_BATCH_SIZE,
         unprocessed_transaction_storage::{ConsumeScannerPayload, UnprocessedTransactionStorage},
         BankingStageStats,
     },
@@ -41,7 +42,7 @@ use {
 };
 
 /// Consumer will create chunks of transactions from buffer with up to this size.
-pub const TARGET_NUM_TRANSACTIONS_PER_BATCH: usize = 64;
+pub const TARGET_NUM_TRANSACTIONS_PER_BATCH: usize = MAX_BATCH_SIZE;
 
 pub struct ProcessTransactionBatchOutput {
     // The number of transactions filtered out by the cost model

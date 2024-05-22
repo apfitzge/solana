@@ -15,26 +15,25 @@ use {
         },
     },
     crossbeam_channel::{Receiver, Sender, TryRecvError},
-    itertools::izip,
     prio_graph::{AccessKind, PrioGraph},
     solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS,
     solana_measure::measure_us,
-    solana_sdk::{pubkey::Pubkey, saturating_add_assign, slot_history::Slot},
+    solana_sdk::{pubkey::Pubkey, saturating_add_assign},
     solana_signed_message::SignedMessage,
 };
 
-pub(crate) struct PrioGraphScheduler<T: SignedMessage> {
+pub(crate) struct PrioGraphScheduler {
     in_flight_tracker: InFlightTracker,
     account_locks: ThreadAwareAccountLocks,
-    consume_work_senders: Vec<Sender<ConsumeWork<T>>>,
-    finished_consume_work_receiver: Receiver<FinishedConsumeWork<T>>,
+    consume_work_senders: Vec<Sender<ConsumeWork>>,
+    finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
     look_ahead_window_size: usize,
 }
 
-impl<T: SignedMessage> PrioGraphScheduler<T> {
+impl PrioGraphScheduler {
     pub(crate) fn new(
-        consume_work_senders: Vec<Sender<ConsumeWork<T>>>,
-        finished_consume_work_receiver: Receiver<FinishedConsumeWork<T>>,
+        consume_work_senders: Vec<Sender<ConsumeWork>>,
+        finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
     ) -> Self {
         let num_threads = consume_work_senders.len();
         Self {
@@ -62,7 +61,7 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
     /// This, combined with internal tracking of threads' in-flight transactions, allows
     /// for load-balancing while prioritizing scheduling transactions onto threads that will
     /// not cause conflicts in the near future.
-    pub(crate) fn schedule(
+    pub(crate) fn schedule<T: SignedMessage>(
         &mut self,
         container: &mut TransactionStateContainer<T>,
         pre_graph_filter: impl Fn(&[&T], &mut [bool]),
@@ -187,7 +186,7 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
                                     thread_set,
                                     &batches.total_cus,
                                     self.in_flight_tracker.cus_in_flight_per_thread(),
-                                    &batches.transactions,
+                                    &batches.ids,
                                     self.in_flight_tracker.num_in_flight_per_thread(),
                                 )
                             },
@@ -205,16 +204,9 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
                         unschedulable_ids.push(id);
                         saturating_add_assign!(num_unschedulable, 1);
                     }
-                    Ok(TransactionSchedulingInfo {
-                        thread_id,
-                        transaction,
-                        max_age_slot,
-                        cost,
-                    }) => {
+                    Ok(TransactionSchedulingInfo { thread_id, cost }) => {
                         saturating_add_assign!(num_scheduled, 1);
-                        batches.transactions[thread_id].push(transaction);
                         batches.ids[thread_id].push(id.id);
-                        batches.max_age_slots[thread_id].push(max_age_slot);
                         saturating_add_assign!(batches.total_cus[thread_id], cost);
 
                         // If target batch size is reached, send only this batch.
@@ -285,7 +277,7 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
 
     /// Receive completed batches of transactions without blocking.
     /// Returns (num_transactions, num_retryable_transactions) on success.
-    pub fn receive_completed(
+    pub fn receive_completed<T: SignedMessage>(
         &mut self,
         container: &mut TransactionStateContainer<T>,
     ) -> Result<(usize, usize), SchedulerError> {
@@ -304,41 +296,27 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
 
     /// Receive completed batches of transactions.
     /// Returns `Ok((num_transactions, num_retryable))` if a batch was received, `Ok((0, 0))` if no batch was received.
-    fn try_receive_completed(
+    fn try_receive_completed<T: SignedMessage>(
         &mut self,
         container: &mut TransactionStateContainer<T>,
     ) -> Result<(usize, usize), SchedulerError> {
         match self.finished_consume_work_receiver.try_recv() {
             Ok(FinishedConsumeWork {
-                work:
-                    ConsumeWork {
-                        batch_id,
-                        ids,
-                        transactions,
-                        max_age_slots,
-                    },
+                work: ConsumeWork { batch_id, ids },
                 retryable_indexes,
             }) => {
                 let num_transactions = ids.len();
                 let num_retryable = retryable_indexes.len();
 
                 // Free the locks
-                self.complete_batch(batch_id, &transactions);
+                self.complete_batch(container, batch_id, &ids);
 
                 // Retryable transactions should be inserted back into the container
                 let mut retryable_iter = retryable_indexes.into_iter().peekable();
-                for (index, (id, transaction, max_age_slot)) in
-                    izip!(ids, transactions, max_age_slots).enumerate()
-                {
+                for (index, id) in ids.into_iter().enumerate() {
                     if let Some(retryable_index) = retryable_iter.peek() {
                         if *retryable_index == index {
-                            container.retry_transaction(
-                                id,
-                                SanitizedTransactionTTL {
-                                    transaction,
-                                    max_age_slot,
-                                },
-                            );
+                            container.retry_transaction(id);
                             retryable_iter.next();
                             continue;
                         }
@@ -357,21 +335,33 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
 
     /// Mark a given `TransactionBatchId` as completed.
     /// This will update the internal tracking, including account locks.
-    fn complete_batch(&mut self, batch_id: TransactionBatchId, transactions: &[T]) {
+    fn complete_batch<T: SignedMessage>(
+        &mut self,
+        container: &mut TransactionStateContainer<T>,
+        batch_id: TransactionBatchId,
+        ids: &[TransactionId],
+    ) {
         let thread_id = self.in_flight_tracker.complete_batch(batch_id);
-        for transaction in transactions {
-            let account_locks = transaction.get_account_locks_unchecked();
-            self.account_locks.unlock_accounts(
-                account_locks.writable.into_iter(),
-                account_locks.readonly.into_iter(),
-                thread_id,
-            );
+        for id in ids {
+            container
+                .with_transaction_state(id, |state| {
+                    let account_locks = state
+                        .transaction_ttl()
+                        .transaction
+                        .get_account_locks_unchecked();
+                    self.account_locks.unlock_accounts(
+                        account_locks.writable.into_iter(),
+                        account_locks.readonly.into_iter(),
+                        thread_id,
+                    );
+                })
+                .expect("transaction must exist");
         }
     }
 
     /// Send all batches of transactions to the worker threads.
     /// Returns the number of transactions sent.
-    fn send_batches(&mut self, batches: &mut Batches<T>) -> Result<usize, SchedulerError> {
+    fn send_batches(&mut self, batches: &mut Batches) -> Result<usize, SchedulerError> {
         (0..self.consume_work_senders.len())
             .map(|thread_index| self.send_batch(batches, thread_index))
             .sum()
@@ -381,26 +371,21 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
     /// Returns the number of transactions sent.
     fn send_batch(
         &mut self,
-        batches: &mut Batches<T>,
+        batches: &mut Batches,
         thread_index: usize,
     ) -> Result<usize, SchedulerError> {
         if batches.ids[thread_index].is_empty() {
             return Ok(0);
         }
 
-        let (ids, transactions, max_age_slots, total_cus) = batches.take_batch(thread_index);
+        let (ids, total_cus) = batches.take_batch(thread_index);
 
         let batch_id = self
             .in_flight_tracker
             .track_batch(ids.len(), total_cus, thread_index);
 
         let num_scheduled = ids.len();
-        let work = ConsumeWork {
-            batch_id,
-            ids,
-            transactions,
-            max_age_slots,
-        };
+        let work = ConsumeWork { batch_id, ids };
         self.consume_work_senders[thread_index]
             .send(work)
             .map_err(|_| SchedulerError::DisconnectedSendChannel("consume work sender"))?;
@@ -421,7 +406,7 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
         thread_set: ThreadSet,
         batch_cus_per_thread: &[u64],
         in_flight_cus_per_thread: &[u64],
-        batches_per_thread: &[Vec<T>],
+        batch_ids_per_thread: &[Vec<usize>],
         in_flight_per_thread: &[usize],
     ) -> ThreadId {
         thread_set
@@ -430,7 +415,7 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
                 (
                     thread_id,
                     batch_cus_per_thread[thread_id] + in_flight_cus_per_thread[thread_id],
-                    batches_per_thread[thread_id].len() + in_flight_per_thread[thread_id],
+                    batch_ids_per_thread[thread_id].len() + in_flight_per_thread[thread_id],
                 )
             })
             .min_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)))
@@ -439,7 +424,7 @@ impl<T: SignedMessage> PrioGraphScheduler<T> {
     }
 
     /// Gets accessed accounts (resources) for use in `PrioGraph`.
-    fn get_transaction_account_access(
+    fn get_transaction_account_access<T: SignedMessage>(
         transaction: &SanitizedTransactionTTL<T>,
     ) -> impl Iterator<Item = (Pubkey, AccessKind)> + '_ {
         let transaction = &transaction.transaction;
@@ -470,35 +455,23 @@ pub(crate) struct SchedulingSummary {
     pub filter_time_us: u64,
 }
 
-struct Batches<T: SignedMessage> {
+struct Batches {
     ids: Vec<Vec<TransactionId>>,
-    transactions: Vec<Vec<T>>,
-    max_age_slots: Vec<Vec<Slot>>,
     total_cus: Vec<u64>,
 }
 
-impl<T: SignedMessage> Batches<T> {
+impl Batches {
     fn new(num_threads: usize) -> Self {
         Self {
             ids: vec![Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH); num_threads],
-            transactions: vec![Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH); num_threads],
-            max_age_slots: vec![Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH); num_threads],
             total_cus: vec![0; num_threads],
         }
     }
 
-    fn take_batch(&mut self, thread_id: ThreadId) -> (Vec<TransactionId>, Vec<T>, Vec<Slot>, u64) {
+    fn take_batch(&mut self, thread_id: ThreadId) -> (Vec<TransactionId>, u64) {
         (
             core::mem::replace(
                 &mut self.ids[thread_id],
-                Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH),
-            ),
-            core::mem::replace(
-                &mut self.transactions[thread_id],
-                Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH),
-            ),
-            core::mem::replace(
-                &mut self.max_age_slots[thread_id],
                 Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH),
             ),
             core::mem::replace(&mut self.total_cus[thread_id], 0),
@@ -507,10 +480,8 @@ impl<T: SignedMessage> Batches<T> {
 }
 
 /// A transaction has been scheduled to a thread.
-struct TransactionSchedulingInfo<T: SignedMessage> {
+struct TransactionSchedulingInfo {
     thread_id: ThreadId,
-    transaction: T,
-    max_age_slot: Slot,
     cost: u64,
 }
 
@@ -530,7 +501,7 @@ fn try_schedule_transaction<T: SignedMessage>(
     account_locks: &mut ThreadAwareAccountLocks,
     num_threads: usize,
     thread_selector: impl Fn(ThreadSet) -> ThreadId,
-) -> Result<TransactionSchedulingInfo<T>, TransactionSchedulingError> {
+) -> Result<TransactionSchedulingInfo, TransactionSchedulingError> {
     let transaction = &transaction_state.transaction_ttl().transaction;
     if !pre_lock_filter(transaction) {
         return Err(TransactionSchedulingError::Filtered);
@@ -554,15 +525,9 @@ fn try_schedule_transaction<T: SignedMessage>(
         return Err(TransactionSchedulingError::UnschedulableConflicts);
     };
 
-    let sanitized_transaction_ttl = transaction_state.transition_to_pending();
     let cost = transaction_state.cost();
 
-    Ok(TransactionSchedulingInfo {
-        thread_id,
-        transaction: sanitized_transaction_ttl.transaction,
-        max_age_slot: sanitized_transaction_ttl.max_age_slot,
-        cost,
-    })
+    Ok(TransactionSchedulingInfo { thread_id, cost })
 }
 
 #[cfg(test)]
@@ -576,6 +541,7 @@ mod tests {
         crossbeam_channel::{unbounded, Receiver},
         itertools::Itertools,
         solana_sdk::{
+            clock::Slot,
             compute_budget::ComputeBudgetInstruction,
             hash::Hash,
             message::Message,
@@ -593,9 +559,9 @@ mod tests {
     fn create_test_frame(
         num_threads: usize,
     ) -> (
-        PrioGraphScheduler<SanitizedTransaction>,
-        Vec<Receiver<ConsumeWork<SanitizedTransaction>>>,
-        Sender<FinishedConsumeWork<SanitizedTransaction>>,
+        PrioGraphScheduler,
+        Vec<Receiver<ConsumeWork>>,
+        Sender<FinishedConsumeWork>,
     ) {
         let (consume_work_senders, consume_work_receivers) =
             (0..num_threads).map(|_| unbounded()).unzip();
@@ -670,11 +636,8 @@ mod tests {
     }
 
     fn collect_work(
-        receiver: &Receiver<ConsumeWork<SanitizedTransaction>>,
-    ) -> (
-        Vec<ConsumeWork<SanitizedTransaction>>,
-        Vec<Vec<TransactionId>>,
-    ) {
+        receiver: &Receiver<ConsumeWork>,
+    ) -> (Vec<ConsumeWork>, Vec<Vec<TransactionId>>) {
         receiver
             .try_iter()
             .map(|work| {

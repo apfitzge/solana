@@ -2,14 +2,15 @@ use {
     super::{
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork},
+        scheduler_messages::{ConsumeWork, FinishedConsumeWork, MAX_BATCH_SIZE},
         transaction_scheduler::transaction_state::TransactionState,
     },
+    arrayvec::ArrayVec,
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
     solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_runtime::bank::Bank,
-    solana_sdk::timing::AtomicInterval,
+    solana_sdk::{clock::Slot, timing::AtomicInterval},
     solana_signed_message::SignedMessage,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
@@ -24,29 +25,29 @@ use {
 };
 
 #[derive(Debug, Error)]
-pub enum ConsumeWorkerError<T: SignedMessage> {
+pub enum ConsumeWorkerError {
     #[error("Failed to receive work from scheduler: {0}")]
     Recv(#[from] RecvError),
     #[error("Failed to send finalized consume work to scheduler: {0}")]
-    Send(#[from] SendError<FinishedConsumeWork<T>>),
+    Send(#[from] SendError<FinishedConsumeWork>),
 }
 
 pub(crate) struct ConsumeWorker<T: SignedMessage> {
-    consume_receiver: Receiver<ConsumeWork<T>>,
+    consume_receiver: Receiver<ConsumeWork>,
     consumer: Consumer,
-    consumed_sender: Sender<FinishedConsumeWork<T>>,
+    consumed_sender: Sender<FinishedConsumeWork>,
 
     leader_bank_notifier: Arc<LeaderBankNotifier>,
     metrics: Arc<ConsumeWorkerMetrics>,
-    _id_to_state: Arc<ConcurrentValet<TransactionState<T>>>,
+    id_to_state: Arc<ConcurrentValet<TransactionState<T>>>,
 }
 
 impl<T: SignedMessage> ConsumeWorker<T> {
     pub fn new(
         id: u32,
-        consume_receiver: Receiver<ConsumeWork<T>>,
+        consume_receiver: Receiver<ConsumeWork>,
         consumer: Consumer,
-        consumed_sender: Sender<FinishedConsumeWork<T>>,
+        consumed_sender: Sender<FinishedConsumeWork>,
         leader_bank_notifier: Arc<LeaderBankNotifier>,
         id_to_state: Arc<ConcurrentValet<TransactionState<T>>>,
     ) -> Self {
@@ -56,7 +57,7 @@ impl<T: SignedMessage> ConsumeWorker<T> {
             consumed_sender,
             leader_bank_notifier,
             metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
-            _id_to_state: id_to_state,
+            id_to_state,
         }
     }
 
@@ -64,14 +65,14 @@ impl<T: SignedMessage> ConsumeWorker<T> {
         self.metrics.clone()
     }
 
-    pub fn run(self) -> Result<(), ConsumeWorkerError<T>> {
+    pub fn run(self) -> Result<(), ConsumeWorkerError> {
         loop {
             let work = self.consume_receiver.recv()?;
             self.consume_loop(work)?;
         }
     }
 
-    fn consume_loop(&self, work: ConsumeWork<T>) -> Result<(), ConsumeWorkerError<T>> {
+    fn consume_loop(&self, work: ConsumeWork) -> Result<(), ConsumeWorkerError> {
         let (maybe_consume_bank, get_bank_us) = measure_us!(self.get_consume_bank());
         let Some(mut bank) = maybe_consume_bank else {
             self.metrics
@@ -109,12 +110,32 @@ impl<T: SignedMessage> ConsumeWorker<T> {
     }
 
     /// Consume a single batch.
-    fn consume(&self, bank: &Arc<Bank>, work: ConsumeWork<T>) -> Result<(), ConsumeWorkerError<T>> {
-        let output = self.consumer.process_and_record_aged_transactions(
-            bank,
-            &work.transactions,
-            &work.max_age_slots,
-        );
+    fn consume(&self, bank: &Arc<Bank>, work: ConsumeWork) -> Result<(), ConsumeWorkerError> {
+        let output = self
+            .id_to_state
+            .batched_with_ref::<MAX_BATCH_SIZE, _, _>(
+                &work.ids,
+                |state| state,
+                |states| {
+                    let transactions = ArrayVec::<&T, MAX_BATCH_SIZE>::from_iter(
+                        states
+                            .iter()
+                            .map(|state| &state.transaction_ttl().transaction),
+                    );
+                    let max_age_slots = ArrayVec::<Slot, MAX_BATCH_SIZE>::from_iter(
+                        states
+                            .iter()
+                            .map(|state| state.transaction_ttl().max_age_slot),
+                    );
+
+                    self.consumer.process_and_record_aged_transactions(
+                        bank,
+                        &transactions,
+                        &max_age_slots,
+                    )
+                },
+            )
+            .expect("transactions must be accessable");
 
         self.metrics.update_for_consume(&output);
         self.metrics.has_data.store(true, Ordering::Relaxed);
@@ -136,7 +157,7 @@ impl<T: SignedMessage> ConsumeWorker<T> {
     }
 
     /// Retry current batch and all outstanding batches.
-    fn retry_drain(&self, work: ConsumeWork<T>) -> Result<(), ConsumeWorkerError<T>> {
+    fn retry_drain(&self, work: ConsumeWork) -> Result<(), ConsumeWorkerError> {
         for work in try_drain_iter(work, &self.consume_receiver) {
             self.retry(work)?;
         }
@@ -144,8 +165,8 @@ impl<T: SignedMessage> ConsumeWorker<T> {
     }
 
     /// Send transactions back to scheduler as retryable.
-    fn retry(&self, work: ConsumeWork<T>) -> Result<(), ConsumeWorkerError<T>> {
-        let retryable_indexes: Vec<_> = (0..work.transactions.len()).collect();
+    fn retry(&self, work: ConsumeWork) -> Result<(), ConsumeWorkerError> {
+        let retryable_indexes: Vec<_> = (0..work.ids.len()).collect();
         let num_retryable = retryable_indexes.len();
         self.metrics
             .count_metrics
@@ -697,6 +718,10 @@ mod tests {
             qos_service::QosService,
             scheduler_messages::TransactionBatchId,
             tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
+            transaction_scheduler::{
+                transaction_state::SanitizedTransactionTTL,
+                transaction_state_container::TransactionStateContainer,
+            },
         },
         crossbeam_channel::unbounded,
         solana_ledger::{
@@ -729,8 +754,9 @@ mod tests {
         _poh_simulator: JoinHandle<()>,
         _replay_vote_receiver: ReplayVoteReceiver,
 
-        consume_sender: Sender<ConsumeWork<SanitizedTransaction>>,
-        consumed_receiver: Receiver<FinishedConsumeWork<SanitizedTransaction>>,
+        consume_sender: Sender<ConsumeWork>,
+        consumed_receiver: Receiver<FinishedConsumeWork>,
+        container: TransactionStateContainer<SanitizedTransaction>,
     }
 
     fn setup_test_frame() -> (TestFrame, ConsumeWorker<SanitizedTransaction>) {
@@ -769,14 +795,14 @@ mod tests {
 
         let (consume_sender, consume_receiver) = unbounded();
         let (consumed_sender, consumed_receiver) = unbounded();
-        let valet = Arc::new(ConcurrentValet::with_capacity(4096));
+        let id_to_state = Arc::new(ConcurrentValet::with_capacity(4096));
         let worker = ConsumeWorker::new(
             0,
             consume_receiver,
             consumer,
             consumed_sender,
             poh_recorder.read().unwrap().new_leader_bank_notifier(),
-            valet,
+            id_to_state.clone(),
         );
 
         (
@@ -791,6 +817,7 @@ mod tests {
                 _replay_vote_receiver: replay_vote_receiver,
                 consume_sender,
                 consumed_receiver,
+                container: TransactionStateContainer::with_valet(id_to_state),
             },
             worker,
         )
@@ -798,15 +825,16 @@ mod tests {
 
     #[test]
     fn test_worker_consume_no_bank() {
-        let (test_frame, worker) = setup_test_frame();
+        let (mut test_frame, worker) = setup_test_frame();
         let TestFrame {
             mint_keypair,
             genesis_config,
             bank,
             consume_sender,
             consumed_receiver,
+            container,
             ..
-        } = &test_frame;
+        } = &mut test_frame;
         let worker_thread = std::thread::spawn(move || worker.run());
 
         let pubkey1 = Pubkey::new_unique();
@@ -817,19 +845,29 @@ mod tests {
             1,
             genesis_config.hash(),
         )]);
+
+        for transaction in transactions {
+            container.insert_new_transaction(
+                SanitizedTransactionTTL {
+                    transaction,
+                    max_age_slot: bank.slot(),
+                },
+                todo!("fix forwarding"),
+                0,
+                1,
+            );
+        }
+
         let bid = TransactionBatchId::new(0);
         let id = 0;
         let work = ConsumeWork {
             batch_id: bid,
             ids: vec![id],
-            transactions,
-            max_age_slots: vec![bank.slot()],
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid);
         assert_eq!(consumed.work.ids, vec![id]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot()]);
         assert_eq!(consumed.retryable_indexes, vec![0]);
 
         drop(test_frame);
@@ -838,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_worker_consume_simple() {
-        let (test_frame, worker) = setup_test_frame();
+        let (mut test_frame, worker) = setup_test_frame();
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -846,8 +884,9 @@ mod tests {
             poh_recorder,
             consume_sender,
             consumed_receiver,
+            container,
             ..
-        } = &test_frame;
+        } = &mut test_frame;
         let worker_thread = std::thread::spawn(move || worker.run());
         poh_recorder
             .write()
@@ -862,19 +901,28 @@ mod tests {
             1,
             genesis_config.hash(),
         )]);
+        for transaction in transactions {
+            container.insert_new_transaction(
+                SanitizedTransactionTTL {
+                    transaction,
+                    max_age_slot: bank.slot(),
+                },
+                todo!("fix forwarding"),
+                0,
+                1,
+            );
+        }
+
         let bid = TransactionBatchId::new(0);
         let id = 0;
         let work = ConsumeWork {
             batch_id: bid,
             ids: vec![id],
-            transactions,
-            max_age_slots: vec![bank.slot()],
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid);
         assert_eq!(consumed.work.ids, vec![id]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot()]);
         assert_eq!(consumed.retryable_indexes, Vec::<usize>::new());
 
         drop(test_frame);
@@ -883,7 +931,7 @@ mod tests {
 
     #[test]
     fn test_worker_consume_self_conflicting() {
-        let (test_frame, worker) = setup_test_frame();
+        let (mut test_frame, worker) = setup_test_frame();
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -891,8 +939,9 @@ mod tests {
             poh_recorder,
             consume_sender,
             consumed_receiver,
+            container,
             ..
-        } = &test_frame;
+        } = &mut test_frame;
         let worker_thread = std::thread::spawn(move || worker.run());
         poh_recorder
             .write()
@@ -906,6 +955,17 @@ mod tests {
             system_transaction::transfer(mint_keypair, &pubkey1, 2, genesis_config.hash()),
             system_transaction::transfer(mint_keypair, &pubkey2, 2, genesis_config.hash()),
         ]);
+        for transaction in txs {
+            container.insert_new_transaction(
+                SanitizedTransactionTTL {
+                    transaction,
+                    max_age_slot: bank.slot(),
+                },
+                todo!("fix forwarding"),
+                0,
+                1,
+            );
+        }
 
         let bid = TransactionBatchId::new(0);
         let id1 = 1;
@@ -914,15 +974,12 @@ mod tests {
             .send(ConsumeWork {
                 batch_id: bid,
                 ids: vec![id1, id2],
-                transactions: txs,
-                max_age_slots: vec![bank.slot(), bank.slot()],
             })
             .unwrap();
 
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid);
         assert_eq!(consumed.work.ids, vec![id1, id2]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot(), bank.slot()]);
         assert_eq!(consumed.retryable_indexes, vec![1]); // id2 is retryable since lock conflict
 
         drop(test_frame);
@@ -931,7 +988,7 @@ mod tests {
 
     #[test]
     fn test_worker_consume_multiple_messages() {
-        let (test_frame, worker) = setup_test_frame();
+        let (mut test_frame, worker) = setup_test_frame();
         let TestFrame {
             mint_keypair,
             genesis_config,
@@ -939,8 +996,9 @@ mod tests {
             poh_recorder,
             consume_sender,
             consumed_receiver,
+            container,
             ..
-        } = &test_frame;
+        } = &mut test_frame;
         let worker_thread = std::thread::spawn(move || worker.run());
         poh_recorder
             .write()
@@ -962,6 +1020,17 @@ mod tests {
             2,
             genesis_config.hash(),
         )]);
+        for transaction in txs1.into_iter().chain(txs2.into_iter()) {
+            container.insert_new_transaction(
+                SanitizedTransactionTTL {
+                    transaction,
+                    max_age_slot: bank.slot(),
+                },
+                todo!("fix forwarding"),
+                0,
+                1,
+            );
+        }
 
         let bid1 = TransactionBatchId::new(0);
         let bid2 = TransactionBatchId::new(1);
@@ -971,8 +1040,6 @@ mod tests {
             .send(ConsumeWork {
                 batch_id: bid1,
                 ids: vec![id1],
-                transactions: txs1,
-                max_age_slots: vec![bank.slot()],
             })
             .unwrap();
 
@@ -980,20 +1047,16 @@ mod tests {
             .send(ConsumeWork {
                 batch_id: bid2,
                 ids: vec![id2],
-                transactions: txs2,
-                max_age_slots: vec![bank.slot()],
             })
             .unwrap();
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid1);
         assert_eq!(consumed.work.ids, vec![id1]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot()]);
         assert_eq!(consumed.retryable_indexes, Vec::<usize>::new());
 
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid2);
         assert_eq!(consumed.work.ids, vec![id2]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot()]);
         assert_eq!(consumed.retryable_indexes, Vec::<usize>::new());
 
         drop(test_frame);

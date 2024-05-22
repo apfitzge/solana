@@ -7,4 +7,4 @@ mod scheduler_metrics;
 mod thread_aware_account_locks;
 mod transaction_priority_id;
 pub(crate) mod transaction_state;
-mod transaction_state_container;
+pub(crate) mod transaction_state_container;

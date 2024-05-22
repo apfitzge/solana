@@ -52,7 +52,7 @@ pub(crate) struct SchedulerController {
     /// Shared resource between `packet_receiver` and `scheduler`.
     container: TransactionStateContainer<SanitizedTransaction>,
     /// State for scheduling and communicating with worker threads.
-    scheduler: PrioGraphScheduler<SanitizedTransaction>,
+    scheduler: PrioGraphScheduler,
     /// Metrics tracking time for leader bank detection.
     leader_detection_metrics: SchedulerLeaderDetectionMetrics,
     /// Metrics tracking counts on transactions in different states
@@ -73,7 +73,7 @@ impl SchedulerController {
         packet_deserializer: PacketDeserializer,
         bank_forks: Arc<RwLock<BankForks>>,
         valet: Arc<ConcurrentValet<TransactionState<SanitizedTransaction>>>,
-        scheduler: PrioGraphScheduler<SanitizedTransaction>,
+        scheduler: PrioGraphScheduler,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Forwarder,
     ) -> Self {
@@ -676,8 +676,8 @@ mod tests {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         banking_packet_sender: Sender<Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>>,
 
-        consume_work_receivers: Vec<Receiver<ConsumeWork<SanitizedTransaction>>>,
-        finished_consume_work_sender: Sender<FinishedConsumeWork<SanitizedTransaction>>,
+        consume_work_receivers: Vec<Receiver<ConsumeWork>>,
+        finished_consume_work_sender: Sender<FinishedConsumeWork>,
     }
 
     fn create_test_frame(num_threads: usize) -> (TestFrame, SchedulerController) {
@@ -810,8 +810,6 @@ mod tests {
                 work: ConsumeWork {
                     batch_id: TransactionBatchId::new(0),
                     ids: vec![],
-                    transactions: vec![],
-                    max_age_slots: vec![],
                 },
                 retryable_indexes: vec![],
             })
@@ -856,8 +854,6 @@ mod tests {
             2,
             bank.last_blockhash(),
         );
-        let tx1_hash = tx1.message().hash();
-        let tx2_hash = tx2.message().hash();
 
         let txs = vec![tx1, tx2];
         banking_packet_sender
@@ -867,13 +863,6 @@ mod tests {
         test_receive_then_schedule(&mut scheduler_controller);
         let consume_work = consume_work_receivers[0].try_recv().unwrap();
         assert_eq!(consume_work.ids.len(), 2);
-        assert_eq!(consume_work.transactions.len(), 2);
-        let message_hashes = consume_work
-            .transactions
-            .iter()
-            .map(|tx| tx.message_hash())
-            .collect_vec();
-        assert_eq!(message_hashes, vec![&tx2_hash, &tx1_hash]);
     }
 
     #[test]
@@ -912,8 +901,6 @@ mod tests {
             2,
             bank.last_blockhash(),
         );
-        let tx1_hash = tx1.message().hash();
-        let tx2_hash = tx2.message().hash();
 
         let txs = vec![tx1, tx2];
         banking_packet_sender
@@ -927,12 +914,7 @@ mod tests {
             .collect_vec();
 
         let num_txs_per_batch = consume_works.iter().map(|cw| cw.ids.len()).collect_vec();
-        let message_hashes = consume_works
-            .iter()
-            .flat_map(|cw| cw.transactions.iter().map(|tx| tx.message_hash()))
-            .collect_vec();
         assert_eq!(num_txs_per_batch, vec![1; 2]);
-        assert_eq!(message_hashes, vec![&tx2_hash, &tx1_hash]);
     }
 
     #[test]
@@ -1037,29 +1019,23 @@ mod tests {
         // Priority Expectation:
         // Thread 0: [3, 1]
         // Thread 1: [2, 0]
-        let t0_expected = [3, 1]
-            .into_iter()
-            .map(|i| txs[i].message().hash())
-            .collect_vec();
-        let t1_expected = [2, 0]
-            .into_iter()
-            .map(|i| txs[i].message().hash())
-            .collect_vec();
+        let t0_expected = [3, 1].into_iter().collect_vec();
+        let t1_expected = [2, 0].into_iter().collect_vec();
 
         test_receive_then_schedule(&mut scheduler_controller);
         let t0_actual = consume_work_receivers[0]
             .try_recv()
             .unwrap()
-            .transactions
+            .ids
             .iter()
-            .map(|tx| *tx.message_hash())
+            .cloned()
             .collect_vec();
         let t1_actual = consume_work_receivers[1]
             .try_recv()
             .unwrap()
-            .transactions
+            .ids
             .iter()
-            .map(|tx| *tx.message_hash())
+            .cloned()
             .collect_vec();
 
         assert_eq!(t0_actual, t0_expected);
@@ -1103,8 +1079,6 @@ mod tests {
             2,
             bank.last_blockhash(),
         );
-        let tx1_hash = tx1.message().hash();
-        let tx2_hash = tx2.message().hash();
 
         let txs = vec![tx1, tx2];
         banking_packet_sender
@@ -1114,13 +1088,8 @@ mod tests {
         test_receive_then_schedule(&mut scheduler_controller);
         let consume_work = consume_work_receivers[0].try_recv().unwrap();
         assert_eq!(consume_work.ids.len(), 2);
-        assert_eq!(consume_work.transactions.len(), 2);
-        let message_hashes = consume_work
-            .transactions
-            .iter()
-            .map(|tx| tx.message_hash())
-            .collect_vec();
-        assert_eq!(message_hashes, vec![&tx2_hash, &tx1_hash]);
+        let ids = consume_work.ids.iter().cloned().collect_vec();
+        assert_eq!(ids, vec![0, 1]);
 
         // Complete the batch - marking the second transaction as retryable
         finished_consume_work_sender
@@ -1134,12 +1103,7 @@ mod tests {
         test_receive_then_schedule(&mut scheduler_controller);
         let consume_work = consume_work_receivers[0].try_recv().unwrap();
         assert_eq!(consume_work.ids.len(), 1);
-        assert_eq!(consume_work.transactions.len(), 1);
-        let message_hashes = consume_work
-            .transactions
-            .iter()
-            .map(|tx| tx.message_hash())
-            .collect_vec();
-        assert_eq!(message_hashes, vec![&tx1_hash]);
+        let ids = consume_work.ids.iter().cloned().collect_vec();
+        assert_eq!(ids, vec![0]);
     }
 }

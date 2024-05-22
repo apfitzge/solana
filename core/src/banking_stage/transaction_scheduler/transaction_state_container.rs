@@ -128,18 +128,12 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
     }
 
     /// Retries a transaction - inserts transaction back into map (but not packet).
-    /// This transitions the transaction to `Unprocessed` state.
-    pub(crate) fn retry_transaction(
-        &mut self,
-        transaction_id: TransactionId,
-        transaction_ttl: SanitizedTransactionTTL<T>,
-    ) {
-        let priority_id = self
-            .with_mut_transaction_state(&transaction_id, |transaction_state| {
-                transaction_state.transition_to_unprocessed(transaction_ttl);
-                TransactionPriorityId::new(transaction_state.priority(), transaction_id)
-            })
+    pub(crate) fn retry_transaction(&mut self, transaction_id: TransactionId) {
+        let priority = self
+            .id_to_transaction_state
+            .with(transaction_id, |state| state.priority())
             .expect("transaction must exist");
+        let priority_id = TransactionPriorityId::new(priority, transaction_id);
         self.push_id_into_queue(priority_id);
     }
 

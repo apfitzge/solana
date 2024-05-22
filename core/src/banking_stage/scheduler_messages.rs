@@ -1,9 +1,9 @@
 use {
     super::immutable_deserialized_packet::ImmutableDeserializedPacket,
-    solana_sdk::clock::Slot,
-    solana_signed_message::SignedMessage,
     std::{fmt::Display, sync::Arc},
 };
+
+pub const MAX_BATCH_SIZE: usize = 64;
 
 /// A unique identifier for a transaction batch.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -26,11 +26,9 @@ pub type TransactionId = usize;
 
 /// Message: [Scheduler -> Worker]
 /// Transactions to be consumed (i.e. executed, recorded, and committed)
-pub struct ConsumeWork<T: SignedMessage> {
+pub struct ConsumeWork {
     pub batch_id: TransactionBatchId,
     pub ids: Vec<TransactionId>,
-    pub transactions: Vec<T>,
-    pub max_age_slots: Vec<Slot>,
 }
 
 /// Message: [Scheduler -> Worker]
@@ -41,8 +39,8 @@ pub struct ForwardWork {
 
 /// Message: [Worker -> Scheduler]
 /// Processed transactions.
-pub struct FinishedConsumeWork<T: SignedMessage> {
-    pub work: ConsumeWork<T>,
+pub struct FinishedConsumeWork {
+    pub work: ConsumeWork,
     pub retryable_indexes: Vec<usize>,
 }
 
