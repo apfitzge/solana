@@ -434,3 +434,95 @@ impl<'a> From<&'a CompiledInstruction> for Instruction<'a> {
         }
     }
 }
+
+// For any type that implements `Message`, a reference to that type should also
+// implement `Message`.
+impl<T: Message> Message for &T {
+    fn num_signatures(&self) -> u64 {
+        Message::num_signatures(*self)
+    }
+
+    fn num_write_locks(&self) -> u64 {
+        Message::num_write_locks(*self)
+    }
+
+    fn recent_blockhash(&self) -> &Hash {
+        Message::recent_blockhash(*self)
+    }
+
+    fn num_instructions(&self) -> usize {
+        Message::num_instructions(*self)
+    }
+
+    fn instructions_iter(&self) -> impl Iterator<Item = Instruction> {
+        Message::instructions_iter(*self)
+    }
+
+    fn program_instructions_iter(&self) -> impl Iterator<Item = (&Pubkey, Instruction)> {
+        Message::program_instructions_iter(*self)
+    }
+
+    fn account_keys(&self) -> AccountKeys {
+        Message::account_keys(*self)
+    }
+
+    fn fee_payer(&self) -> &Pubkey {
+        Message::fee_payer(*self)
+    }
+
+    fn is_writable(&self, index: usize) -> bool {
+        Message::is_writable(*self, index)
+    }
+
+    fn is_signer(&self, index: usize) -> bool {
+        Message::is_signer(*self, index)
+    }
+
+    fn is_invoked(&self, key_index: usize) -> bool {
+        Message::is_invoked(*self, key_index)
+    }
+
+    fn is_non_loader_key(&self, index: usize) -> bool {
+        Message::is_non_loader_key(*self, index)
+    }
+
+    fn has_duplicates(&self) -> bool {
+        Message::has_duplicates(*self)
+    }
+
+    fn num_lookup_tables(&self) -> usize {
+        Message::num_lookup_tables(*self)
+    }
+
+    fn message_address_table_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup> {
+        Message::message_address_table_lookups(*self)
+    }
+}
+
+// For any type that implements `SignedMessage`, a reference to that type
+// should also implement `SignedMessage`.
+impl<T: SignedMessage> SignedMessage for &T {
+    fn signature(&self) -> &Signature {
+        SignedMessage::signature(*self)
+    }
+
+    fn signatures(&self) -> &[Signature] {
+        SignedMessage::signatures(*self)
+    }
+
+    fn message_hash(&self) -> &Hash {
+        SignedMessage::message_hash(*self)
+    }
+
+    fn is_simple_vote_transaction(&self) -> bool {
+        SignedMessage::is_simple_vote_transaction(*self)
+    }
+
+    fn get_account_locks_unchecked(&self) -> TransactionAccountLocks {
+        SignedMessage::get_account_locks_unchecked(*self)
+    }
+
+    fn to_versioned_transaction(&self) -> VersionedTransaction {
+        SignedMessage::to_versioned_transaction(*self)
+    }
+}
