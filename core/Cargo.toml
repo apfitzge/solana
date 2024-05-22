@@ -86,6 +86,7 @@ trees = { workspace = true }
 valet = { workspace = true }
 
 [dev-dependencies]
+arrayvec = { workspace = true }
 assert_matches = { workspace = true }
 fs_extra = { workspace = true }
 serde_json = { workspace = true }
