@@ -11,7 +11,7 @@ use {
     min_max_heap::MinMaxHeap,
     solana_signed_message::SignedMessage,
     std::sync::Arc,
-    valet::Valet,
+    valet::ConcurrentValet,
 };
 
 /// This structure will hold `TransactionState` for the entirety of a
@@ -41,14 +41,21 @@ use {
 /// a new transaction, the lowest priority transaction will be dropped.
 pub(crate) struct TransactionStateContainer<T: SignedMessage> {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
-    id_to_transaction_state: Valet<TransactionState<T>>,
+    id_to_transaction_state: Arc<ConcurrentValet<TransactionState<T>>>,
 }
 
 impl<T: SignedMessage> TransactionStateContainer<T> {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),
-            id_to_transaction_state: Valet::with_capacity(2 * capacity),
+            id_to_transaction_state: Arc::new(ConcurrentValet::with_capacity(2 * capacity)),
+        }
+    }
+
+    pub(crate) fn with_valet(valet: Arc<ConcurrentValet<TransactionState<T>>>) -> Self {
+        Self {
+            priority_queue: MinMaxHeap::with_capacity(valet.capacity()),
+            id_to_transaction_state: valet,
         }
     }
 
