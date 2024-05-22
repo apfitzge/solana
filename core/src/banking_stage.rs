@@ -48,6 +48,7 @@ use {
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
     },
+    valet::ConcurrentValet,
 };
 
 // Below modules are pub to allow use by banking_stage bench
@@ -591,6 +592,7 @@ impl BankingStage {
         );
 
         // Spawn the central scheduler thread
+        let valet = Arc::new(ConcurrentValet::with_capacity(TOTAL_BUFFERED_PACKETS));
         bank_thread_hdls.push({
             let packet_deserializer =
                 PacketDeserializer::new(non_vote_receiver, bank_forks.clone());
@@ -599,6 +601,7 @@ impl BankingStage {
                 decision_maker.clone(),
                 packet_deserializer,
                 bank_forks,
+                valet,
                 scheduler,
                 worker_metrics,
                 forwarder,

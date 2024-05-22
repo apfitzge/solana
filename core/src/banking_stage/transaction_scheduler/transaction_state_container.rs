@@ -45,6 +45,7 @@ pub(crate) struct TransactionStateContainer<T: SignedMessage> {
 }
 
 impl<T: SignedMessage> TransactionStateContainer<T> {
+    #[allow(dead_code)]
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),

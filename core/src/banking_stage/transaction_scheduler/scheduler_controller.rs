@@ -8,7 +8,7 @@ use {
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
         },
-        transaction_state::SanitizedTransactionTTL,
+        transaction_state::{SanitizedTransactionTTL, TransactionState},
         transaction_state_container::TransactionStateContainer,
     },
     crate::banking_stage::{
@@ -18,7 +18,7 @@ use {
         forwarder::Forwarder,
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         packet_deserializer::PacketDeserializer,
-        ForwardOption, TOTAL_BUFFERED_PACKETS,
+        ForwardOption,
     },
     crossbeam_channel::RecvTimeoutError,
     solana_cost_model::cost_model::CostModel,
@@ -38,6 +38,7 @@ use {
         sync::{Arc, RwLock},
         time::{Duration, Instant},
     },
+    valet::ConcurrentValet,
 };
 
 /// Controls packet and transaction flow into scheduler, and scheduling execution.
@@ -71,6 +72,7 @@ impl SchedulerController {
         decision_maker: DecisionMaker,
         packet_deserializer: PacketDeserializer,
         bank_forks: Arc<RwLock<BankForks>>,
+        valet: Arc<ConcurrentValet<TransactionState<SanitizedTransaction>>>,
         scheduler: PrioGraphScheduler<SanitizedTransaction>,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Forwarder,
@@ -79,7 +81,7 @@ impl SchedulerController {
             decision_maker,
             packet_receiver: packet_deserializer,
             bank_forks,
-            container: TransactionStateContainer::with_capacity(TOTAL_BUFFERED_PACKETS),
+            container: TransactionStateContainer::with_valet(valet),
             scheduler,
             leader_detection_metrics: SchedulerLeaderDetectionMetrics::default(),
             count_metrics: SchedulerCountMetrics::default(),
@@ -635,6 +637,7 @@ mod tests {
                 consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
                 scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId},
                 tests::{create_slow_genesis_config, new_test_cluster_info},
+                TOTAL_BUFFERED_PACKETS,
             },
             banking_trace::BankingPacketBatch,
             sigverify::SigverifyTracerPacketStats,
@@ -736,6 +739,7 @@ mod tests {
             decision_maker,
             packet_deserializer,
             bank_forks,
+            Arc::new(ConcurrentValet::with_capacity(TOTAL_BUFFERED_PACKETS)),
             PrioGraphScheduler::new(consume_work_senders, finished_consume_work_receiver),
             vec![], // no actual workers with metrics to report, this can be empty
             forwarder,
