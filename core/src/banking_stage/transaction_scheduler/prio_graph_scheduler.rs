@@ -12,6 +12,7 @@ use {
         scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId, TransactionId},
         transaction_scheduler::{
             transaction_priority_id::TransactionPriorityId, transaction_state::TransactionState,
+            transaction_state_container::TransactionStateContainerInterface,
         },
     },
     crossbeam_channel::{Receiver, Sender, TryRecvError},

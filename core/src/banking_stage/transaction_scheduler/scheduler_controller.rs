@@ -10,7 +10,9 @@ use {
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
         },
         transaction_state::TransactionState,
-        transaction_state_container::TransactionStateContainer,
+        transaction_state_container::{
+            TransactionStateContainer, TransactionStateContainerInterface,
+        },
     },
     crate::banking_stage::{
         consume_worker::ConsumeWorkerMetrics,

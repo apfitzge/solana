@@ -43,7 +43,6 @@ pub(crate) struct TransactionStateContainer<T: SignedMessage> {
 }
 
 impl<T: SignedMessage> TransactionStateContainer<T> {
-    #[allow(dead_code)]
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(capacity),
@@ -57,51 +56,6 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
             priority_queue: MinMaxHeap::with_capacity(valet.capacity() / 2),
             id_to_transaction_state: valet,
         }
-    }
-
-    /// Returns true if the queue is empty.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.priority_queue.is_empty()
-    }
-
-    /// Returns the remaining capacity of the queue
-    pub(crate) fn remaining_queue_capacity(&self) -> usize {
-        self.priority_queue.capacity() - self.priority_queue.len()
-    }
-
-    /// Get the top transaction id in the priority queue.
-    pub(crate) fn pop(&mut self) -> Option<TransactionPriorityId> {
-        self.priority_queue.pop_max()
-    }
-
-    /// Perform operation with immutable transaction state.
-    pub(crate) fn with_transaction_state<R>(
-        &self,
-        id: &TransactionId,
-        f: impl FnOnce(&TransactionState<T>) -> R,
-    ) -> Option<R> {
-        self.id_to_transaction_state.with(*id, f).ok()
-    }
-
-    /// Perform batch operation with immutable transaction state.
-    pub(crate) fn batched_with_ref_transaction_state<const SIZE: usize, M, R>(
-        &self,
-        ids: &[TransactionId],
-        m: impl Fn(&TransactionState<T>) -> &M,
-        f: impl FnOnce(&[&M]) -> R,
-    ) -> Option<R> {
-        self.id_to_transaction_state
-            .batched_with_ref::<SIZE, _, _>(ids, m, f)
-            .ok()
-    }
-
-    /// Perform operation with mutable transaction state.
-    pub(crate) fn with_mut_transaction_state<R>(
-        &mut self,
-        id: &TransactionId,
-        f: impl FnOnce(&mut TransactionState<T>) -> R,
-    ) -> Option<R> {
-        self.id_to_transaction_state.with_mut(*id, f).ok()
     }
 
     /// Insert a new transaction into the container's queues and maps.
@@ -125,9 +79,56 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
         self.push_id_into_queue(priority_id)
     }
+}
+
+impl<T: SignedMessage> TransactionStateContainerInterface<T> for TransactionStateContainer<T> {
+    /// Returns true if the queue is empty.
+    fn is_empty(&self) -> bool {
+        self.priority_queue.is_empty()
+    }
+
+    /// Returns the remaining capacity of the queue
+    fn remaining_queue_capacity(&self) -> usize {
+        self.priority_queue.capacity() - self.priority_queue.len()
+    }
+
+    /// Get the top transaction id in the priority queue.
+    fn pop(&mut self) -> Option<TransactionPriorityId> {
+        self.priority_queue.pop_max()
+    }
+
+    /// Perform operation with immutable transaction state.
+    fn with_transaction_state<R>(
+        &self,
+        id: &TransactionId,
+        f: impl FnOnce(&TransactionState<T>) -> R,
+    ) -> Option<R> {
+        self.id_to_transaction_state.with(*id, f).ok()
+    }
+
+    /// Perform batch operation with immutable transaction state.
+    fn batched_with_ref_transaction_state<const SIZE: usize, M, R>(
+        &self,
+        ids: &[TransactionId],
+        m: impl Fn(&TransactionState<T>) -> &M,
+        f: impl FnOnce(&[&M]) -> R,
+    ) -> Option<R> {
+        self.id_to_transaction_state
+            .batched_with_ref::<SIZE, _, _>(ids, m, f)
+            .ok()
+    }
+
+    /// Perform operation with mutable transaction state.
+    fn with_mut_transaction_state<R>(
+        &mut self,
+        id: &TransactionId,
+        f: impl FnOnce(&mut TransactionState<T>) -> R,
+    ) -> Option<R> {
+        self.id_to_transaction_state.with_mut(*id, f).ok()
+    }
 
     /// Retries a transaction - inserts transaction back into map (but not packet).
-    pub(crate) fn retry_transaction(&mut self, transaction_id: TransactionId) {
+    fn retry_transaction(&mut self, transaction_id: TransactionId) {
         let priority = self
             .id_to_transaction_state
             .with(transaction_id, |state| state.priority())
@@ -139,7 +140,7 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
     /// Pushes a transaction id into the priority queue. If the queue is full, the lowest priority
     /// transaction will be dropped (removed from the queue and map).
     /// Returns `true` if a packet was dropped due to capacity limits.
-    pub(crate) fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
+    fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
         if self.remaining_queue_capacity() == 0 {
             let popped_id = self.priority_queue.push_pop_min(priority_id);
             self.remove_by_id(&popped_id.id);
@@ -151,13 +152,13 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
     }
 
     /// Remove transaction by id.
-    pub(crate) fn remove_by_id(&mut self, id: &TransactionId) {
+    fn remove_by_id(&mut self, id: &TransactionId) {
         self.id_to_transaction_state
             .remove(*id)
             .expect("transaction must exist");
     }
 
-    pub(crate) fn get_min_max_priority(&self) -> MinMaxResult<u64> {
+    fn get_min_max_priority(&self) -> MinMaxResult<u64> {
         match self.priority_queue.peek_min() {
             Some(min) => match self.priority_queue.peek_max() {
                 Some(max) => MinMaxResult::MinMax(min.priority, max.priority),
@@ -166,6 +167,32 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
             None => MinMaxResult::NoElements,
         }
     }
+}
+
+pub trait TransactionStateContainerInterface<T: SignedMessage> {
+    fn is_empty(&self) -> bool;
+    fn remaining_queue_capacity(&self) -> usize;
+    fn pop(&mut self) -> Option<TransactionPriorityId>;
+    fn with_transaction_state<R>(
+        &self,
+        id: &TransactionId,
+        f: impl FnOnce(&TransactionState<T>) -> R,
+    ) -> Option<R>;
+    fn batched_with_ref_transaction_state<const SIZE: usize, M, R>(
+        &self,
+        ids: &[TransactionId],
+        m: impl Fn(&TransactionState<T>) -> &M,
+        f: impl FnOnce(&[&M]) -> R,
+    ) -> Option<R>;
+    fn with_mut_transaction_state<R>(
+        &mut self,
+        id: &TransactionId,
+        f: impl FnOnce(&mut TransactionState<T>) -> R,
+    ) -> Option<R>;
+    fn retry_transaction(&mut self, transaction_id: TransactionId);
+    fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool;
+    fn remove_by_id(&mut self, id: &TransactionId);
+    fn get_min_max_priority(&self) -> MinMaxResult<u64>;
 }
 
 #[cfg(test)]

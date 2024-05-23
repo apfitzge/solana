@@ -8,7 +8,10 @@ use {
             decision_maker::BufferedPacketsDecision,
             immutable_deserialized_packet::ImmutableDeserializedPacket,
             packet_deserializer::PacketDeserializer,
-            transaction_scheduler::transaction_state::SanitizedTransactionTTL,
+            transaction_scheduler::{
+                transaction_state::SanitizedTransactionTTL,
+                transaction_state_container::TransactionStateContainerInterface,
+            },
         },
         banking_trace::{BankingPacketBatch, BankingPacketReceiver},
         transaction_view::TransactionView,
