@@ -25,7 +25,6 @@ use {
         self,
         clock::{FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
         saturating_add_assign,
-        transaction::SanitizedTransaction,
     },
     solana_signed_message::SignedMessage,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
@@ -37,7 +36,7 @@ use {
 };
 
 /// Controls packet and transaction flow into scheduler, and scheduling execution.
-pub(crate) struct SchedulerController<R: ReceiveAndBufferPackets<SanitizedTransaction>> {
+pub(crate) struct SchedulerController<T: SignedMessage, R: ReceiveAndBufferPackets<T>> {
     /// Decision maker for determining what should be done with transactions.
     decision_maker: DecisionMaker,
     /// Packet/Transaction ingress.
@@ -45,7 +44,7 @@ pub(crate) struct SchedulerController<R: ReceiveAndBufferPackets<SanitizedTransa
     bank_forks: Arc<RwLock<BankForks>>,
     /// Container for transaction state.
     /// Shared resource between `packet_receiver` and `scheduler`.
-    container: TransactionStateContainer<SanitizedTransaction>,
+    container: TransactionStateContainer<T>,
     /// State for scheduling and communicating with worker threads.
     scheduler: PrioGraphScheduler,
     /// Metrics tracking time for leader bank detection.
@@ -62,12 +61,12 @@ pub(crate) struct SchedulerController<R: ReceiveAndBufferPackets<SanitizedTransa
     forwarder: Forwarder,
 }
 
-impl<R: ReceiveAndBufferPackets<SanitizedTransaction>> SchedulerController<R> {
+impl<T: SignedMessage, R: ReceiveAndBufferPackets<T>> SchedulerController<T, R> {
     pub fn new(
         decision_maker: DecisionMaker,
         packet_receiver: R,
         bank_forks: Arc<RwLock<BankForks>>,
-        valet: Arc<ConcurrentValet<TransactionState<SanitizedTransaction>>>,
+        valet: Arc<ConcurrentValet<TransactionState<T>>>,
         scheduler: PrioGraphScheduler,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Forwarder,
@@ -196,12 +195,7 @@ impl<R: ReceiveAndBufferPackets<SanitizedTransaction>> SchedulerController<R> {
         Ok(())
     }
 
-    fn pre_graph_filter<T: SignedMessage>(
-        transactions: &[&T],
-        results: &mut [bool],
-        bank: &Bank,
-        max_age: usize,
-    ) {
+    fn pre_graph_filter(transactions: &[&T], results: &mut [bool], bank: &Bank, max_age: usize) {
         let lock_results = vec![Ok(()); transactions.len()];
         let mut error_counters = TransactionErrorMetrics::default();
         let check_results = bank.check_transactions::<&T, T>(
@@ -372,7 +366,7 @@ impl<R: ReceiveAndBufferPackets<SanitizedTransaction>> SchedulerController<R> {
                     &ids,
                     |state| &state.transaction_ttl().transaction,
                     |sanitized_txs| {
-                        bank.check_transactions::<&SanitizedTransaction, SanitizedTransaction>(
+                        bank.check_transactions::<&T, T>(
                             sanitized_txs,
                             &lock_results,
                             MAX_PROCESSING_AGE,
@@ -457,9 +451,15 @@ mod tests {
         solana_poh::poh_recorder::{PohRecorder, Record, WorkingBankEntry},
         solana_runtime::bank::Bank,
         solana_sdk::{
-            compute_budget::ComputeBudgetInstruction, hash::Hash, message::Message,
-            poh_config::PohConfig, pubkey::Pubkey, signature::Keypair, signer::Signer,
-            system_instruction, system_transaction, transaction::Transaction,
+            compute_budget::ComputeBudgetInstruction,
+            hash::Hash,
+            message::Message,
+            poh_config::PohConfig,
+            pubkey::Pubkey,
+            signature::Keypair,
+            signer::Signer,
+            system_instruction, system_transaction,
+            transaction::{SanitizedTransaction, Transaction},
         },
         std::sync::{atomic::AtomicBool, Arc, RwLock},
         tempfile::TempDir,
@@ -486,7 +486,10 @@ mod tests {
 
     fn create_test_frame(
         num_threads: usize,
-    ) -> (TestFrame, SchedulerController<SimpleReceiveAndBuffer>) {
+    ) -> (
+        TestFrame,
+        SchedulerController<SanitizedTransaction, SimpleReceiveAndBuffer>,
+    ) {
         let GenesisConfigInfo {
             genesis_config,
             mint_keypair,
@@ -595,8 +598,8 @@ mod tests {
     // in order to keep the decision as recent as possible for processing.
     // In the tests, the decision will not become stale, so it is more convenient
     // to receive first and then schedule.
-    fn test_receive_then_schedule<R: ReceiveAndBufferPackets<SanitizedTransaction>>(
-        scheduler_controller: &mut SchedulerController<R>,
+    fn test_receive_then_schedule<T: SignedMessage, R: ReceiveAndBufferPackets<T>>(
+        scheduler_controller: &mut SchedulerController<T, R>,
     ) {
         let decision = scheduler_controller
             .decision_maker
