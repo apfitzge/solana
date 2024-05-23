@@ -9,7 +9,7 @@ use {
     solana_sdk::packet::PacketFlags,
     solana_signed_message::SignedMessage,
     std::sync::Arc,
-    valet::{ConcurrentValet, ValetInsert, ValetWith},
+    valet::{ConcurrentValet, ValetBasics, ValetInsert, ValetWith},
 };
 
 /// This structure will hold `TransactionState` for the entirety of a
