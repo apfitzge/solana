@@ -558,7 +558,10 @@ impl BankingStage {
         let (finished_work_sender, finished_work_receiver) = unbounded();
 
         // Spawn the worker threads
-        let valet = Arc::new(ConcurrentValet::with_capacity(TOTAL_BUFFERED_PACKETS));
+        // Valet has more capacity than necessary to support adding packets then dropping
+        let valet = Arc::new(ConcurrentValet::with_capacity(
+            2048 + TOTAL_BUFFERED_PACKETS,
+        ));
         let mut worker_metrics = Vec::with_capacity(num_workers as usize);
         for (index, work_receiver) in work_receivers.into_iter().enumerate() {
             let id = (index as u32).saturating_add(NUM_VOTE_PROCESSING_THREADS);
