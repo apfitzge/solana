@@ -21,9 +21,8 @@ use {
             packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
-                receive_and_buffer::{SimpleReceiveAndBuffer, TransactionViewReceiveAndBuffer},
-                scheduler_controller::SchedulerController,
-                scheduler_error::SchedulerError,
+                scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
+                transaction_state_container::TransactionStateContainer,
             },
         },
         banking_trace::BankingPacketReceiver,
@@ -598,10 +597,12 @@ impl BankingStage {
 
         // Spawn the central scheduler thread
         bank_thread_hdls.push({
+            use crate::banking_stage::transaction_scheduler::receive_and_buffer::SimpleReceiveAndBuffer;
             let receive_and_buffer = SimpleReceiveAndBuffer::new(
                 PacketDeserializer::new(non_vote_receiver, bank_forks.clone()),
                 bank_forks.clone(),
             );
+            // use crate::banking_stage::transaction_scheduler::receive_and_buffer::TransactionViewReceiveAndBuffer;
             // let receive_and_buffer =
             //     TransactionViewReceiveAndBuffer::new(non_vote_receiver, bank_forks.clone());
 
@@ -610,7 +611,7 @@ impl BankingStage {
                 decision_maker.clone(),
                 receive_and_buffer,
                 bank_forks,
-                valet,
+                TransactionStateContainer::with_valet(valet),
                 scheduler,
                 worker_metrics,
                 forwarder,

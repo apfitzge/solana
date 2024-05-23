@@ -4,7 +4,6 @@ use {
         scheduler_error::SchedulerError,
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
         transaction_state::SanitizedTransactionTTL,
-        transaction_state_container::TransactionStateContainer,
     },
     crate::banking_stage::{
         consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
@@ -62,9 +61,9 @@ impl PrioGraphScheduler {
     /// This, combined with internal tracking of threads' in-flight transactions, allows
     /// for load-balancing while prioritizing scheduling transactions onto threads that will
     /// not cause conflicts in the near future.
-    pub(crate) fn schedule<T: SignedMessage>(
+    pub(crate) fn schedule<T: SignedMessage, C: TransactionStateContainerInterface<T>>(
         &mut self,
-        container: &mut TransactionStateContainer<T>,
+        container: &mut C,
         pre_graph_filter: impl Fn(&[&T], &mut [bool]),
         pre_lock_filter: impl Fn(&T) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
@@ -103,7 +102,7 @@ impl PrioGraphScheduler {
         let mut total_filter_time_us: u64 = 0;
 
         let mut window_budget = self.look_ahead_window_size;
-        let mut chunked_pops = |container: &mut TransactionStateContainer<T>,
+        let mut chunked_pops = |container: &mut C,
                                 prio_graph: &mut PrioGraph<_, _, _, _>,
                                 window_budget: &mut usize| {
             while *window_budget > 0 {
@@ -283,9 +282,9 @@ impl PrioGraphScheduler {
 
     /// Receive completed batches of transactions without blocking.
     /// Returns (num_transactions, num_retryable_transactions) on success.
-    pub fn receive_completed<T: SignedMessage>(
+    pub fn receive_completed<T: SignedMessage, C: TransactionStateContainerInterface<T>>(
         &mut self,
-        container: &mut TransactionStateContainer<T>,
+        container: &mut C,
     ) -> Result<(usize, usize), SchedulerError> {
         let mut total_num_transactions: usize = 0;
         let mut total_num_retryable: usize = 0;
@@ -302,9 +301,9 @@ impl PrioGraphScheduler {
 
     /// Receive completed batches of transactions.
     /// Returns `Ok((num_transactions, num_retryable))` if a batch was received, `Ok((0, 0))` if no batch was received.
-    fn try_receive_completed<T: SignedMessage>(
+    fn try_receive_completed<T: SignedMessage, C: TransactionStateContainerInterface<T>>(
         &mut self,
-        container: &mut TransactionStateContainer<T>,
+        container: &mut C,
     ) -> Result<(usize, usize), SchedulerError> {
         match self.finished_consume_work_receiver.try_recv() {
             Ok(FinishedConsumeWork {
@@ -341,9 +340,9 @@ impl PrioGraphScheduler {
 
     /// Mark a given `TransactionBatchId` as completed.
     /// This will update the internal tracking, including account locks.
-    fn complete_batch<T: SignedMessage>(
+    fn complete_batch<T: SignedMessage, C: TransactionStateContainerInterface<T>>(
         &mut self,
-        container: &mut TransactionStateContainer<T>,
+        container: &mut C,
         batch_id: TransactionBatchId,
         ids: &[TransactionId],
     ) {
@@ -540,7 +539,10 @@ fn try_schedule_transaction<T: SignedMessage>(
 mod tests {
     use {
         super::*,
-        crate::banking_stage::consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
+        crate::banking_stage::{
+            consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
+            transaction_scheduler::transaction_state_container::TransactionStateContainer,
+        },
         crossbeam_channel::{unbounded, Receiver},
         itertools::Itertools,
         solana_sdk::{
@@ -555,7 +557,8 @@ mod tests {
             system_instruction,
             transaction::{SanitizedTransaction, Transaction},
         },
-        std::borrow::Borrow,
+        std::{borrow::Borrow, sync::Arc},
+        valet::ConcurrentValet,
     };
 
     #[allow(clippy::type_complexity)]
@@ -607,8 +610,13 @@ mod tests {
                 u64,
             ),
         >,
-    ) -> TransactionStateContainer<SanitizedTransaction> {
-        let mut container = TransactionStateContainer::with_capacity(10 * 1024);
+    ) -> TransactionStateContainer<
+        SanitizedTransaction,
+        ConcurrentValet<TransactionState<SanitizedTransaction>>,
+    > {
+        let mut container = TransactionStateContainer::with_valet(Arc::new(
+            ConcurrentValet::with_capacity(10 * 1024),
+        ));
         for (from_keypair, to_pubkeys, lamports, compute_unit_price) in tx_infos.into_iter() {
             let transaction = prioritized_tranfers(
                 from_keypair.borrow(),

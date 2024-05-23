@@ -762,7 +762,10 @@ mod tests {
 
         consume_sender: Sender<ConsumeWork>,
         consumed_receiver: Receiver<FinishedConsumeWork>,
-        container: TransactionStateContainer<SanitizedTransaction>,
+        container: TransactionStateContainer<
+            SanitizedTransaction,
+            ConcurrentValet<TransactionState<SanitizedTransaction>>,
+        >,
     }
 
     fn setup_test_frame() -> (

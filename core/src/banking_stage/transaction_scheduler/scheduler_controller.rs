@@ -9,10 +9,7 @@ use {
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
         },
-        transaction_state::TransactionState,
-        transaction_state_container::{
-            TransactionStateContainer, TransactionStateContainerInterface,
-        },
+        transaction_state_container::TransactionStateContainerInterface,
     },
     crate::banking_stage::{
         consume_worker::ConsumeWorkerMetrics,
@@ -31,14 +28,18 @@ use {
     solana_signed_message::SignedMessage,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
+        marker::PhantomData,
         sync::{Arc, RwLock},
         time::{Duration, Instant},
     },
-    valet::ConcurrentValet,
 };
 
 /// Controls packet and transaction flow into scheduler, and scheduling execution.
-pub(crate) struct SchedulerController<T: SignedMessage, R: ReceiveAndBufferPackets<T>> {
+pub(crate) struct SchedulerController<
+    T: SignedMessage,
+    C: TransactionStateContainerInterface<T>,
+    R: ReceiveAndBufferPackets<T, C>,
+> {
     /// Decision maker for determining what should be done with transactions.
     decision_maker: DecisionMaker,
     /// Packet/Transaction ingress.
@@ -46,7 +47,7 @@ pub(crate) struct SchedulerController<T: SignedMessage, R: ReceiveAndBufferPacke
     bank_forks: Arc<RwLock<BankForks>>,
     /// Container for transaction state.
     /// Shared resource between `packet_receiver` and `scheduler`.
-    container: TransactionStateContainer<T>,
+    container: C,
     /// State for scheduling and communicating with worker threads.
     scheduler: PrioGraphScheduler,
     /// Metrics tracking time for leader bank detection.
@@ -61,14 +62,20 @@ pub(crate) struct SchedulerController<T: SignedMessage, R: ReceiveAndBufferPacke
     worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
     /// State for forwarding packets to the leader.
     forwarder: Forwarder,
+    _phantom: PhantomData<T>,
 }
 
-impl<T: SignedMessage, R: ReceiveAndBufferPackets<T>> SchedulerController<T, R> {
+impl<
+        T: SignedMessage,
+        C: TransactionStateContainerInterface<T>,
+        R: ReceiveAndBufferPackets<T, C>,
+    > SchedulerController<T, C, R>
+{
     pub fn new(
         decision_maker: DecisionMaker,
         packet_receiver: R,
         bank_forks: Arc<RwLock<BankForks>>,
-        valet: Arc<ConcurrentValet<TransactionState<T>>>,
+        container: C,
         scheduler: PrioGraphScheduler,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Forwarder,
@@ -77,13 +84,14 @@ impl<T: SignedMessage, R: ReceiveAndBufferPackets<T>> SchedulerController<T, R> 
             decision_maker,
             packet_receiver,
             bank_forks,
-            container: TransactionStateContainer::with_valet(valet),
+            container,
             scheduler,
             leader_detection_metrics: SchedulerLeaderDetectionMetrics::default(),
             count_metrics: SchedulerCountMetrics::default(),
             timing_metrics: SchedulerTimingMetrics::default(),
             worker_metrics,
             forwarder,
+            _phantom: PhantomData,
         }
     }
 
@@ -436,7 +444,11 @@ mod tests {
                 packet_deserializer::PacketDeserializer,
                 scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId},
                 tests::{create_slow_genesis_config, new_test_cluster_info},
-                transaction_scheduler::receive_and_buffer::SimpleReceiveAndBuffer,
+                transaction_scheduler::{
+                    receive_and_buffer::SimpleReceiveAndBuffer,
+                    transaction_state::TransactionState,
+                    transaction_state_container::TransactionStateContainer,
+                },
                 TOTAL_BUFFERED_PACKETS,
             },
             banking_trace::BankingPacketBatch,
@@ -465,6 +477,7 @@ mod tests {
         },
         std::sync::{atomic::AtomicBool, Arc, RwLock},
         tempfile::TempDir,
+        valet::ConcurrentValet,
     };
 
     fn create_channels<T>(num: usize) -> (Vec<Sender<T>>, Vec<Receiver<T>>) {
@@ -486,11 +499,19 @@ mod tests {
         finished_consume_work_sender: Sender<FinishedConsumeWork>,
     }
 
+    #[allow(clippy::type_complexity)]
     fn create_test_frame(
         num_threads: usize,
     ) -> (
         TestFrame,
-        SchedulerController<SanitizedTransaction, SimpleReceiveAndBuffer>,
+        SchedulerController<
+            SanitizedTransaction,
+            TransactionStateContainer<
+                SanitizedTransaction,
+                ConcurrentValet<TransactionState<SanitizedTransaction>>,
+            >,
+            SimpleReceiveAndBuffer,
+        >,
     ) {
         let GenesisConfigInfo {
             genesis_config,
@@ -553,7 +574,9 @@ mod tests {
             decision_maker,
             receive_and_buffer,
             bank_forks,
-            Arc::new(ConcurrentValet::with_capacity(TOTAL_BUFFERED_PACKETS)),
+            TransactionStateContainer::with_valet(Arc::new(ConcurrentValet::with_capacity(
+                TOTAL_BUFFERED_PACKETS,
+            ))),
             PrioGraphScheduler::new(consume_work_senders, finished_consume_work_receiver),
             vec![], // no actual workers with metrics to report, this can be empty
             forwarder,
@@ -600,8 +623,12 @@ mod tests {
     // in order to keep the decision as recent as possible for processing.
     // In the tests, the decision will not become stale, so it is more convenient
     // to receive first and then schedule.
-    fn test_receive_then_schedule<T: SignedMessage, R: ReceiveAndBufferPackets<T>>(
-        scheduler_controller: &mut SchedulerController<T, R>,
+    fn test_receive_then_schedule<
+        T: SignedMessage,
+        C: TransactionStateContainerInterface<T>,
+        R: ReceiveAndBufferPackets<T, C>,
+    >(
+        scheduler_controller: &mut SchedulerController<T, C, R>,
     ) {
         let decision = scheduler_controller
             .decision_maker

@@ -1,6 +1,7 @@
 use {
     super::{
         scheduler_metrics::{SchedulerCountMetrics, SchedulerTimingMetrics},
+        transaction_state::TransactionState,
         transaction_state_container::TransactionStateContainer,
     },
     crate::{
@@ -38,16 +39,22 @@ use {
         sync::{Arc, RwLock},
         time::Instant,
     },
+    valet::ConcurrentValet,
 };
 
-pub trait ReceiveAndBufferPackets<T: SignedMessage> {
+type SanitizedTransactionState = TransactionState<SanitizedTransaction>;
+type SanitizedTransactionValet = ConcurrentValet<SanitizedTransactionState>;
+type SanitizedTransactionContainer =
+    TransactionStateContainer<SanitizedTransaction, SanitizedTransactionValet>;
+
+pub trait ReceiveAndBufferPackets<T: SignedMessage, C: TransactionStateContainerInterface<T>> {
     // Return false if channel disconnected.
     fn receive_and_buffer_packets(
         &self,
         decision: &BufferedPacketsDecision,
         timing_metrics: &mut SchedulerTimingMetrics,
         count_metrics: &mut SchedulerCountMetrics,
-        container: &mut TransactionStateContainer<T>,
+        container: &mut C,
     ) -> bool;
 }
 
@@ -57,14 +64,16 @@ pub struct SimpleReceiveAndBuffer {
     bank_forks: Arc<RwLock<BankForks>>,
 }
 
-impl ReceiveAndBufferPackets<SanitizedTransaction> for SimpleReceiveAndBuffer {
+impl ReceiveAndBufferPackets<SanitizedTransaction, SanitizedTransactionContainer>
+    for SimpleReceiveAndBuffer
+{
     /// Returns whether the packet receiver is still connected.
     fn receive_and_buffer_packets(
         &self,
         decision: &BufferedPacketsDecision,
         timing_metrics: &mut SchedulerTimingMetrics,
         count_metrics: &mut SchedulerCountMetrics,
-        container: &mut TransactionStateContainer<SanitizedTransaction>,
+        container: &mut SanitizedTransactionContainer,
     ) -> bool {
         let remaining_queue_capacity = container.remaining_queue_capacity();
         const MAX_PACKET_RECEIVE_TIME: Duration = Duration::from_millis(100);
@@ -128,7 +137,7 @@ impl SimpleReceiveAndBuffer {
         packets: Vec<ImmutableDeserializedPacket>,
         _timing_metrics: &mut SchedulerTimingMetrics,
         count_metrics: &mut SchedulerCountMetrics,
-        container: &mut TransactionStateContainer<SanitizedTransaction>,
+        container: &mut SanitizedTransactionContainer,
     ) {
         // Convert to Arcs
         let packets: Vec<_> = packets.into_iter().map(Arc::new).collect();
@@ -250,6 +259,10 @@ pub struct TransactionViewReceiveAndBuffer {
     bank_forks: Arc<RwLock<BankForks>>,
 }
 
+type TransactionViewState = TransactionState<TransactionView>;
+type TransactionViewValet = ConcurrentValet<TransactionViewState>;
+type TransactionViewContainer = TransactionStateContainer<TransactionView, TransactionViewValet>;
+
 #[allow(dead_code)]
 impl TransactionViewReceiveAndBuffer {
     pub fn new(receiver: BankingPacketReceiver, bank_forks: Arc<RwLock<BankForks>>) -> Self {
@@ -265,7 +278,7 @@ impl TransactionViewReceiveAndBuffer {
         _decision: &BufferedPacketsDecision,
         _timing_metrics: &mut SchedulerTimingMetrics,
         count_metrics: &mut SchedulerCountMetrics,
-        container: &mut TransactionStateContainer<TransactionView>,
+        container: &mut TransactionViewContainer,
     ) {
         let bank = self.bank_forks.read().unwrap().working_bank();
         let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
@@ -371,14 +384,16 @@ impl TransactionViewReceiveAndBuffer {
     }
 }
 
-impl ReceiveAndBufferPackets<TransactionView> for TransactionViewReceiveAndBuffer {
+impl ReceiveAndBufferPackets<TransactionView, TransactionViewContainer>
+    for TransactionViewReceiveAndBuffer
+{
     /// Returns whether the packet receiver is still connected.
     fn receive_and_buffer_packets(
         &self,
         decision: &BufferedPacketsDecision,
         timing_metrics: &mut SchedulerTimingMetrics,
         count_metrics: &mut SchedulerCountMetrics,
-        container: &mut TransactionStateContainer<TransactionView>,
+        container: &mut TransactionViewContainer,
     ) -> bool {
         const MAX_RECEIVE_AND_BUFFER_TIME: Duration = Duration::from_millis(100);
         let now = Instant::now();

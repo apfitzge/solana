@@ -8,8 +8,8 @@ use {
     min_max_heap::MinMaxHeap,
     solana_sdk::packet::PacketFlags,
     solana_signed_message::SignedMessage,
-    std::sync::Arc,
-    valet::{ConcurrentValet, ValetBasics, ValetInsert, ValetWith},
+    std::{marker::PhantomData, sync::Arc},
+    valet::{ValetBasics, ValetInsert, ValetWith},
 };
 
 /// This structure will hold `TransactionState` for the entirety of a
@@ -37,51 +37,22 @@ use {
 ///
 /// The container maintains a fixed capacity. If the queue is full when pushing
 /// a new transaction, the lowest priority transaction will be dropped.
-pub(crate) struct TransactionStateContainer<T: SignedMessage> {
+pub(crate) struct TransactionStateContainer<T: SignedMessage, V: ValetWith<TransactionState<T>>> {
     priority_queue: MinMaxHeap<TransactionPriorityId>,
-    id_to_transaction_state: Arc<ConcurrentValet<TransactionState<T>>>,
+    id_to_transaction_state: Arc<V>,
+    _phantom: PhantomData<T>,
 }
 
-impl<T: SignedMessage> TransactionStateContainer<T> {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self {
-            priority_queue: MinMaxHeap::with_capacity(capacity),
-            id_to_transaction_state: Arc::new(ConcurrentValet::with_capacity(2 * capacity)),
-        }
-    }
-
+impl<T: SignedMessage, V: ValetWith<TransactionState<T>>> TransactionStateContainer<T, V> {
     /// Half capacity priority-queue
-    pub(crate) fn with_valet(valet: Arc<ConcurrentValet<TransactionState<T>>>) -> Self {
+    pub(crate) fn with_valet(valet: Arc<V>) -> Self {
         Self {
             priority_queue: MinMaxHeap::with_capacity(valet.capacity() / 2),
             id_to_transaction_state: valet,
+            _phantom: PhantomData,
         }
     }
 
-    /// Insert a new transaction into the container's queues and maps.
-    /// Returns `true` if a packet was dropped due to capacity limits.
-    pub(crate) fn insert_new_transaction(
-        &mut self,
-        packet_flags: PacketFlags,
-        transaction_ttl: SanitizedTransactionTTL<T>,
-        priority: u64,
-        cost: u64,
-    ) -> bool {
-        let transaction_id = self
-            .id_to_transaction_state
-            .insert(TransactionState::new(
-                packet_flags,
-                transaction_ttl,
-                priority,
-                cost,
-            ))
-            .unwrap_or_else(|_| panic!("container must not be full"));
-        let priority_id = TransactionPriorityId::new(priority, transaction_id);
-        self.push_id_into_queue(priority_id)
-    }
-}
-
-impl<T: SignedMessage> TransactionStateContainerInterface<T> for TransactionStateContainer<T> {
     /// Returns true if the queue is empty.
     fn is_empty(&self) -> bool {
         self.priority_queue.is_empty()
@@ -127,14 +98,85 @@ impl<T: SignedMessage> TransactionStateContainerInterface<T> for TransactionStat
         self.id_to_transaction_state.with_mut(*id, f).ok()
     }
 
-    /// Retries a transaction - inserts transaction back into map (but not packet).
-    fn retry_transaction(&mut self, transaction_id: TransactionId) {
-        let priority = self
+    fn get_min_max_priority(&self) -> MinMaxResult<u64> {
+        match self.priority_queue.peek_min() {
+            Some(min) => match self.priority_queue.peek_max() {
+                Some(max) => MinMaxResult::MinMax(min.priority, max.priority),
+                None => MinMaxResult::OneElement(min.priority),
+            },
+            None => MinMaxResult::NoElements,
+        }
+    }
+}
+
+impl<T: SignedMessage, V: ValetWith<TransactionState<T>> + ValetInsert<TransactionState<T>>>
+    TransactionStateContainer<T, V>
+{
+    /// Insert a new transaction into the container's queues and maps.
+    /// Returns `true` if a packet was dropped due to capacity limits.
+    pub(crate) fn insert_new_transaction(
+        &mut self,
+        packet_flags: PacketFlags,
+        transaction_ttl: SanitizedTransactionTTL<T>,
+        priority: u64,
+        cost: u64,
+    ) -> bool {
+        let transaction_id = self
             .id_to_transaction_state
-            .with(transaction_id, |state| state.priority())
-            .expect("transaction must exist");
+            .insert(TransactionState::new(
+                packet_flags,
+                transaction_ttl,
+                priority,
+                cost,
+            ))
+            .unwrap_or_else(|_| panic!("container must not be full"));
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
-        self.push_id_into_queue(priority_id);
+        self.push_id_into_queue(priority_id)
+    }
+}
+
+impl<T: SignedMessage, V: ValetWith<TransactionState<T>> + ValetInsert<TransactionState<T>>>
+    TransactionStateContainerInterface<T> for TransactionStateContainer<T, V>
+{
+    fn is_empty(&self) -> bool {
+        Self::is_empty(self)
+    }
+
+    fn remaining_queue_capacity(&self) -> usize {
+        Self::remaining_queue_capacity(self)
+    }
+
+    fn pop(&mut self) -> Option<TransactionPriorityId> {
+        Self::pop(self)
+    }
+
+    fn with_transaction_state<R>(
+        &self,
+        id: &TransactionId,
+        f: impl FnOnce(&TransactionState<T>) -> R,
+    ) -> Option<R> {
+        Self::with_transaction_state(self, id, f)
+    }
+
+    fn batched_with_ref_transaction_state<const SIZE: usize, M, R>(
+        &self,
+        ids: &[TransactionId],
+        m: impl Fn(&TransactionState<T>) -> &M,
+        f: impl FnOnce(&[&M]) -> R,
+    ) -> Option<R> {
+        Self::batched_with_ref_transaction_state::<SIZE, M, R>(self, ids, m, f)
+    }
+
+    fn with_mut_transaction_state<R>(
+        &mut self,
+        id: &TransactionId,
+        f: impl FnOnce(&mut TransactionState<T>) -> R,
+    ) -> Option<R> {
+        Self::with_mut_transaction_state(self, id, f)
+    }
+
+    fn get_min_max_priority(&self) -> MinMaxResult<u64> {
+        Self::get_min_max_priority(self)
     }
 
     /// Pushes a transaction id into the priority queue. If the queue is full, the lowest priority
@@ -151,21 +193,20 @@ impl<T: SignedMessage> TransactionStateContainerInterface<T> for TransactionStat
         }
     }
 
-    /// Remove transaction by id.
     fn remove_by_id(&mut self, id: &TransactionId) {
         self.id_to_transaction_state
             .remove(*id)
             .expect("transaction must exist");
     }
 
-    fn get_min_max_priority(&self) -> MinMaxResult<u64> {
-        match self.priority_queue.peek_min() {
-            Some(min) => match self.priority_queue.peek_max() {
-                Some(max) => MinMaxResult::MinMax(min.priority, max.priority),
-                None => MinMaxResult::OneElement(min.priority),
-            },
-            None => MinMaxResult::NoElements,
-        }
+    /// Retries a transaction - inserts transaction back into map (but not packet).
+    fn retry_transaction(&mut self, transaction_id: TransactionId) {
+        let priority = self
+            .id_to_transaction_state
+            .with(transaction_id, |state| state.priority())
+            .expect("transaction must exist");
+        let priority_id = TransactionPriorityId::new(priority, transaction_id);
+        self.push_id_into_queue(priority_id);
     }
 }
 
@@ -209,6 +250,7 @@ mod tests {
             system_instruction,
             transaction::{SanitizedTransaction, Transaction},
         },
+        valet::ConcurrentValet,
     };
 
     /// Returns (transaction_ttl, priority, cost)
@@ -239,7 +281,10 @@ mod tests {
     }
 
     fn push_to_container(
-        container: &mut TransactionStateContainer<SanitizedTransaction>,
+        container: &mut TransactionStateContainer<
+            SanitizedTransaction,
+            ConcurrentValet<TransactionState<SanitizedTransaction>>,
+        >,
         num: usize,
     ) {
         for priority in 0..num as u64 {
@@ -250,7 +295,8 @@ mod tests {
 
     #[test]
     fn test_is_empty() {
-        let mut container = TransactionStateContainer::with_capacity(1);
+        let mut container =
+            TransactionStateContainer::with_valet(Arc::new(ConcurrentValet::with_capacity(1)));
         assert!(container.is_empty());
 
         push_to_container(&mut container, 1);
@@ -259,7 +305,8 @@ mod tests {
 
     #[test]
     fn test_priority_queue_capacity() {
-        let mut container = TransactionStateContainer::with_capacity(1);
+        let mut container =
+            TransactionStateContainer::with_valet(Arc::new(ConcurrentValet::with_capacity(1)));
         push_to_container(&mut container, 5);
 
         assert_eq!(container.priority_queue.len(), 1);
@@ -268,7 +315,8 @@ mod tests {
 
     #[test]
     fn test_with_mut_transaction_state() {
-        let mut container = TransactionStateContainer::with_capacity(5);
+        let mut container =
+            TransactionStateContainer::with_valet(Arc::new(ConcurrentValet::with_capacity(5)));
         push_to_container(&mut container, 5);
 
         let existing_id = 3;
