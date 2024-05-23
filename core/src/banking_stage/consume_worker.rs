@@ -14,6 +14,7 @@ use {
     solana_signed_message::SignedMessage,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
+        marker::PhantomData,
         sync::{
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc,
@@ -21,7 +22,7 @@ use {
         time::Duration,
     },
     thiserror::Error,
-    valet::{ConcurrentValet, ValetWith},
+    valet::ValetWith,
 };
 
 #[derive(Debug, Error)]
@@ -32,24 +33,26 @@ pub enum ConsumeWorkerError {
     Send(#[from] SendError<FinishedConsumeWork>),
 }
 
-pub(crate) struct ConsumeWorker<T: SignedMessage> {
+pub(crate) struct ConsumeWorker<T: SignedMessage, V: ValetWith<TransactionState<T>>> {
     consume_receiver: Receiver<ConsumeWork>,
     consumer: Consumer,
     consumed_sender: Sender<FinishedConsumeWork>,
 
     leader_bank_notifier: Arc<LeaderBankNotifier>,
     metrics: Arc<ConsumeWorkerMetrics>,
-    id_to_state: Arc<ConcurrentValet<TransactionState<T>>>,
+    id_to_state: Arc<V>,
+
+    _phantom: PhantomData<T>,
 }
 
-impl<T: SignedMessage> ConsumeWorker<T> {
+impl<T: SignedMessage, V: ValetWith<TransactionState<T>>> ConsumeWorker<T, V> {
     pub fn new(
         id: u32,
         consume_receiver: Receiver<ConsumeWork>,
         consumer: Consumer,
         consumed_sender: Sender<FinishedConsumeWork>,
         leader_bank_notifier: Arc<LeaderBankNotifier>,
-        id_to_state: Arc<ConcurrentValet<TransactionState<T>>>,
+        id_to_state: Arc<V>,
     ) -> Self {
         Self {
             consume_receiver,
@@ -58,6 +61,7 @@ impl<T: SignedMessage> ConsumeWorker<T> {
             leader_bank_notifier,
             metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
             id_to_state,
+            _phantom: PhantomData,
         }
     }
 
@@ -741,6 +745,7 @@ mod tests {
             thread::JoinHandle,
         },
         tempfile::TempDir,
+        valet::ConcurrentValet,
     };
 
     // Helper struct to create tests that hold channels, files, etc.
@@ -760,7 +765,13 @@ mod tests {
         container: TransactionStateContainer<SanitizedTransaction>,
     }
 
-    fn setup_test_frame() -> (TestFrame, ConsumeWorker<SanitizedTransaction>) {
+    fn setup_test_frame() -> (
+        TestFrame,
+        ConsumeWorker<
+            SanitizedTransaction,
+            ConcurrentValet<TransactionState<SanitizedTransaction>>,
+        >,
+    ) {
         let GenesisConfigInfo {
             genesis_config,
             mint_keypair,
