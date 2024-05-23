@@ -16,6 +16,7 @@ use {
     arrayvec::ArrayVec,
     core::time::Duration,
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
+    itertools::Itertools,
     solana_cost_model::cost_model::CostModel,
     solana_fee::FeeBudgetLimits,
     solana_measure::measure_us,
@@ -274,65 +275,73 @@ impl TransactionViewReceiveAndBuffer {
         let lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
         let mut error_counts = TransactionErrorMetrics::default();
         for batch in &message.0 {
-            let valid_packet_references: ArrayVec<&Packet, PACKETS_PER_BATCH> =
-                ArrayVec::from_iter(batch.iter().filter(|p| !p.meta().discard()));
-            total_packet_count += valid_packet_references.len();
+            for batch in batch.into_iter().chunks(PACKETS_PER_BATCH).into_iter() {
+                let valid_packet_references: ArrayVec<&Packet, PACKETS_PER_BATCH> =
+                    ArrayVec::from_iter(batch.filter(|p| !p.meta().discard()));
+                total_packet_count += valid_packet_references.len();
 
-            // Perform deserialization, sanitization, address resolution.
-            let mut packet_flags: ArrayVec<PacketFlags, PACKETS_PER_BATCH> = ArrayVec::new();
-            let transactions: ArrayVec<TransactionView, PACKETS_PER_BATCH> = ArrayVec::from_iter(
-                valid_packet_references
+                // Perform deserialization, sanitization, address resolution.
+                let mut packet_flags: ArrayVec<PacketFlags, PACKETS_PER_BATCH> = ArrayVec::new();
+                let transactions: ArrayVec<TransactionView, PACKETS_PER_BATCH> =
+                    ArrayVec::from_iter(
+                        valid_packet_references
+                            .into_iter()
+                            .filter_map(|packet| {
+                                TransactionView::try_new(packet).map(|tv| (tv, packet.meta().flags))
+                            })
+                            .filter_map(|(mut tx, flags)| tx.sanitize().ok().map(|_| (tx, flags)))
+                            .filter_map(|(mut tx, flags)| {
+                                tx.resolve_addresses(&bank).ok().map(|_| (tx, flags))
+                            })
+                            .filter(|(tx, _flags)| {
+                                tx.validate_account_locks(transaction_account_lock_limit)
+                                    .is_ok()
+                            })
+                            .filter(|(tx, _)| tx.verify_precompiles(feature_set).is_ok())
+                            .map(|(tx, flags)| {
+                                packet_flags.push(flags);
+                                tx
+                            }),
+                    );
+
+                let check_results = bank.check_transactions(
+                    &transactions,
+                    &lock_results[..transactions.len()],
+                    MAX_PROCESSING_AGE,
+                    &mut error_counts,
+                );
+
+                for ((transaction, packet_flags), _) in transactions
                     .into_iter()
-                    .filter_map(|packet| {
-                        TransactionView::try_new(packet).map(|tv| (tv, packet.meta().flags))
-                    })
-                    .filter_map(|(mut tx, flags)| tx.sanitize().ok().map(|_| (tx, flags)))
-                    .filter_map(|(mut tx, flags)| {
-                        tx.resolve_addresses(&bank).ok().map(|_| (tx, flags))
-                    })
-                    .filter(|(tx, _flags)| {
-                        tx.validate_account_locks(transaction_account_lock_limit)
-                            .is_ok()
-                    })
-                    .filter(|(tx, _)| tx.verify_precompiles(feature_set).is_ok())
-                    .map(|(tx, flags)| {
-                        packet_flags.push(flags);
-                        tx
-                    }),
-            );
+                    .zip(packet_flags.into_iter())
+                    .zip(check_results)
+                    .filter(|(_, check_result)| check_result.0.is_ok())
+                {
+                    // Calculate fee budget limits.
+                    let Ok(compute_budget_limits) = process_compute_budget_instructions(
+                        transaction.program_instructions_iter(),
+                    ) else {
+                        continue;
+                    };
+                    let fee_budget_limits = compute_budget_limits.into();
 
-            let check_results = bank.check_transactions(
-                &transactions,
-                &lock_results[..transactions.len()],
-                MAX_PROCESSING_AGE,
-                &mut error_counts,
-            );
+                    let (priority, cost) =
+                        calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
+                    let transaction_ttl = SanitizedTransactionTTL {
+                        transaction,
+                        max_age_slot: last_slot_in_epoch,
+                    };
 
-            for ((transaction, packet_flags), _) in transactions
-                .into_iter()
-                .zip(packet_flags.into_iter())
-                .zip(check_results)
-                .filter(|(_, check_result)| check_result.0.is_ok())
-            {
-                // Calculate fee budget limits.
-                let Ok(compute_budget_limits) =
-                    process_compute_budget_instructions(transaction.program_instructions_iter())
-                else {
-                    continue;
-                };
-                let fee_budget_limits = compute_budget_limits.into();
-
-                let (priority, cost) =
-                    calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
-                let transaction_ttl = SanitizedTransactionTTL {
-                    transaction,
-                    max_age_slot: last_slot_in_epoch,
-                };
-
-                if container.insert_new_transaction(packet_flags, transaction_ttl, priority, cost) {
-                    saturating_add_assign!(num_dropped_on_capacity, 1);
+                    if container.insert_new_transaction(
+                        packet_flags,
+                        transaction_ttl,
+                        priority,
+                        cost,
+                    ) {
+                        saturating_add_assign!(num_dropped_on_capacity, 1);
+                    }
+                    saturating_add_assign!(num_buffered, 1);
                 }
-                saturating_add_assign!(num_buffered, 1);
             }
         }
 
