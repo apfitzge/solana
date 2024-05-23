@@ -22,7 +22,7 @@ use {
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
-                transaction_state_container::TransactionStateContainer,
+                transaction_state_container::SanitizedTransactionStateContainer,
             },
         },
         banking_trace::BankingPacketReceiver,
@@ -611,7 +611,7 @@ impl BankingStage {
                 decision_maker.clone(),
                 receive_and_buffer,
                 bank_forks,
-                TransactionStateContainer::with_valet(valet),
+                SanitizedTransactionStateContainer::with_valet(valet),
                 scheduler,
                 worker_metrics,
                 forwarder,

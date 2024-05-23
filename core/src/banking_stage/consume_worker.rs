@@ -724,7 +724,7 @@ mod tests {
             tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
             transaction_scheduler::{
                 transaction_state::SanitizedTransactionTTL,
-                transaction_state_container::TransactionStateContainer,
+                transaction_state_container::SanitizedTransactionStateContainer,
             },
         },
         crossbeam_channel::unbounded,
@@ -762,10 +762,7 @@ mod tests {
 
         consume_sender: Sender<ConsumeWork>,
         consumed_receiver: Receiver<FinishedConsumeWork>,
-        container: TransactionStateContainer<
-            SanitizedTransaction,
-            ConcurrentValet<TransactionState<SanitizedTransaction>>,
-        >,
+        container: SanitizedTransactionStateContainer,
     }
 
     fn setup_test_frame() -> (
@@ -832,7 +829,7 @@ mod tests {
                 _replay_vote_receiver: replay_vote_receiver,
                 consume_sender,
                 consumed_receiver,
-                container: TransactionStateContainer::with_valet(id_to_state),
+                container: SanitizedTransactionStateContainer::with_valet(id_to_state),
             },
             worker,
         )

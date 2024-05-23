@@ -446,8 +446,7 @@ mod tests {
                 tests::{create_slow_genesis_config, new_test_cluster_info},
                 transaction_scheduler::{
                     receive_and_buffer::SimpleReceiveAndBuffer,
-                    transaction_state::TransactionState,
-                    transaction_state_container::TransactionStateContainer,
+                    transaction_state_container::SanitizedTransactionStateContainer,
                 },
                 TOTAL_BUFFERED_PACKETS,
             },
@@ -506,10 +505,7 @@ mod tests {
         TestFrame,
         SchedulerController<
             SanitizedTransaction,
-            TransactionStateContainer<
-                SanitizedTransaction,
-                ConcurrentValet<TransactionState<SanitizedTransaction>>,
-            >,
+            SanitizedTransactionStateContainer,
             SimpleReceiveAndBuffer,
         >,
     ) {
@@ -574,9 +570,9 @@ mod tests {
             decision_maker,
             receive_and_buffer,
             bank_forks,
-            TransactionStateContainer::with_valet(Arc::new(ConcurrentValet::with_capacity(
-                TOTAL_BUFFERED_PACKETS,
-            ))),
+            SanitizedTransactionStateContainer::with_valet(Arc::new(
+                ConcurrentValet::with_capacity(TOTAL_BUFFERED_PACKETS),
+            )),
             PrioGraphScheduler::new(consume_work_senders, finished_consume_work_receiver),
             vec![], // no actual workers with metrics to report, this can be empty
             forwarder,

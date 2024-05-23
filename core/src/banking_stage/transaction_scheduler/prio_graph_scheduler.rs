@@ -541,7 +541,7 @@ mod tests {
         super::*,
         crate::banking_stage::{
             consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
-            transaction_scheduler::transaction_state_container::TransactionStateContainer,
+            transaction_scheduler::transaction_state_container::SanitizedTransactionStateContainer,
         },
         crossbeam_channel::{unbounded, Receiver},
         itertools::Itertools,
@@ -610,11 +610,8 @@ mod tests {
                 u64,
             ),
         >,
-    ) -> TransactionStateContainer<
-        SanitizedTransaction,
-        ConcurrentValet<TransactionState<SanitizedTransaction>>,
-    > {
-        let mut container = TransactionStateContainer::with_valet(Arc::new(
+    ) -> SanitizedTransactionStateContainer {
+        let mut container = SanitizedTransactionStateContainer::with_valet(Arc::new(
             ConcurrentValet::with_capacity(10 * 1024),
         ));
         for (from_keypair, to_pubkeys, lamports, compute_unit_price) in tx_infos.into_iter() {
