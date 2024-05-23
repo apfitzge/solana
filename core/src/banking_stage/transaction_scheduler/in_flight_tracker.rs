@@ -28,6 +28,11 @@ impl InFlightTracker {
         }
     }
 
+    /// Return the total number of in flight transactions
+    pub fn total_num_in_flight(&self) -> usize {
+        self.num_in_flight_per_thread.iter().sum()
+    }
+
     /// Returns the number of transactions that are in flight for each thread.
     pub fn num_in_flight_per_thread(&self) -> &[usize] {
         &self.num_in_flight_per_thread

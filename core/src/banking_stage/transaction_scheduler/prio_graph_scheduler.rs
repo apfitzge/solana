@@ -67,6 +67,7 @@ impl PrioGraphScheduler {
         pre_graph_filter: impl Fn(&[&T], &mut [bool]),
         pre_lock_filter: impl Fn(&T) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
+        const MAX_IN_FLIGHT: usize = 100_000;
         let num_threads = self.consume_work_senders.len();
         let max_cu_per_thread = MAX_BLOCK_UNITS / num_threads as u64;
 
@@ -76,7 +77,9 @@ impl PrioGraphScheduler {
                 schedulable_threads.remove(thread_id);
             }
         }
-        if schedulable_threads.is_empty() {
+
+        let total_in_flight_start = self.in_flight_tracker.total_num_in_flight();
+        if schedulable_threads.is_empty() || total_in_flight_start >= MAX_IN_FLIGHT {
             return Ok(SchedulingSummary {
                 num_scheduled: 0,
                 num_unschedulable: 0,
@@ -229,7 +232,9 @@ impl PrioGraphScheduler {
                             }
                         }
 
-                        if num_scheduled >= MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
+                        if num_scheduled >= MAX_TRANSACTIONS_PER_SCHEDULING_PASS
+                            || total_in_flight_start + num_scheduled >= MAX_IN_FLIGHT
+                        {
                             break;
                         }
                     }
