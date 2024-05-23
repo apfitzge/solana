@@ -8983,7 +8983,7 @@ checksum = "7cf7d77f457ef8dfa11e4cd5933c5ddb5dc52a94664071951219a97710f0a32b"
 [[package]]
 name = "valet"
 version = "0.1.0"
-source = "git+https://github.com/apfitzge/valet.git?rev=6b245e811f73c4603c5f62717615c58863df3355#6b245e811f73c4603c5f62717615c58863df3355"
+source = "git+https://github.com/apfitzge/valet.git?rev=6cb39f302acf416d4b8e628d39953f18214acd3b#6cb39f302acf416d4b8e628d39953f18214acd3b"
 dependencies = [
  "arrayvec",
 ]

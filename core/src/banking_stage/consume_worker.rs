@@ -21,7 +21,7 @@ use {
         time::Duration,
     },
     thiserror::Error,
-    valet::ConcurrentValet,
+    valet::{ConcurrentValet, ValetWith},
 };
 
 #[derive(Debug, Error)]
