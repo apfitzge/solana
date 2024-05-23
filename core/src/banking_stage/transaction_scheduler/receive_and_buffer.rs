@@ -119,6 +119,7 @@ impl ReceiveAndBufferPackets<SanitizedTransaction, SanitizedTransactionStateCont
     }
 }
 
+#[allow(dead_code)]
 impl SimpleReceiveAndBuffer {
     pub fn new(packet_receiver: PacketDeserializer, bank_forks: Arc<RwLock<BankForks>>) -> Self {
         Self {

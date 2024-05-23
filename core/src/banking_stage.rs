@@ -18,11 +18,9 @@ use {
     crate::{
         banking_stage::{
             consume_worker::ConsumeWorker,
-            packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
-                transaction_state_container::SanitizedTransactionStateContainer,
             },
         },
         banking_trace::BankingPacketReceiver,
@@ -597,12 +595,23 @@ impl BankingStage {
 
         // Spawn the central scheduler thread
         bank_thread_hdls.push({
-            use crate::banking_stage::transaction_scheduler::receive_and_buffer::SimpleReceiveAndBuffer;
+            use crate::banking_stage::{
+                packet_deserializer::PacketDeserializer,
+                transaction_scheduler::{
+                    receive_and_buffer::SimpleReceiveAndBuffer,
+                    transaction_state_container::SanitizedTransactionStateContainer,
+                },
+            };
+            type Container = SanitizedTransactionStateContainer;
             let receive_and_buffer = SimpleReceiveAndBuffer::new(
                 PacketDeserializer::new(non_vote_receiver, bank_forks.clone()),
                 bank_forks.clone(),
             );
-            // use crate::banking_stage::transaction_scheduler::receive_and_buffer::TransactionViewReceiveAndBuffer;
+            // use crate::banking_stage::transaction_scheduler::{
+            //     receive_and_buffer::TransactionViewReceiveAndBuffer,
+            //     transaction_state_container::TransactionViewStateContainer,
+            // };
+            // type Container = TransactionViewStateContainer;
             // let receive_and_buffer =
             //     TransactionViewReceiveAndBuffer::new(non_vote_receiver, bank_forks.clone());
 
@@ -611,7 +620,7 @@ impl BankingStage {
                 decision_maker.clone(),
                 receive_and_buffer,
                 bank_forks,
-                SanitizedTransactionStateContainer::with_valet(valet),
+                Container::with_valet(valet),
                 scheduler,
                 worker_metrics,
                 forwarder,
