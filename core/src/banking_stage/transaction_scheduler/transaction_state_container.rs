@@ -51,9 +51,10 @@ impl<T: SignedMessage> TransactionStateContainer<T> {
         }
     }
 
+    /// Half capacity priority-queue
     pub(crate) fn with_valet(valet: Arc<ConcurrentValet<TransactionState<T>>>) -> Self {
         Self {
-            priority_queue: MinMaxHeap::with_capacity(valet.capacity()),
+            priority_queue: MinMaxHeap::with_capacity(valet.capacity() / 2),
             id_to_transaction_state: valet,
         }
     }
