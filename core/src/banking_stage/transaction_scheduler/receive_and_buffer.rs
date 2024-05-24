@@ -425,30 +425,42 @@ impl ReceiveAndBufferPackets<TransactionView, TransactionViewStateContainer>
         count_metrics: &mut SchedulerCountMetrics,
         container: &mut TransactionViewStateContainer,
     ) -> bool {
-        const MAX_RECEIVE_AND_BUFFER_TIME: Duration = Duration::from_millis(100);
+        // If we are already the leader, do not do a blocking receive, but still
+        // receive for up to 10ms.
         let now = Instant::now();
 
-        // Perform initial receive with timeout.
-        let (maybe_message, mut total_receive_time_us) =
-            measure_us!(self.receiver.recv_timeout(MAX_RECEIVE_AND_BUFFER_TIME));
-
+        // Perform initial receive with timeout if not leader
         let mut total_buffer_time_us = 0;
-        let mut connected = match maybe_message {
-            Ok(message) => {
-                let (_, buffer_time_us) = measure_us!(self.handle_message(
-                    message,
-                    decision,
-                    timing_metrics,
-                    count_metrics,
-                    container
-                ));
-                total_buffer_time_us += buffer_time_us;
-                true
+        let mut total_receive_time_us = 0;
+        let mut connected = match decision {
+            BufferedPacketsDecision::Consume(_) => true,
+            BufferedPacketsDecision::Forward
+            | BufferedPacketsDecision::ForwardAndHold
+            | BufferedPacketsDecision::Hold => {
+                // If not leader, block up to 100ms waiting for initial message
+                let (maybe_message, receive_time_us) =
+                    measure_us!(self.receiver.recv_timeout(Duration::from_millis(100)));
+                total_receive_time_us += receive_time_us;
+                match maybe_message {
+                    Ok(message) => {
+                        let (_, buffer_time_us) = measure_us!(self.handle_message(
+                            message,
+                            decision,
+                            timing_metrics,
+                            count_metrics,
+                            container
+                        ));
+                        total_buffer_time_us += buffer_time_us;
+                        true
+                    }
+                    Err(RecvTimeoutError::Timeout) => true,
+                    Err(RecvTimeoutError::Disconnected) => false,
+                }
             }
-            Err(RecvTimeoutError::Timeout) => true,
-            Err(RecvTimeoutError::Disconnected) => false,
         };
 
+        // After initial receive, do not spend more than 10ms receiving and buffering.
+        const MAX_RECEIVE_AND_BUFFER_TIME: Duration = Duration::from_millis(10);
         while connected && now.elapsed() < MAX_RECEIVE_AND_BUFFER_TIME {
             let (maybe_message, receive_time_us) = measure_us!(self.receiver.try_recv());
             total_receive_time_us += receive_time_us;
