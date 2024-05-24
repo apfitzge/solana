@@ -658,9 +658,23 @@ impl Message for TransactionView {
     }
 
     fn has_duplicates(&self) -> bool {
-        let account_keys = self.account_keys();
-        let mut uniq = HashSet::with_capacity(account_keys.len());
-        account_keys.iter().any(|x| !uniq.insert(x))
+        match self.version {
+            TransactionVersion::Legacy => {
+                let account_keys = self.static_account_keys();
+                for i in 1..account_keys.len() {
+                    #[allow(clippy::arithmetic_side_effects)]
+                    if account_keys[i..].contains(&account_keys[i - 1]) {
+                        return true;
+                    }
+                }
+                false
+            }
+            TransactionVersion::V0 => {
+                let account_keys = self.account_keys();
+                let mut uniq = HashSet::with_capacity(account_keys.len());
+                account_keys.iter().any(|x| !uniq.insert(x))
+            }
+        }
     }
 
     fn num_lookup_tables(&self) -> usize {
