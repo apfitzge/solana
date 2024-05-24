@@ -326,7 +326,12 @@ impl TransactionView {
 
     // TODO: Refactor load_addresses to allow it to populate existing Vecs.
     pub fn resolve_addresses(&mut self, bank: &Bank) -> Result<(), TransactionError> {
-        self.loaded_addresses = bank.load_addresses(self.address_lookups())?;
+        match self.version {
+            TransactionVersion::Legacy => {}
+            TransactionVersion::V0 => {
+                self.loaded_addresses = self.resolve_addresses_v0(bank)?;
+            }
+        }
 
         // // Set the number of loaded accounts
         // self.num_loaded_writable_accounts = u8::try_from(loaded_addresses.writable.len())
