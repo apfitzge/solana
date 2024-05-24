@@ -35,6 +35,20 @@ pub(crate) struct TransactionState<T: SignedMessage> {
     should_forward: bool,
 }
 
+impl<T: SignedMessage + Default> Default for TransactionState<T> {
+    fn default() -> Self {
+        Self {
+            transaction_ttl: SanitizedTransactionTTL {
+                transaction: T::default(),
+                max_age_slot: Slot::default(),
+            },
+            priority: 0,
+            cost: 0,
+            should_forward: false,
+        }
+    }
+}
+
 impl<T: SignedMessage> TransactionState<T> {
     /// Creates a new `TransactionState` in the `Unprocessed` state.
     pub(crate) fn new(

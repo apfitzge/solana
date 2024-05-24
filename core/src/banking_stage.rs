@@ -556,7 +556,9 @@ impl BankingStage {
 
         // Spawn the worker threads
         // Valet has more capacity than necessary to support adding packets then dropping
-        let valet = Arc::new(ConcurrentValet::with_capacity(2 * TOTAL_BUFFERED_PACKETS));
+        let valet = Arc::new(valet::ConcurrentSlotValet::with_capacity(
+            2 * TOTAL_BUFFERED_PACKETS,
+        ));
         let mut worker_metrics = Vec::with_capacity(num_workers as usize);
         for (index, work_receiver) in work_receivers.into_iter().enumerate() {
             let id = (index as u32).saturating_add(NUM_VOTE_PROCESSING_THREADS);
@@ -595,25 +597,25 @@ impl BankingStage {
 
         // Spawn the central scheduler thread
         bank_thread_hdls.push({
-            use crate::banking_stage::{
-                packet_deserializer::PacketDeserializer,
-                transaction_scheduler::{
-                    receive_and_buffer::SimpleReceiveAndBuffer,
-                    transaction_state_container::SanitizedTransactionStateContainer,
-                },
-            };
-            type Container = SanitizedTransactionStateContainer;
-            let receive_and_buffer = SimpleReceiveAndBuffer::new(
-                PacketDeserializer::new(non_vote_receiver, bank_forks.clone()),
-                bank_forks.clone(),
-            );
-            // use crate::banking_stage::transaction_scheduler::{
-            //     receive_and_buffer::TransactionViewReceiveAndBuffer,
-            //     transaction_state_container::TransactionViewStateContainer,
+            // use crate::banking_stage::{
+            //     packet_deserializer::PacketDeserializer,
+            //     transaction_scheduler::{
+            //         receive_and_buffer::SimpleReceiveAndBuffer,
+            //         transaction_state_container::SanitizedTransactionStateContainer,
+            //     },
             // };
-            // type Container = TransactionViewStateContainer;
-            // let receive_and_buffer =
-            //     TransactionViewReceiveAndBuffer::new(non_vote_receiver, bank_forks.clone());
+            // type Container = SanitizedTransactionStateContainer;
+            // let receive_and_buffer = SimpleReceiveAndBuffer::new(
+            //     PacketDeserializer::new(non_vote_receiver, bank_forks.clone()),
+            //     bank_forks.clone(),
+            // );
+            use crate::banking_stage::transaction_scheduler::{
+                receive_and_buffer::TransactionViewReceiveAndBuffer,
+                transaction_state_container::TransactionViewStateContainer,
+            };
+            type Container = TransactionViewStateContainer;
+            let receive_and_buffer =
+                TransactionViewReceiveAndBuffer::new(non_vote_receiver, bank_forks.clone());
 
             let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
             let scheduler_controller = SchedulerController::new(
