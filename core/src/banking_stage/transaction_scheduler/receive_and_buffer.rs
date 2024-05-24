@@ -299,6 +299,8 @@ impl TransactionViewReceiveAndBuffer {
         let mut num_dropped = 0;
 
         let mut total_inner_loop_us = 0;
+        let mut total_with_us = 0;
+        let mut total_inner_with_us = 0;
         let (_, outer_loop_us) = measure_us!({
             for batch in &message.0 {
                 total_packet_count += batch.len();
@@ -310,55 +312,64 @@ impl TransactionViewReceiveAndBuffer {
                             total_reserve_key_us += us;
 
                             // Run sanitization and checks
-                            let Some(priority_id) = container
+                            let (maybe_priority_id, with_us) = measure_us!(container
                                 .with_mut_transaction_state(&transaction_id, |state| {
-                                    let transaction = &mut state.mut_transaction_ttl().transaction;
+                                    let (maybe_priority_id, with_inner_us) = measure_us!({
+                                        let transaction =
+                                            &mut state.mut_transaction_ttl().transaction;
 
-                                    let (_, us) = measure_us!(transaction.populate_from(packet)?);
-                                    total_populate_from_time_us += us;
+                                        let (_, us) =
+                                            measure_us!(transaction.populate_from(packet)?);
+                                        total_populate_from_time_us += us;
 
-                                    let (_, us) = measure_us!(transaction.sanitize().ok()?);
-                                    total_sanitize_time_us += us;
+                                        let (_, us) = measure_us!(transaction.sanitize().ok()?);
+                                        total_sanitize_time_us += us;
 
-                                    let (_, us) = measure_us!(transaction
-                                        .validate_account_locks(transaction_account_lock_limit)
-                                        .ok()?);
-                                    total_validate_account_locks_us += us;
+                                        let (_, us) = measure_us!(transaction
+                                            .validate_account_locks(transaction_account_lock_limit)
+                                            .ok()?);
+                                        total_validate_account_locks_us += us;
 
-                                    let (_, us) =
-                                        measure_us!(transaction.resolve_addresses(&bank).ok()?);
-                                    total_resolve_addresses_us += us;
+                                        let (_, us) = measure_us!(transaction
+                                            .resolve_addresses(&bank)
+                                            .ok()?);
+                                        total_resolve_addresses_us += us;
 
-                                    let (_, us) = measure_us!(transaction
-                                        .verify_precompiles(feature_set)
-                                        .ok()?);
-                                    total_verify_precompiles_us += us;
+                                        let (_, us) = measure_us!(transaction
+                                            .verify_precompiles(feature_set)
+                                            .ok()?);
+                                        total_verify_precompiles_us += us;
 
-                                    let (compute_budget_limits, us) =
-                                        measure_us!(process_compute_budget_instructions(
-                                            transaction.program_instructions_iter(),
-                                        )
-                                        .ok()?);
-                                    total_process_compute_budget_instructions_us += us;
+                                        let (compute_budget_limits, us) =
+                                            measure_us!(process_compute_budget_instructions(
+                                                transaction.program_instructions_iter(),
+                                            )
+                                            .ok()?);
+                                        total_process_compute_budget_instructions_us += us;
 
-                                    let ((priority, cost), us) =
-                                        measure_us!(calculate_priority_and_cost(
-                                            transaction,
-                                            &compute_budget_limits.into(),
-                                            &bank,
-                                        ));
-                                    total_calculate_priority_and_cost_us += us;
+                                        let ((priority, cost), us) =
+                                            measure_us!(calculate_priority_and_cost(
+                                                transaction,
+                                                &compute_budget_limits.into(),
+                                                &bank,
+                                            ));
+                                        total_calculate_priority_and_cost_us += us;
 
-                                    state.set_priority(priority);
-                                    state.set_cost(cost);
-                                    // TODO: fix this, should come from packet flags
-                                    state.set_should_forward(false);
-                                    state.mut_transaction_ttl().max_age_slot = last_slot_in_epoch;
+                                        state.set_priority(priority);
+                                        state.set_cost(cost);
+                                        // TODO: fix this, should come from packet flags
+                                        state.set_should_forward(false);
+                                        state.mut_transaction_ttl().max_age_slot =
+                                            last_slot_in_epoch;
 
-                                    Some(TransactionPriorityId::new(priority, transaction_id))
+                                        Some(TransactionPriorityId::new(priority, transaction_id))
+                                    });
+                                    total_inner_with_us += with_inner_us;
+                                    maybe_priority_id
                                 })
-                                .expect("transaction must exist")
-                            else {
+                                .expect("transaction must exist"));
+                            total_with_us += with_us;
+                            let Some(priority_id) = maybe_priority_id else {
                                 num_dropped += 1;
                                 container.remove_by_id(&transaction_id);
                                 continue;
@@ -535,6 +546,8 @@ impl TransactionViewReceiveAndBuffer {
                 ("outer_loop_us", outer_loop_us, i64),
                 ("inner_loop_us", total_inner_loop_us, i64),
                 ("drop_message_us", drop_message_us, i64),
+                ("with_us", total_with_us, i64),
+                ("inner_with_us", total_inner_with_us, i64),
             );
         }
     }
