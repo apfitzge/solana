@@ -96,12 +96,6 @@ impl<
     }
 
     pub fn run(mut self) -> Result<(), SchedulerError> {
-        // Scheduler is a very important part of code when leader.
-        // Let's grab a dedicated thread for this work.
-        if let Some(cores) = core_affinity::get_core_ids() {
-            core_affinity::set_for_current(*cores.last().unwrap());
-        }
-
         loop {
             // BufferedPacketsDecision is shared with legacy BankingStage, which will forward
             // packets. Initially, not renaming these decision variants but the actions taken
