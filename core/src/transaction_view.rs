@@ -329,7 +329,7 @@ impl TransactionView {
         match self.version {
             TransactionVersion::Legacy => {}
             TransactionVersion::V0 => {
-                self.loaded_addresses = self.resolve_addresses_v0(bank)?;
+                self.loaded_addresses = bank.load_addresses(self.address_lookups())?;
             }
         }
 
