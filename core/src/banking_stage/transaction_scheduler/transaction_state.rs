@@ -1,5 +1,5 @@
 use {
-    solana_sdk::{clock::Slot, packet::PacketFlags},
+    solana_sdk::{clock::Slot, packet::PacketFlags, transaction::SanitizedTransaction},
     solana_signed_message::SignedMessage,
 };
 
@@ -60,14 +60,28 @@ impl<T: SignedMessage> TransactionState<T> {
         self.priority
     }
 
+    pub(crate) fn set_priority(&mut self, priority: u64) {
+        self.priority = priority;
+    }
+
     /// Return the cost of the transaction.
     pub(crate) fn cost(&self) -> u64 {
         self.cost
     }
 
+    /// Set the cost of the transaction.
+    pub(crate) fn set_cost(&mut self, cost: u64) {
+        self.cost = cost;
+    }
+
     /// Return whether packet should be attempted to be forwarded.
     pub(crate) fn should_forward(&self) -> bool {
         self.should_forward
+    }
+
+    /// Set the should_forward flag.
+    pub(crate) fn set_should_forward(&mut self, should_forward: bool) {
+        self.should_forward = should_forward;
     }
 
     /// Mark the packet as forwarded.
@@ -82,6 +96,11 @@ impl<T: SignedMessage> TransactionState<T> {
     /// This method will panic if the transaction is in the `Pending` state.
     pub(crate) fn transaction_ttl(&self) -> &SanitizedTransactionTTL<T> {
         &self.transaction_ttl
+    }
+
+    /// Get a mutable refernce to the `SanitizedTransactionTTL`` for the transaction.
+    pub(crate) fn mut_transaction_ttl(&mut self) -> &mut SanitizedTransactionTTL<T> {
+        &mut self.transaction_ttl
     }
 }
 

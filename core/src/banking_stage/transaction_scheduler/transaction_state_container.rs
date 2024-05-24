@@ -9,7 +9,7 @@ use {
     solana_sdk::{packet::PacketFlags, transaction::SanitizedTransaction},
     solana_signed_message::SignedMessage,
     std::sync::Arc,
-    valet::{ConcurrentValet, ValetBasics, ValetInsert, ValetWith},
+    valet::{ConcurrentSlotValet, ConcurrentValet, ValetBasics, ValetInsert, ValetSlot, ValetWith},
 };
 
 // Rust impls do not support non-overlapping traits, so we are stuck with a
@@ -55,6 +55,17 @@ macro_rules! define_container {
                 f: impl FnOnce(&TransactionState<$tx>) -> R,
             ) -> Option<R> {
                 self.id_to_transaction_state.with(*id, f).ok()
+            }
+
+            pub(crate) fn batched_with_mut_ref_transaction_state<const SIZE: usize, M, R>(
+                &mut self,
+                ids: &[TransactionId],
+                m: impl Fn(&mut TransactionState<$tx>) -> &mut M,
+                f: impl FnOnce(&mut [&mut M]) -> R,
+            ) -> Option<R> {
+                self.id_to_transaction_state
+                    .batched_with_mut_mut_ref::<SIZE, _, _>(ids, m, f)
+                    .ok()
             }
 
             /// Perform batch operation with immutable transaction state.
@@ -219,36 +230,21 @@ impl SanitizedTransactionStateContainer {
 define_container!(
     TransactionViewStateContainer,
     TransactionView,
-    ConcurrentValet<TransactionState<TransactionView>>
+    ConcurrentSlotValet<TransactionState<TransactionView>>
 );
 
 impl TransactionViewStateContainer {
     fn remove_by_id(&mut self, transaction_id: &TransactionId) {
         self.id_to_transaction_state
-            .remove(*transaction_id)
-            .expect("transaction must exist");
+            .release_key(*transaction_id)
+            .expect("release key");
     }
 
-    /// Insert a new transaction into the container's queues and maps.
-    /// Returns `true` if a packet was dropped due to capacity limits.
-    pub(crate) fn insert_new_transaction(
-        &mut self,
-        packet_flags: PacketFlags,
-        transaction_ttl: SanitizedTransactionTTL<TransactionView>,
-        priority: u64,
-        cost: u64,
-    ) -> bool {
-        let transaction_id = self
-            .id_to_transaction_state
-            .insert(TransactionState::new(
-                packet_flags,
-                transaction_ttl,
-                priority,
-                cost,
-            ))
-            .unwrap_or_else(|_| panic!("container must not be full"));
-        let priority_id = TransactionPriorityId::new(priority, transaction_id);
-        self.push_id_into_queue(priority_id)
+    // Reserve a free key for a new transaction.
+    pub fn reserve_key(&self) -> TransactionId {
+        self.id_to_transaction_state
+            .get_free_key()
+            .expect("reserve key")
     }
 }
 
