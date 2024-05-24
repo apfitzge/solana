@@ -626,7 +626,7 @@ fn calculate_priority_and_cost(
     fee_budget_limits: &FeeBudgetLimits,
     bank: &Bank,
 ) -> (u64, u64) {
-    let cost = CostModel::calculate_cost(transaction, &bank.feature_set).sum();
+    let cost = CostModel::calculate_cost_sum(transaction, &bank.feature_set);
     let reward = bank.calculate_reward_for_transaction(transaction, fee_budget_limits);
 
     // We need a multiplier here to avoid rounding down too aggressively.

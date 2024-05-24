@@ -31,6 +31,27 @@ use {
 pub struct CostModel;
 
 impl CostModel {
+    /// Only calculate the sum of costs, without internal allocations.
+    pub fn calculate_cost_sum(transaction: &impl SignedMessage, feature_set: &FeatureSet) -> u64 {
+        let mut tx_cost = UsageCostDetails::new_with_capacity(0); // specifying 0 capacity to avoid allocations
+
+        Self::get_signature_cost(&mut tx_cost, transaction); // only assigns some internal fields. no allocations
+        Self::get_transaction_cost(&mut tx_cost, transaction, feature_set); // loops through ixs. no allocations.
+
+        // Need to have custom write_lock cost. No allocations.
+        {
+            let num_write_locks = if feature_set
+                .is_active(&feature_set::cost_model_requested_write_lock_cost::id())
+            {
+                transaction.num_write_locks()
+            } else {
+                tx_cost.writable_accounts.len() as u64
+            };
+            tx_cost.write_lock_cost = WRITE_LOCK_UNITS.saturating_mul(num_write_locks);
+        }
+        tx_cost.sum()
+    }
+
     pub fn calculate_cost(
         transaction: &impl SignedMessage,
         feature_set: &FeatureSet,

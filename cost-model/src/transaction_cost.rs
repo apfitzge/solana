@@ -173,7 +173,6 @@ impl PartialEq for UsageCostDetails {
 impl Eq for UsageCostDetails {}
 
 impl UsageCostDetails {
-    #[cfg(test)]
     pub fn new_with_capacity(capacity: usize) -> Self {
         Self {
             writable_accounts: Vec::with_capacity(capacity),
