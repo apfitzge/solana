@@ -286,6 +286,7 @@ impl TransactionViewReceiveAndBuffer {
         // let mut lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
         let mut error_counts = TransactionErrorMetrics::default();
 
+        let mut max_per_packet_time_us = 0;
         let mut total_reserve_key_us = 0;
         let mut total_populate_from_time_us = 0;
         let mut total_sanitize_time_us = 0;
@@ -299,68 +300,72 @@ impl TransactionViewReceiveAndBuffer {
         for batch in &message.0 {
             total_packet_count += batch.len();
             for packet in batch {
-                // Get free id
-                let (transaction_id, us) = measure_us!(container.reserve_key());
-                total_reserve_key_us += us;
+                let (_, us) = measure_us!({
+                    // Get free id
+                    let (transaction_id, us) = measure_us!(container.reserve_key());
+                    total_reserve_key_us += us;
 
-                // Run sanitization and checks
-                let Some(priority_id) = container
-                    .with_mut_transaction_state(&transaction_id, |state| {
-                        let transaction = &mut state.mut_transaction_ttl().transaction;
+                    // Run sanitization and checks
+                    let Some(priority_id) = container
+                        .with_mut_transaction_state(&transaction_id, |state| {
+                            let transaction = &mut state.mut_transaction_ttl().transaction;
 
-                        let (_, us) = measure_us!(transaction.populate_from(packet)?);
-                        total_populate_from_time_us += us;
+                            let (_, us) = measure_us!(transaction.populate_from(packet)?);
+                            total_populate_from_time_us += us;
 
-                        let (_, us) = measure_us!(transaction.sanitize().ok()?);
-                        total_sanitize_time_us += us;
+                            let (_, us) = measure_us!(transaction.sanitize().ok()?);
+                            total_sanitize_time_us += us;
 
-                        let (_, us) = measure_us!(transaction
-                            .validate_account_locks(transaction_account_lock_limit)
-                            .ok()?);
-                        total_validate_account_locks_us += us;
+                            let (_, us) = measure_us!(transaction
+                                .validate_account_locks(transaction_account_lock_limit)
+                                .ok()?);
+                            total_validate_account_locks_us += us;
 
-                        let (_, us) = measure_us!(transaction.resolve_addresses(&bank).ok()?);
-                        total_resolve_addresses_us += us;
+                            let (_, us) = measure_us!(transaction.resolve_addresses(&bank).ok()?);
+                            total_resolve_addresses_us += us;
 
-                        let (_, us) =
-                            measure_us!(transaction.verify_precompiles(feature_set).ok()?);
-                        total_verify_precompiles_us += us;
+                            let (_, us) =
+                                measure_us!(transaction.verify_precompiles(feature_set).ok()?);
+                            total_verify_precompiles_us += us;
 
-                        let (compute_budget_limits, us) =
-                            measure_us!(process_compute_budget_instructions(
-                                transaction.program_instructions_iter(),
-                            )
-                            .ok()?);
-                        total_process_compute_budget_instructions_us += us;
+                            let (compute_budget_limits, us) =
+                                measure_us!(process_compute_budget_instructions(
+                                    transaction.program_instructions_iter(),
+                                )
+                                .ok()?);
+                            total_process_compute_budget_instructions_us += us;
 
-                        let ((priority, cost), us) = measure_us!(calculate_priority_and_cost(
-                            transaction,
-                            &compute_budget_limits.into(),
-                            &bank,
-                        ));
-                        total_calculate_priority_and_cost_us += us;
+                            let ((priority, cost), us) = measure_us!(calculate_priority_and_cost(
+                                transaction,
+                                &compute_budget_limits.into(),
+                                &bank,
+                            ));
+                            total_calculate_priority_and_cost_us += us;
 
-                        state.set_priority(priority);
-                        state.set_cost(cost);
-                        // TODO: fix this, should come from packet flags
-                        state.set_should_forward(false);
-                        state.mut_transaction_ttl().max_age_slot = last_slot_in_epoch;
+                            state.set_priority(priority);
+                            state.set_cost(cost);
+                            // TODO: fix this, should come from packet flags
+                            state.set_should_forward(false);
+                            state.mut_transaction_ttl().max_age_slot = last_slot_in_epoch;
 
-                        Some(TransactionPriorityId::new(priority, transaction_id))
-                    })
-                    .expect("transaction must exist")
-                else {
-                    container.remove_by_id(&transaction_id);
-                    continue;
-                };
+                            Some(TransactionPriorityId::new(priority, transaction_id))
+                        })
+                        .expect("transaction must exist")
+                    else {
+                        container.remove_by_id(&transaction_id);
+                        continue;
+                    };
 
-                let (a_tx_was_dropped, us) = measure_us!(container.push_id_into_queue(priority_id));
-                total_push_priority_queue_us += us;
+                    let (a_tx_was_dropped, us) =
+                        measure_us!(container.push_id_into_queue(priority_id));
+                    total_push_priority_queue_us += us;
 
-                if a_tx_was_dropped {
-                    saturating_add_assign!(num_dropped_on_capacity, 1);
-                }
-                saturating_add_assign!(num_buffered, 1);
+                    if a_tx_was_dropped {
+                        saturating_add_assign!(num_dropped_on_capacity, 1);
+                    }
+                    saturating_add_assign!(num_buffered, 1);
+                });
+                max_per_packet_time_us = max_per_packet_time_us.max(us);
             }
             // for batch in batch.into_iter().chunks(PACKETS_PER_BATCH).into_iter() {
             //     let valid_packet_references: ArrayVec<&Packet, PACKETS_PER_BATCH> =
@@ -513,6 +518,7 @@ impl TransactionViewReceiveAndBuffer {
                     i64
                 ),
                 ("push_priority_queue_us", total_push_priority_queue_us, i64),
+                ("max_per_packet_time_us", max_per_packet_time_us, i64),
             );
         }
     }
