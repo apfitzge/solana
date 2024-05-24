@@ -285,30 +285,60 @@ impl TransactionViewReceiveAndBuffer {
         let mut num_buffered: usize = 0;
         // let mut lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
         let mut error_counts = TransactionErrorMetrics::default();
+
+        let mut total_reserve_key_us = 0;
+        let mut total_populate_from_time_us = 0;
+        let mut total_sanitize_time_us = 0;
+        let mut total_validate_account_locks_us = 0;
+        let mut total_resolve_addresses_us = 0;
+        let mut total_verify_precompiles_us = 0;
+        let mut total_process_compute_budget_instructions_us = 0;
+        let mut total_calculate_priority_and_cost_us = 0;
+        let mut total_push_priority_queue_us = 0;
+
         for batch in &message.0 {
+            total_packet_count += batch.len();
             for packet in batch {
                 // Get free id
-                let transaction_id = container.reserve_key();
+                let (transaction_id, us) = measure_us!(container.reserve_key());
+                total_reserve_key_us += us;
+
                 // Run sanitization and checks
                 let Some(priority_id) = container
                     .with_mut_transaction_state(&transaction_id, |state| {
                         let transaction = &mut state.mut_transaction_ttl().transaction;
-                        transaction.populate_from(packet)?;
-                        transaction.sanitize().ok()?;
-                        transaction
+
+                        let (_, us) = measure_us!(transaction.populate_from(packet)?);
+                        total_populate_from_time_us += us;
+
+                        let (_, us) = measure_us!(transaction.sanitize().ok()?);
+                        total_sanitize_time_us += us;
+
+                        let (_, us) = measure_us!(transaction
                             .validate_account_locks(transaction_account_lock_limit)
-                            .ok()?;
-                        transaction.resolve_addresses(&bank).ok()?;
-                        transaction.verify_precompiles(feature_set).ok()?;
-                        let compute_budget_limits = process_compute_budget_instructions(
-                            transaction.program_instructions_iter(),
-                        )
-                        .ok()?;
-                        let (priority, cost) = calculate_priority_and_cost(
+                            .ok()?);
+                        total_validate_account_locks_us += us;
+
+                        let (_, us) = measure_us!(transaction.resolve_addresses(&bank).ok()?);
+                        total_resolve_addresses_us += us;
+
+                        let (_, us) =
+                            measure_us!(transaction.verify_precompiles(feature_set).ok()?);
+                        total_verify_precompiles_us += us;
+
+                        let (compute_budget_limits, us) =
+                            measure_us!(process_compute_budget_instructions(
+                                transaction.program_instructions_iter(),
+                            )
+                            .ok()?);
+                        total_process_compute_budget_instructions_us += us;
+
+                        let ((priority, cost), us) = measure_us!(calculate_priority_and_cost(
                             transaction,
                             &compute_budget_limits.into(),
                             &bank,
-                        );
+                        ));
+                        total_calculate_priority_and_cost_us += us;
 
                         state.set_priority(priority);
                         state.set_cost(cost);
@@ -324,7 +354,10 @@ impl TransactionViewReceiveAndBuffer {
                     continue;
                 };
 
-                if container.push_id_into_queue(priority_id) {
+                let (a_tx_was_dropped, us) = measure_us!(container.push_id_into_queue(priority_id));
+                total_push_priority_queue_us += us;
+
+                if a_tx_was_dropped {
                     saturating_add_assign!(num_dropped_on_capacity, 1);
                 }
                 saturating_add_assign!(num_buffered, 1);
@@ -454,6 +487,34 @@ impl TransactionViewReceiveAndBuffer {
             //     num_dropped_on_transaction_checks
             // );
         });
+
+        if std::thread::current().name().unwrap() == "solBnkTxSched" {
+            datapoint_info!(
+                "txview_receive_and_buffer_details",
+                ("num_buffered", num_buffered, i64),
+                ("reserve_key_us", total_reserve_key_us, i64),
+                ("populate_from_time_us", total_populate_from_time_us, i64),
+                ("sanitize_time_us", total_sanitize_time_us, i64),
+                (
+                    "validate_account_locks_us",
+                    total_validate_account_locks_us,
+                    i64
+                ),
+                ("resolve_addresses_us", total_resolve_addresses_us, i64),
+                ("verify_precompiles_us", total_verify_precompiles_us, i64),
+                (
+                    "process_compute_budget_instructions_us",
+                    total_process_compute_budget_instructions_us,
+                    i64
+                ),
+                (
+                    "calculate_priority_and_cost_us",
+                    total_calculate_priority_and_cost_us,
+                    i64
+                ),
+                ("push_priority_queue_us", total_push_priority_queue_us, i64),
+            );
+        }
     }
 }
 
