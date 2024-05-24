@@ -296,6 +296,7 @@ impl TransactionViewReceiveAndBuffer {
         let mut total_process_compute_budget_instructions_us = 0;
         let mut total_calculate_priority_and_cost_us = 0;
         let mut total_push_priority_queue_us = 0;
+        let mut num_dropped = 0;
 
         for batch in &message.0 {
             total_packet_count += batch.len();
@@ -352,6 +353,7 @@ impl TransactionViewReceiveAndBuffer {
                         })
                         .expect("transaction must exist")
                     else {
+                        num_dropped += 1;
                         container.remove_by_id(&transaction_id);
                         continue;
                     };
@@ -519,6 +521,7 @@ impl TransactionViewReceiveAndBuffer {
                 ),
                 ("push_priority_queue_us", total_push_priority_queue_us, i64),
                 ("max_per_packet_time_us", max_per_packet_time_us, i64),
+                ("num_dropped", num_dropped, i64),
             );
         }
     }
