@@ -275,22 +275,6 @@ impl TransactionViewReceiveAndBuffer {
         count_metrics: &mut SchedulerCountMetrics,
         container: &mut TransactionViewStateContainer,
     ) {
-        // Put a data point with -1 for all packet times. This marks the beginning of each
-        // message call.
-        if std::thread::current().name().unwrap() == "solBnkTxSched" {
-            datapoint_info!(
-                "packet_txview_details",
-                ("reserve_key_us", -1, i64),
-                ("populate_from_time_us", -1, i64),
-                ("sanitize_time_us", -1, i64),
-                ("validate_account_locks_us", -1, i64),
-                ("resolve_addresses_us", -1, i64),
-                ("verify_precompiles_us", -1, i64),
-                ("process_compute_budget_instructions_us", -1, i64),
-                ("calculate_priority_and_cost_us", -1, i64)
-            );
-        }
-
         let bank = self.bank_forks.read().unwrap().working_bank();
         let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
         let transaction_account_lock_limit = bank.get_transaction_account_lock_limit();
@@ -324,9 +308,8 @@ impl TransactionViewReceiveAndBuffer {
                     for packet in batch {
                         let (_, us) = measure_us!({
                             // Get free id
-                            let (transaction_id, reserve_key_us) =
-                                measure_us!(container.reserve_key());
-                            total_reserve_key_us += reserve_key_us;
+                            let (transaction_id, us) = measure_us!(container.reserve_key());
+                            total_reserve_key_us += us;
 
                             // Run sanitization and checks
                             let (maybe_priority_id, with_us) = measure_us!(container
@@ -335,82 +318,42 @@ impl TransactionViewReceiveAndBuffer {
                                         let transaction =
                                             &mut state.mut_transaction_ttl().transaction;
 
-                                        let (_, populate_from_us) =
+                                        let (_, us) =
                                             measure_us!(transaction.populate_from(packet)?);
-                                        total_populate_from_time_us += populate_from_us;
+                                        total_populate_from_time_us += us;
 
-                                        let (_, sanitize_us) =
-                                            measure_us!(transaction.sanitize().ok()?);
-                                        total_sanitize_time_us += sanitize_us;
+                                        let (_, us) = measure_us!(transaction.sanitize().ok()?);
+                                        total_sanitize_time_us += us;
 
-                                        let (_, validate_account_locks_us) =
-                                            measure_us!(transaction
-                                                .validate_account_locks(
-                                                    transaction_account_lock_limit
-                                                )
-                                                .ok()?);
-                                        total_validate_account_locks_us +=
-                                            validate_account_locks_us;
+                                        let (_, us) = measure_us!(transaction
+                                            .validate_account_locks(transaction_account_lock_limit)
+                                            .ok()?);
+                                        total_validate_account_locks_us += us;
 
-                                        let (_, resolve_addresses_us) = measure_us!(transaction
+                                        let (_, us) = measure_us!(transaction
                                             .resolve_addresses(&bank)
                                             .ok()?);
-                                        total_resolve_addresses_us += resolve_addresses_us;
+                                        total_resolve_addresses_us += us;
 
-                                        let (_, verify_precompiles_us) = measure_us!(transaction
+                                        let (_, us) = measure_us!(transaction
                                             .verify_precompiles(feature_set)
                                             .ok()?);
-                                        total_verify_precompiles_us += verify_precompiles_us;
+                                        total_verify_precompiles_us += us;
 
-                                        let (
-                                            compute_budget_limits,
-                                            process_compute_budget_instructions_us,
-                                        ) = measure_us!(process_compute_budget_instructions(
-                                            transaction.program_instructions_iter(),
-                                        )
-                                        .ok()?);
-                                        total_process_compute_budget_instructions_us +=
-                                            process_compute_budget_instructions_us;
+                                        let (compute_budget_limits, us) =
+                                            measure_us!(process_compute_budget_instructions(
+                                                transaction.program_instructions_iter(),
+                                            )
+                                            .ok()?);
+                                        total_process_compute_budget_instructions_us += us;
 
-                                        let ((priority, cost), calculate_priority_and_cost_us) =
+                                        let ((priority, cost), us) =
                                             measure_us!(calculate_priority_and_cost(
                                                 transaction,
                                                 &compute_budget_limits.into(),
                                                 &bank,
                                             ));
-                                        total_calculate_priority_and_cost_us +=
-                                            calculate_priority_and_cost_us;
-
-                                        if std::thread::current().name().unwrap() == "solBnkTxSched"
-                                        {
-                                            datapoint_info!(
-                                                "packet_txview_details",
-                                                ("reserve_key_us", reserve_key_us, i64),
-                                                ("populate_from_time_us", populate_from_us, i64),
-                                                ("sanitize_time_us", sanitize_us, i64),
-                                                (
-                                                    "validate_account_locks_us",
-                                                    validate_account_locks_us,
-                                                    i64
-                                                ),
-                                                ("resolve_addresses_us", resolve_addresses_us, i64),
-                                                (
-                                                    "verify_precompiles_us",
-                                                    verify_precompiles_us,
-                                                    i64
-                                                ),
-                                                (
-                                                    "process_compute_budget_instructions_us",
-                                                    process_compute_budget_instructions_us,
-                                                    i64
-                                                ),
-                                                (
-                                                    "calculate_priority_and_cost_us",
-                                                    calculate_priority_and_cost_us,
-                                                    i64
-                                                )
-                                            );
-                                        }
+                                        total_calculate_priority_and_cost_us += us;
 
                                         state.set_priority(priority);
                                         state.set_cost(cost);
