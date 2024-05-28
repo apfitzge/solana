@@ -556,9 +556,9 @@ impl BankingStage {
 
         // Spawn the worker threads
         // Valet has more capacity than necessary to support adding packets then dropping
-        let valet = Arc::new(valet::ConcurrentSlotValet::with_capacity(
-            2 * TOTAL_BUFFERED_PACKETS,
-        ));
+        let mut valet = valet::ConcurrentSlotValet::with_capacity(2 * TOTAL_BUFFERED_PACKETS);
+        valet.lock();
+        let valet = Arc::new(valet);
         let mut worker_metrics = Vec::with_capacity(num_workers as usize);
         for (index, work_receiver) in work_receivers.into_iter().enumerate() {
             let id = (index as u32).saturating_add(NUM_VOTE_PROCESSING_THREADS);
