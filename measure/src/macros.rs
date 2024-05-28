@@ -81,6 +81,44 @@ macro_rules! measure {
 }
 
 #[macro_export]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+macro_rules! measure_us {
+    ($val:expr) => {{
+        let ts1 = unsafe {
+            let mut lo: u32;
+            let mut hi: u32;
+            unsafe {
+                std::arch::asm!(
+                    "rdtsc",
+                    out("eax") lo,
+                    out("edx") hi,
+                );
+            }
+            (hi as u64) << 32 | lo as u64
+        };
+
+        let result = $val;
+
+        let ts2 = unsafe {
+            let mut lo: u32;
+            let mut hi: u32;
+            unsafe {
+                std::arch::asm!(
+                    "rdtsc",
+                    out("eax") lo,
+                    out("edx") hi,
+                );
+            }
+            (hi as u64) << 32 | lo as u64
+        };
+
+        (result, ts2 - ts1)
+        // (result, solana_sdk::timing::duration_as_us(&start.elapsed()))
+    }};
+}
+
+#[macro_export]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 macro_rules! measure_us {
     ($val:expr) => {{
         let start = std::time::Instant::now();
