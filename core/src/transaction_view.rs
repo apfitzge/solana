@@ -139,7 +139,6 @@ impl Default for TransactionView {
 
 impl TransactionView {
     /// Return None if the packet is not a transaction.
-    #[inline]
     pub fn populate_from(&mut self, packet: &Packet) -> Option<()> {
         // The "deserialization" strategy here only works if the internal types
         // of the transaction are aligned on the same boundaries as the packet
@@ -270,7 +269,6 @@ impl TransactionView {
         Some(transaction_view)
     }
 
-    #[inline]
     pub fn signatures(&self) -> &[Signature] {
         let mut offset = usize::from(self.signature_offset);
         read_array::<Signature>(
@@ -281,14 +279,12 @@ impl TransactionView {
         .expect("signatures verified in construction")
     }
 
-    #[inline]
     pub fn recent_blockhash(&self) -> &Hash {
         unsafe {
             &*(&self.buffer[self.recent_blockhash_offset as usize] as *const _ as *const Hash)
         }
     }
 
-    #[inline]
     pub fn static_account_keys(&self) -> &[Pubkey] {
         let mut offset = usize::from(self.static_accounts_offset);
         read_array::<Pubkey>(
@@ -299,7 +295,6 @@ impl TransactionView {
         .expect("static account keys verified in construction")
     }
 
-    #[inline]
     pub fn instructions(&self) -> impl Iterator<Item = Instruction> {
         InstructionIterator {
             buffer: &self.buffer[..usize::from(self.packet_len)], // all instructions are within original packet
@@ -309,7 +304,6 @@ impl TransactionView {
         }
     }
 
-    #[inline]
     pub fn address_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup> {
         MessageAddressTableLookupIterator {
             buffer: &self.buffer[..usize::from(self.packet_len)], // all address lookups are within original packet
@@ -319,7 +313,6 @@ impl TransactionView {
         }
     }
 
-    #[inline]
     pub fn sanitize(&mut self) -> Result<(), SanitizeError> {
         self.sanitize_signatures()?;
         self.sanitize_message()?;
@@ -332,7 +325,6 @@ impl TransactionView {
     }
 
     // TODO: Refactor load_addresses to allow it to populate existing Vecs.
-    #[inline]
     pub fn resolve_addresses(&mut self, bank: &Bank) -> Result<(), TransactionError> {
         match self.version {
             TransactionVersion::Legacy => {}
@@ -394,7 +386,6 @@ impl TransactionView {
         Ok(())
     }
 
-    #[inline]
     fn sanitize_signatures(&self) -> Result<(), SanitizeError> {
         let num_required_signatures = usize::from(self.num_required_signatures);
         match num_required_signatures.cmp(&usize::from(self.signature_len)) {
@@ -412,7 +403,6 @@ impl TransactionView {
         Ok(())
     }
 
-    #[inline]
     fn sanitize_message(&self) -> Result<(), SanitizeError> {
         if usize::from(self.num_required_signatures)
             .saturating_add(usize::from(self.num_readonly_unsigned_accounts))
@@ -496,7 +486,6 @@ impl TransactionView {
     }
 
     /// Returns true if the account at the specified index was loaded as writable
-    #[inline]
     fn is_writable_internal(
         &self,
         key_index: usize,
@@ -512,7 +501,6 @@ impl TransactionView {
 
     /// Returns true if the account at the specified index was requested to be
     /// writable.  This method should not be used directly.
-    #[inline]
     fn is_writable_index(&self, key_index: usize) -> bool {
         let num_account_keys = self.account_keys().len();
         let num_signed_accounts = usize::from(self.num_required_signatures);
@@ -532,13 +520,11 @@ impl TransactionView {
         }
     }
 
-    #[inline]
     fn demote_program_id(&self, i: usize) -> bool {
         self.is_key_called_as_program(i) && !self.is_upgradeable_loader_present()
     }
 
     /// Returns true if the account at the specified index is called as a program by an instruction
-    #[inline]
     fn is_key_called_as_program(&self, key_index: usize) -> bool {
         if let Ok(key_index) = u8::try_from(key_index) {
             self.instructions_iter()
@@ -549,14 +535,12 @@ impl TransactionView {
     }
 
     /// Returns true if any account is the bpf upgradeable loader
-    #[inline]
     fn is_upgradeable_loader_present(&self) -> bool {
         self.account_keys()
             .iter()
             .any(|&key| key == bpf_loader_upgradeable::id())
     }
 
-    #[inline]
     fn loaded_writable_slice(&self) -> &[Pubkey] {
         // let mut offset = usize::from(self.packet_len);
         // read_array::<Pubkey>(
@@ -568,7 +552,6 @@ impl TransactionView {
         &self.loaded_addresses.writable
     }
 
-    #[inline]
     fn loaded_readonly_slice(&self) -> &[Pubkey] {
         // let mut offset = usize::from(self.packet_len)
         //     + usize::from(self.num_loaded_writable_accounts) * core::mem::size_of::<Pubkey>();
@@ -581,7 +564,6 @@ impl TransactionView {
         &self.loaded_addresses.readonly
     }
 
-    #[inline]
     fn num_readonly_accounts(&self) -> usize {
         // let loaded_readonly_addresses = self.num_loaded_readonly_accounts as usize;
         let loaded_readonly_addresses = self.loaded_readonly_slice().len();
@@ -592,7 +574,6 @@ impl TransactionView {
 
     /// Returns true if the account at the specified index is an input to some
     /// program instruction in this message.
-    #[inline]
     fn is_key_passed_to_program(&self, key_index: usize) -> bool {
         if let Ok(key_index) = u8::try_from(key_index) {
             self.instructions_iter()
@@ -604,34 +585,28 @@ impl TransactionView {
 }
 
 impl Message for TransactionView {
-    #[inline]
     fn num_signatures(&self) -> u64 {
         u64::from(self.num_required_signatures)
     }
 
-    #[inline]
     fn num_write_locks(&self) -> u64 {
         self.account_keys()
             .len()
             .saturating_sub(self.num_readonly_accounts()) as u64
     }
 
-    #[inline]
     fn recent_blockhash(&self) -> &Hash {
         TransactionView::recent_blockhash(self)
     }
 
-    #[inline]
     fn num_instructions(&self) -> usize {
         usize::from(self.instructions_len)
     }
 
-    #[inline]
     fn instructions_iter(&self) -> impl Iterator<Item = Instruction> {
         TransactionView::instructions(self)
     }
 
-    #[inline]
     fn program_instructions_iter(
         &self,
     ) -> impl Iterator<Item = (&Pubkey, solana_signed_message::Instruction)> {
@@ -644,7 +619,6 @@ impl Message for TransactionView {
         })
     }
 
-    #[inline]
     fn account_keys(&self) -> AccountKeys {
         AccountKeys::new(
             TransactionView::static_account_keys(self),
@@ -652,12 +626,10 @@ impl Message for TransactionView {
         )
     }
 
-    #[inline]
     fn fee_payer(&self) -> &Pubkey {
         &TransactionView::static_account_keys(self)[0]
     }
 
-    #[inline]
     fn is_writable(&self, key_index: usize) -> bool {
         // Calculate offset into the is_writable cache
         // Load the bit from the cache.
@@ -668,12 +640,10 @@ impl Message for TransactionView {
         (self.is_writable_cache[key_index / 8] & 1 << (key_index % 8)) != 0
     }
 
-    #[inline]
     fn is_signer(&self, i: usize) -> bool {
         i < usize::from(self.num_required_signatures)
     }
 
-    #[inline]
     fn is_invoked(&self, key_index: usize) -> bool {
         if let Ok(key_index) = u8::try_from(key_index) {
             self.instructions_iter()
@@ -683,12 +653,10 @@ impl Message for TransactionView {
         }
     }
 
-    #[inline]
     fn is_non_loader_key(&self, index: usize) -> bool {
         !self.is_invoked(index) || self.is_key_passed_to_program(index)
     }
 
-    #[inline]
     fn has_duplicates(&self) -> bool {
         match self.version {
             TransactionVersion::Legacy => {
@@ -709,34 +677,28 @@ impl Message for TransactionView {
         }
     }
 
-    #[inline]
     fn num_lookup_tables(&self) -> usize {
         usize::from(self.address_lookups_len)
     }
 
-    #[inline]
     fn message_address_table_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup> {
         TransactionView::address_lookups(self)
     }
 }
 
 impl SignedMessage for TransactionView {
-    #[inline]
     fn signature(&self) -> &Signature {
         &TransactionView::signatures(self)[0]
     }
 
-    #[inline]
     fn signatures(&self) -> &[Signature] {
         TransactionView::signatures(self)
     }
 
-    #[inline]
     fn message_hash(&self) -> &Hash {
         &self.message_hash
     }
 
-    #[inline]
     fn is_simple_vote_transaction(&self) -> bool {
         let signatures_count = usize::from(self.num_required_signatures);
         let is_legacy_message = self.version == TransactionVersion::Legacy;
@@ -750,7 +712,6 @@ impl SignedMessage for TransactionView {
                 .unwrap_or(false)
     }
 
-    #[inline]
     fn get_account_locks_unchecked(&self) -> TransactionAccountLocks {
         let account_keys = self.account_keys();
         let num_readonly_accounts = self.num_readonly_accounts();
@@ -772,7 +733,6 @@ impl SignedMessage for TransactionView {
         account_locks
     }
 
-    #[inline]
     fn to_versioned_transaction(&self) -> VersionedTransaction {
         VersionedTransaction {
             signatures: Vec::from(self.signatures()),
@@ -834,7 +794,6 @@ struct InstructionIterator<'a> {
 impl<'a> Iterator for InstructionIterator<'a> {
     type Item = Instruction<'a>;
 
-    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_count >= self.instruction_count {
             return None;
@@ -870,7 +829,6 @@ struct MessageAddressTableLookupIterator<'a> {
 impl<'a> Iterator for MessageAddressTableLookupIterator<'a> {
     type Item = MessageAddressTableLookup<'a>;
 
-    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_count >= self.address_lookup_count {
             return None;

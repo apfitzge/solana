@@ -59,7 +59,6 @@ pub trait Message: Clone + Debug {
     fn is_non_loader_key(&self, index: usize) -> bool;
 
     /// Return signature details.
-    #[inline]
     fn get_signature_details(&self) -> TransactionSignatureDetails {
         let mut transaction_signature_details = TransactionSignatureDetails {
             num_transaction_signatures: self.num_signatures(),
@@ -89,7 +88,6 @@ pub trait Message: Clone + Debug {
     }
 
     /// Return the durable nonce for the message if it exists
-    #[inline]
     fn get_durable_nonce(&self) -> Option<&Pubkey> {
         self.instructions_iter()
             .nth(NONCED_TX_MARKER_IX_INDEX as usize)
@@ -120,7 +118,6 @@ pub trait Message: Clone + Debug {
     }
 
     /// Return the signers for the instruction at the given index.
-    #[inline]
     fn get_ix_signers(&self, index: usize) -> impl Iterator<Item = &Pubkey> {
         self.instructions_iter()
             .nth(index)
@@ -140,7 +137,6 @@ pub trait Message: Clone + Debug {
 
     /// Decompile message instructions without cloning account keys
     /// TODO: Remove this - there's an allocation!
-    #[inline]
     fn decompile_instructions(&self) -> Vec<BorrowedInstruction> {
         let account_keys = self.account_keys();
         self.program_instructions_iter()
@@ -168,7 +164,6 @@ pub trait Message: Clone + Debug {
     }
 
     /// Validate a transaction message against locked accounts
-    #[inline]
     fn validate_account_locks(&self, tx_account_lock_limit: usize) -> Result<(), TransactionError> {
         if self.has_duplicates() {
             Err(TransactionError::AccountLoadedTwice)
@@ -186,7 +181,6 @@ pub trait Message: Clone + Debug {
     fn message_address_table_lookups(&self) -> impl Iterator<Item = MessageAddressTableLookup>;
 
     /// Verify precompiles in the message
-    #[inline]
     fn verify_precompiles(&self, feature_set: &FeatureSet) -> Result<(), TransactionError> {
         let is_enabled = |feature_id: &Pubkey| feature_set.is_active(feature_id);
         let has_precompiles = self
@@ -247,7 +241,6 @@ pub trait SignedMessage: Message {
     fn to_versioned_transaction(&self) -> VersionedTransaction;
 
     // Default implementation is to convert to versioned tx then fill packet
-    #[inline]
     fn to_packet(&self) -> Packet {
         let mut packet = Packet::default();
         let versioned_tx = self.to_versioned_transaction();
