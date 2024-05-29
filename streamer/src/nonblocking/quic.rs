@@ -209,11 +209,12 @@ async fn run_server(
         stats.clone(),
         coalesce,
     ));
+    let mut last_packets_sent_count: usize = 0;
     while !exit.load(Ordering::Relaxed) {
         let timeout_connection = timeout(WAIT_FOR_CONNECTION_TIMEOUT, incoming.accept()).await;
 
         if last_datapoint.elapsed().as_secs() >= 5 {
-            stats.report(name);
+            stats.report(name, &mut last_packets_sent_count);
             last_datapoint = Instant::now();
         }
 
@@ -836,7 +837,7 @@ async fn handle_connection(
                             .saturating_sub(throttle_interval_start.elapsed());
 
                         if !throttle_duration.is_zero() {
-                            debug!("Throttling stream from {remote_addr:?}, peer type: {:?}, total stake: {}, \
+                            error!("Throttling stream from {remote_addr:?}, peer type: {:?}, total stake: {}, \
                                     max_streams_per_interval: {max_streams_per_throttling_interval}, read_interval_streams: {streams_read_in_throttle_interval} \
                                     throttle_duration: {throttle_duration:?}",
                                     params.peer_type, params.total_stake);

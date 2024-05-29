@@ -2,13 +2,9 @@ use {
     crate::{
         bench_tps_client::*,
         cli::{ComputeUnitPrice, Config, InstructionPaddingConfig},
-        log_transaction_service::{
-            create_log_transactions_service_and_sender, SignatureBatchSender, TransactionInfoBatch,
-        },
         perf_utils::{sample_txs, SampleStats},
         send_batch::*,
     },
-    chrono::Utc,
     log::*,
     rand::distributions::{Distribution, Uniform},
     rayon::prelude::*,
@@ -16,7 +12,7 @@ use {
     solana_metrics::{self, datapoint_info},
     solana_sdk::{
         account::Account,
-        clock::{DEFAULT_MS_PER_SLOT, DEFAULT_S_PER_SLOT, MAX_PROCESSING_AGE},
+        clock::DEFAULT_MS_PER_SLOT,
         compute_budget::ComputeBudgetInstruction,
         hash::Hash,
         instruction::{AccountMeta, Instruction},
@@ -25,7 +21,7 @@ use {
         pubkey::Pubkey,
         signature::{Keypair, Signer},
         system_instruction,
-        timing::{duration_as_ms, duration_as_s, duration_as_us, timestamp},
+        timing::{duration_as_ms, duration_as_s, timestamp},
         transaction::Transaction,
     },
     spl_instruction_padding::instruction::wrap_instruction,
@@ -33,16 +29,13 @@ use {
         collections::{HashSet, VecDeque},
         process::exit,
         sync::{
-            atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc, RwLock,
         },
         thread::{sleep, Builder, JoinHandle},
         time::{Duration, Instant},
     },
 };
-
-// The point at which transactions become "too old", in seconds.
-const MAX_TX_QUEUE_AGE: u64 = (MAX_PROCESSING_AGE as f64 * DEFAULT_S_PER_SLOT) as u64;
 
 // Add prioritization fee to transfer transactions, if `compute_unit_price` is set.
 // If `Random` the compute-unit-price is determined by generating a random number in the range
@@ -189,13 +182,6 @@ where
     /// generate transactions to transfer lamports from source to destination accounts
     /// if durable nonce is used, blockhash is None
     fn generate(&mut self, blockhash: Option<&Hash>) -> Vec<TimestampedTransaction> {
-        let tx_count = self.account_chunks.source.len();
-        info!(
-            "Signing transactions... {} (reclaim={}, blockhash={:?})",
-            tx_count, self.reclaim_lamports_back_to_source_account, blockhash
-        );
-        let signing_start = Instant::now();
-
         let source_chunk = &self.account_chunks.source[self.chunk_index];
         let dest_chunk = &self.account_chunks.dest[self.chunk_index];
         let transactions = if let Some(nonce_chunks) = &self.nonce_chunks {
@@ -223,22 +209,6 @@ where
                 self.skip_tx_account_data_size,
             )
         };
-
-        let duration = signing_start.elapsed();
-        let ns = duration.as_secs() * 1_000_000_000 + u64::from(duration.subsec_nanos());
-        let bsps = (tx_count) as f64 / ns as f64;
-        let nsps = ns as f64 / (tx_count) as f64;
-        info!(
-            "Done. {:.2} thousand signatures per second, {:.2} us per signature, {} ms total time, {:?}",
-            bsps * 1_000_000_f64,
-            nsps / 1_000_f64,
-            duration_as_ms(&duration),
-            blockhash,
-        );
-        datapoint_info!(
-            "bench-tps-generate_txs",
-            ("duration", duration_as_us(&duration), i64)
-        );
 
         transactions
     }
@@ -309,16 +279,13 @@ where
 fn generate_chunked_transfers<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
     recent_blockhash: Arc<RwLock<Hash>>,
     shared_txs: &SharedTransactions,
-    shared_tx_active_thread_count: Arc<AtomicIsize>,
     mut chunk_generator: TransactionChunkGenerator<'_, '_, T>,
     threads: usize,
     duration: Duration,
-    sustained: bool,
     use_durable_nonce: bool,
 ) {
     // generate and send transactions for the specified duration
     let start = Instant::now();
-    let mut last_generate_txs_time = Instant::now();
 
     while start.elapsed() < duration {
         generate_txs(
@@ -329,30 +296,9 @@ fn generate_chunked_transfers<T: 'static + BenchTpsClient + Send + Sync + ?Sized
             use_durable_nonce,
         );
 
-        datapoint_info!(
-            "blockhash_stats",
-            (
-                "time_elapsed_since_last_generate_txs",
-                last_generate_txs_time.elapsed().as_millis(),
-                i64
-            )
-        );
-
-        last_generate_txs_time = Instant::now();
-
-        // In sustained mode, overlap the transfers with generation. This has higher average
-        // performance but lower peak performance in tested environments.
-        if sustained {
-            // Ensure that we don't generate more transactions than we can handle.
-            while shared_txs.read().unwrap().len() > 2 * threads {
-                sleep(Duration::from_millis(1));
-            }
-        } else {
-            while !shared_txs.read().unwrap().is_empty()
-                || shared_tx_active_thread_count.load(Ordering::Relaxed) > 0
-            {
-                sleep(Duration::from_millis(1));
-            }
+        // Ensure that we don't generate more transactions than we can handle.
+        while shared_txs.read().unwrap().len() > 2 * threads {
+            sleep(Duration::from_millis(10));
         }
         chunk_generator.advance();
     }
@@ -365,31 +311,26 @@ fn create_sender_threads<T>(
     total_tx_sent_count: &Arc<AtomicUsize>,
     threads: usize,
     exit_signal: Arc<AtomicBool>,
-    shared_tx_active_thread_count: &Arc<AtomicIsize>,
-    signatures_sender: Option<SignatureBatchSender>,
 ) -> Vec<JoinHandle<()>>
 where
     T: 'static + BenchTpsClient + Send + Sync + ?Sized,
 {
     (0..threads)
-        .map(|_| {
+        .map(|i| {
             let exit_signal = exit_signal.clone();
             let shared_txs = shared_txs.clone();
-            let shared_tx_active_thread_count = shared_tx_active_thread_count.clone();
             let total_tx_sent_count = total_tx_sent_count.clone();
             let client = client.clone();
-            let signatures_sender = signatures_sender.clone();
             Builder::new()
                 .name("solana-client-sender".to_string())
                 .spawn(move || {
                     do_tx_transfers(
                         &exit_signal,
                         &shared_txs,
-                        &shared_tx_active_thread_count,
                         &total_tx_sent_count,
                         thread_batch_sleep_ms,
                         &client,
-                        signatures_sender,
+                        i,
                     );
                 })
                 .unwrap()
@@ -412,15 +353,12 @@ where
         thread_batch_sleep_ms,
         duration,
         tx_count,
-        sustained,
         target_slots_per_epoch,
         compute_unit_price,
         skip_tx_account_data_size,
         use_durable_nonce,
         instruction_padding_config,
         num_conflict_groups,
-        block_data_file,
-        transaction_data_file,
         ..
     } = config;
 
@@ -458,7 +396,6 @@ where
     let shared_txs: SharedTransactions = Arc::new(RwLock::new(VecDeque::new()));
 
     let blockhash = Arc::new(RwLock::new(get_latest_blockhash(client.as_ref())));
-    let shared_tx_active_thread_count = Arc::new(AtomicIsize::new(0));
     let total_tx_sent_count = Arc::new(AtomicUsize::new(0));
 
     // if we use durable nonce, we don't need blockhash thread
@@ -466,24 +403,17 @@ where
         let exit_signal = exit_signal.clone();
         let blockhash = blockhash.clone();
         let client = client.clone();
-        let id = id.pubkey();
         Some(
             Builder::new()
                 .name("solana-blockhash-poller".to_string())
                 .spawn(move || {
-                    poll_blockhash(&exit_signal, &blockhash, &client, &id);
+                    poll_blockhash(&exit_signal, &blockhash, &client);
                 })
                 .unwrap(),
         )
     } else {
         None
     };
-
-    let (log_transaction_service, signatures_sender) = create_log_transactions_service_and_sender(
-        &client,
-        block_data_file.as_deref(),
-        transaction_data_file.as_deref(),
-    );
 
     let sender_threads = create_sender_threads(
         &client,
@@ -492,8 +422,6 @@ where
         &total_tx_sent_count,
         threads,
         exit_signal.clone(),
-        &shared_tx_active_thread_count,
-        signatures_sender,
     );
 
     wait_for_target_slots_per_epoch(target_slots_per_epoch, &client);
@@ -503,11 +431,9 @@ where
     generate_chunked_transfers(
         blockhash,
         &shared_txs,
-        shared_tx_active_thread_count,
         chunk_generator,
         threads,
         duration,
-        sustained,
         use_durable_nonce,
     );
 
@@ -530,13 +456,6 @@ where
     if let Some(blockhash_thread) = blockhash_thread {
         info!("Waiting for blockhash thread...");
         if let Err(err) = blockhash_thread.join() {
-            info!("  join() failed with: {:?}", err);
-        }
-    }
-
-    if let Some(log_transaction_service) = log_transaction_service {
-        info!("Waiting for log_transaction_service thread...");
-        if let Err(err) = log_transaction_service.join() {
             info!("  join() failed with: {:?}", err);
         }
     }
@@ -855,12 +774,18 @@ fn generate_txs<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
     threads: usize,
     use_durable_nonce: bool,
 ) {
+    let generate_start = Instant::now();
     let transactions = if use_durable_nonce {
         chunk_generator.generate(None)
     } else {
         let blockhash = blockhash.read().map(|x| *x).ok();
         chunk_generator.generate(blockhash.as_ref())
     };
+    info!(
+        "Tx generation done. {} ms {} tps",
+        duration_as_ms(&generate_start.elapsed()),
+        transactions.len() as f32 / duration_as_s(&generate_start.elapsed()),
+    );
 
     let sz = transactions.len() / threads;
     let chunks: Vec<_> = transactions.chunks(sz).collect();
@@ -895,63 +820,43 @@ fn poll_blockhash<T: BenchTpsClient + ?Sized>(
     exit_signal: &AtomicBool,
     blockhash: &Arc<RwLock<Hash>>,
     client: &Arc<T>,
-    id: &Pubkey,
 ) {
     let mut blockhash_last_updated = Instant::now();
     let mut last_error_log = Instant::now();
     loop {
-        let blockhash_updated = {
-            let old_blockhash = *blockhash.read().unwrap();
-            if let Some(new_blockhash) = get_new_latest_blockhash(client, &old_blockhash) {
-                *blockhash.write().unwrap() = new_blockhash;
-                blockhash_last_updated = Instant::now();
-                true
-            } else {
-                if blockhash_last_updated.elapsed().as_secs() > 120 {
-                    eprintln!("Blockhash is stuck");
-                    exit(1)
-                } else if blockhash_last_updated.elapsed().as_secs() > 30
-                    && last_error_log.elapsed().as_secs() >= 1
-                {
-                    last_error_log = Instant::now();
-                    error!("Blockhash is not updating");
-                }
-                false
+        let old_blockhash = *blockhash.read().unwrap();
+        if let Some(new_blockhash) = get_new_latest_blockhash(client, &old_blockhash) {
+            *blockhash.write().unwrap() = new_blockhash;
+            blockhash_last_updated = Instant::now();
+        } else {
+            if blockhash_last_updated.elapsed().as_secs() > 120 {
+                eprintln!("Blockhash is stuck");
+                exit(1)
+            } else if blockhash_last_updated.elapsed().as_secs() > 30
+                && last_error_log.elapsed().as_secs() >= 1
+            {
+                last_error_log = Instant::now();
+                error!("Blockhash is not updating");
             }
-        };
-
-        if blockhash_updated {
-            let balance = client.get_balance(id).unwrap_or(0);
-            metrics_submit_lamport_balance(balance);
-            datapoint_info!(
-                "blockhash_stats",
-                (
-                    "time_elapsed_since_last_blockhash_update",
-                    blockhash_last_updated.elapsed().as_millis(),
-                    i64
-                )
-            )
         }
 
         if exit_signal.load(Ordering::Relaxed) {
             break;
         }
 
-        sleep(Duration::from_millis(50));
+        sleep(Duration::from_millis(1000));
     }
 }
 
 fn do_tx_transfers<T: BenchTpsClient + ?Sized>(
     exit_signal: &AtomicBool,
     shared_txs: &SharedTransactions,
-    shared_tx_thread_count: &Arc<AtomicIsize>,
     total_tx_sent_count: &Arc<AtomicUsize>,
     thread_batch_sleep_ms: usize,
     client: &Arc<T>,
-    signatures_sender: Option<SignatureBatchSender>,
+    thread_id: usize,
 ) {
-    let mut last_sent_time = timestamp();
-    'thread_loop: loop {
+    loop {
         if thread_batch_sleep_ms > 0 {
             sleep(Duration::from_millis(thread_batch_sleep_ms as u64));
         }
@@ -960,83 +865,33 @@ fn do_tx_transfers<T: BenchTpsClient + ?Sized>(
             shared_txs_wl.pop_front()
         };
         if let Some(txs) = txs {
-            shared_tx_thread_count.fetch_add(1, Ordering::Relaxed);
             let num_txs = txs.len();
-            info!("Transferring 1 unit {} times...", num_txs);
             let transfer_start = Instant::now();
-            let mut old_transactions = false;
-            let mut min_timestamp = u64::MAX;
             let mut transactions = Vec::<_>::with_capacity(num_txs);
-            let mut signatures = Vec::<_>::with_capacity(num_txs);
-            let mut compute_unit_prices = Vec::<_>::with_capacity(num_txs);
             for tx in txs {
-                let now = timestamp();
-                // Transactions without durable nonce that are too old will be rejected by the cluster Don't bother
-                // sending them.
-                if let Some(tx_timestamp) = tx.timestamp {
-                    if tx_timestamp < min_timestamp {
-                        min_timestamp = tx_timestamp;
-                    }
-                    if now > tx_timestamp && now - tx_timestamp > 1000 * MAX_TX_QUEUE_AGE {
-                        old_transactions = true;
-                        continue;
-                    }
-                }
-                signatures.push(tx.transaction.signatures[0]);
                 transactions.push(tx.transaction);
-                compute_unit_prices.push(tx.compute_unit_price);
             }
 
-            if min_timestamp != u64::MAX {
-                datapoint_info!(
-                    "bench-tps-do_tx_transfers",
-                    ("oldest-blockhash-age", timestamp() - min_timestamp, i64),
-                );
+            let result = if thread_id & 1 == 1 {
+                client.send_batch(transactions)
+            } else {
+                client.send_batch_2(transactions)
+            };
+
+            if let Err(error) = result {
+                warn!("{thread_id} send_batch_sync in do_tx_transfers failed: {}", error);
             }
 
-            if let Some(signatures_sender) = &signatures_sender {
-                if let Err(error) = signatures_sender.send(TransactionInfoBatch {
-                    signatures,
-                    sent_at: Utc::now(),
-                    compute_unit_prices,
-                }) {
-                    error!("Receiver has been dropped with error `{error}`, stop sending transactions.");
-                    break 'thread_loop;
-                }
-            }
-
-            if let Err(error) = client.send_batch(transactions) {
-                warn!("send_batch_sync in do_tx_transfers failed: {}", error);
-            }
-
-            datapoint_info!(
-                "bench-tps-do_tx_transfers",
-                (
-                    "time-elapsed-since-last-send",
-                    timestamp() - last_sent_time,
-                    i64
-                ),
-            );
-
-            last_sent_time = timestamp();
-
-            if old_transactions {
-                let mut shared_txs_wl = shared_txs.write().expect("write lock in do_tx_transfers");
-                shared_txs_wl.clear();
-            }
-            shared_tx_thread_count.fetch_add(-1, Ordering::Relaxed);
             total_tx_sent_count.fetch_add(num_txs, Ordering::Relaxed);
             info!(
-                "Tx send done. {} ms {} tps",
+                "{thread_id} Tx send done. {} ms {} tps",
                 duration_as_ms(&transfer_start.elapsed()),
                 num_txs as f32 / duration_as_s(&transfer_start.elapsed()),
             );
-            datapoint_info!(
-                "bench-tps-do_tx_transfers",
-                ("duration", duration_as_us(&transfer_start.elapsed()), i64),
-                ("count", num_txs, i64)
-            );
+        } else {
+            warn!("{thread_id} has no transactions to send");
         }
+
         if exit_signal.load(Ordering::Relaxed) {
             break;
         }
@@ -1092,12 +947,12 @@ fn compute_and_report_stats(
 
     let total_tx_send_count = total_tx_send_count as u64;
     let drop_rate = if total_tx_send_count > max_tx_count {
-        (total_tx_send_count - max_tx_count) as f64 / total_tx_send_count as f64
+        (total_tx_send_count - max_tx_count) as f64 / total_tx_send_count as f64 * 100.0
     } else {
         0.0
     };
     info!(
-        "\nHighest TPS: {:.2} sampling period {}s max transactions: {} clients: {} drop rate: {:.2}",
+        "\nHighest TPS: {:.1} sampling period {}s max transactions: {} clients: {} drop rate: {:.1}%",
         max_of_maxes,
         sample_period,
         max_tx_count,
@@ -1105,7 +960,11 @@ fn compute_and_report_stats(
         drop_rate,
     );
     info!(
-        "\tAverage TPS: {}",
+        "\tAverage TPS Sent: {}",
+        total_tx_send_count as f32 / duration_as_s(tx_send_elapsed)
+    );
+    info!(
+        "\tAverage TPS Landed: {}",
         max_tx_count as f32 / duration_as_s(tx_send_elapsed)
     );
 }

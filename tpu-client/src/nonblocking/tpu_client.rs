@@ -56,6 +56,11 @@ use {
     solana_sdk::{message::Message, signers::Signers, transaction::TransactionError},
 };
 
+const LOCAL_HOST_TPU_PORT: u16 = 8009;
+const LOCAL_HOST_TPU_FWD_PORT: u16 = 8010;
+const LOCAL_HOST_TPU: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), LOCAL_HOST_TPU_PORT);
+const LOCAL_HOST_TPU_FWD: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), LOCAL_HOST_TPU_FWD_PORT);
+
 #[derive(Error, Debug)]
 pub enum TpuSenderError {
     #[error("Pubsub error: {0:?}")]
@@ -452,20 +457,48 @@ where
         &self,
         wire_transactions: Vec<Vec<u8>>,
     ) -> TransportResult<()> {
-        let leaders = self
-            .leader_tpu_service
-            .leader_tpu_sockets(self.fanout_slots);
-        let futures = leaders
-            .iter()
-            .map(|addr| {
-                send_wire_transaction_batch_to_addr(
-                    &self.connection_cache,
-                    addr,
-                    &wire_transactions,
-                )
+        let futures = send_wire_transaction_batch_to_addr(
+                &self.connection_cache,
+                &LOCAL_HOST_TPU,
+                &wire_transactions,
+            );
+        let results: Vec<TransportResult<()>> = join_all(vec![futures]).await;
+
+        let mut last_error: Option<TransportError> = None;
+        let mut some_success = false;
+        for result in results {
+            if let Err(e) = result {
+                if last_error.is_none() {
+                    last_error = Some(e);
+                }
+            } else {
+                some_success = true;
+            }
+        }
+        if !some_success {
+            Err(if let Some(err) = last_error {
+                err
+            } else {
+                std::io::Error::new(std::io::ErrorKind::Other, "No sends attempted").into()
             })
-            .collect::<Vec<_>>();
-        let results: Vec<TransportResult<()>> = join_all(futures).await;
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Send a batch of wire transactions to the current and upcoming leader TPUs according to
+    /// fanout size
+    /// Returns the last error if all sends fail
+    pub async fn try_send_wire_transaction_batch_2(
+        &self,
+        wire_transactions: Vec<Vec<u8>>,
+    ) -> TransportResult<()> {
+        let futures = send_wire_transaction_batch_to_addr(
+                &self.connection_cache,
+                &LOCAL_HOST_TPU_FWD,
+                &wire_transactions,
+            );
+        let results: Vec<TransportResult<()>> = join_all(vec![futures]).await;
 
         let mut last_error: Option<TransportError> = None;
         let mut some_success = false;

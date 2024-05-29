@@ -24,6 +24,9 @@ impl BenchTpsClient for BankClient {
     fn send_batch(&self, transactions: Vec<Transaction>) -> Result<()> {
         AsyncClient::async_send_batch(self, transactions).map_err(|err| err.into())
     }
+    fn send_batch_2(&self, transactions: Vec<Transaction>) -> Result<()> {
+        AsyncClient::async_send_batch(self, transactions).map_err(|err| err.into())
+    }
     fn get_latest_blockhash(&self) -> Result<Hash> {
         SyncClient::get_latest_blockhash(self).map_err(|err| err.into())
     }

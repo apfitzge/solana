@@ -23,9 +23,12 @@ args=("$@")
 default_arg --url "http://127.0.0.1:8899"
 default_arg --entrypoint "127.0.0.1:8001"
 default_arg --faucet "127.0.0.1:9900"
-default_arg --duration 90
-default_arg --tx-count 50000
+default_arg --duration 30
+default_arg --tx-count 10000
 default_arg --thread-batch-sleep-ms 0
+default_arg --commitment-config processed
+default_arg --tpu-connection-pool-size 1
+default_arg --threads 4
 default_arg --bind-address "127.0.0.1"
 default_arg --client-node-id "${SOLANA_CONFIG_DIR}/bootstrap-validator/identity.json"
 

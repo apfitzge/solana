@@ -21,6 +21,12 @@ impl BenchTpsClient for RpcClient {
         }
         Ok(())
     }
+    fn send_batch_2(&self, transactions: Vec<Transaction>) -> Result<()> {
+        for transaction in transactions {
+            BenchTpsClient::send_transaction(self, transaction)?;
+        }
+        Ok(())
+    }
     fn get_latest_blockhash(&self) -> Result<Hash> {
         RpcClient::get_latest_blockhash(self).map_err(|err| err.into())
     }

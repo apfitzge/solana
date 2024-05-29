@@ -28,6 +28,10 @@ where
         self.try_send_transaction_batch(&transactions)?;
         Ok(())
     }
+    fn send_batch_2(&self, transactions: Vec<Transaction>) -> Result<()> {
+        self.try_send_transaction_batch_2(&transactions)?;
+        Ok(())
+    }
     fn get_latest_blockhash(&self) -> Result<Hash> {
         self.rpc_client()
             .get_latest_blockhash()

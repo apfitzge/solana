@@ -183,13 +183,17 @@ pub struct StreamStats {
 }
 
 impl StreamStats {
-    pub fn report(&self, name: &'static str) {
+    pub fn report(&self, name: &'static str, last_packets_sent_count: &mut usize) {
         let process_sampled_packets_us_hist = {
             let mut metrics = self.process_sampled_packets_us_hist.lock().unwrap();
             let process_sampled_packets_us_hist = metrics.clone();
             metrics.clear();
             process_sampled_packets_us_hist
         };
+
+        let downstream_tps = (self.total_packets_sent_to_consumer.load(Ordering::Relaxed) - *last_packets_sent_count) / 5;
+        *last_packets_sent_count = self.total_packets_sent_to_consumer.load(Ordering::Relaxed);
+        warn!("{}: sent {:?} TPS downstream", name, downstream_tps);
 
         datapoint_info!(
             name,

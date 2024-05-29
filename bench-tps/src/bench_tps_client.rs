@@ -35,6 +35,9 @@ pub trait BenchTpsClient {
     /// Send a batch of signed transactions without confirmation.
     fn send_batch(&self, transactions: Vec<Transaction>) -> Result<()>;
 
+    /// Send a batch of signed transactions without confirmation.
+    fn send_batch_2(&self, transactions: Vec<Transaction>) -> Result<()>;
+
     /// Get latest blockhash
     fn get_latest_blockhash(&self) -> Result<Hash>;
 

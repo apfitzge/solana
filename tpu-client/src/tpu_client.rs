@@ -109,6 +109,20 @@ where
         )
     }
 
+    /// Serialize and send a batch of transactions to the current and upcoming leader TPUs according
+    /// to fanout size
+    /// Returns the last error if all sends fail
+    pub fn try_send_transaction_batch_2(&self, transactions: &[Transaction]) -> TransportResult<()> {
+        let wire_transactions = transactions
+            .into_par_iter()
+            .map(|tx| bincode::serialize(&tx).expect("serialize Transaction in send_batch"))
+            .collect::<Vec<_>>();
+        self.invoke(
+            self.tpu_client
+                .try_send_wire_transaction_batch_2(wire_transactions),
+        )
+    }
+
     /// Send a wire transaction to the current and upcoming leader TPUs according to fanout size
     /// Returns the last error if all sends fail
     pub fn try_send_wire_transaction(&self, wire_transaction: Vec<u8>) -> TransportResult<()> {
