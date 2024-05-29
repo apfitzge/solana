@@ -212,10 +212,13 @@ pub(crate) struct ConsumeWorkerMetrics {
 impl ConsumeWorkerMetrics {
     /// Report and reset metrics iff the interval has elapsed and the worker did some work.
     pub fn maybe_report_and_reset(&self) {
-        const REPORT_INTERVAL_MS: u64 = 1000;
+        const REPORT_INTERVAL_MS: u64 = 5000;
         if self.interval.should_update(REPORT_INTERVAL_MS)
             && self.has_data.swap(false, Ordering::Relaxed)
         {
+            let tps = self.count_metrics.transactions_attempted_execution_count.swap(0, Ordering::Relaxed) / 5;
+            let stps = self.count_metrics.executed_with_successful_result_count.swap(0, Ordering::Relaxed) / 5;
+            warn!("Bank Worker {}: TPS: {} STPS: {}", self.id, tps, stps);
             self.count_metrics.report_and_reset(&self.id);
             self.timing_metrics.report_and_reset(&self.id);
             self.error_metrics.report_and_reset(&self.id);

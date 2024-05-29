@@ -85,7 +85,7 @@ pub struct SchedulerCountMetricsInner {
 
 impl IntervalSchedulerCountMetrics {
     fn maybe_report_and_reset(&mut self, should_report: bool) {
-        const REPORT_INTERVAL_MS: u64 = 1000;
+        const REPORT_INTERVAL_MS: u64 = 5000;
         if self.interval.should_update(REPORT_INTERVAL_MS) {
             if should_report {
                 self.metrics.report("banking_stage_scheduler_counts", None);
@@ -111,6 +111,26 @@ impl SlotSchedulerCountMetrics {
 
 impl SchedulerCountMetricsInner {
     fn report(&self, name: &'static str, slot: Option<Slot>) {
+        if slot.is_none() && self.num_received > 0 {
+            let rps = self.num_received / 5;
+            let sps = self.num_scheduled / 5;
+            let fps = self.num_finished / 5;
+            warn!("{name}: rcv {rps} send {sps} finished {fps}\n
+                {}
+                scheduler filtered {}
+                {} {}
+                dropped due to capacity {}
+                {} {}
+                rcv tx checks (age?) {}
+                {} {} {}",
+                self.num_unschedulable,
+                self.num_schedule_filtered_out,
+                self.num_forwarded, self.num_dropped_on_receive,
+                self.num_dropped_on_capacity,
+                self.num_dropped_on_age_and_status, self.num_dropped_on_clear,
+                self.num_dropped_on_receive_transaction_checks,
+                self.num_dropped_on_sanitization, self.num_retryable, self.num_buffered);
+        }
         let mut datapoint = create_datapoint!(
             @point name,
             ("num_received", self.num_received, i64),

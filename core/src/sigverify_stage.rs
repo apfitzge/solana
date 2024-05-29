@@ -33,7 +33,7 @@ use {
 const MAX_DEDUP_BATCH: usize = 165_000;
 
 // 50ms/(10us/packet) = 5000 packets
-const MAX_SIGVERIFY_BATCH: usize = 5_000;
+const MAX_SIGVERIFY_BATCH: usize = 100_000;
 
 // Packet batch shrinker will reorganize packets into compacted batches if 10%
 // or more of the packets in a group of packet batches have been discarded.
@@ -101,6 +101,12 @@ impl SigVerifierStats {
         if self.total_batches == 0 {
             return;
         }
+
+        let upstream_tps = self.total_packets / 5;
+        let downstream_tps = self.total_valid_packets / 5;
+        warn!("{}: {} upstream_tps, {} downstream_tps \n {}, {}, {}",
+            name, upstream_tps, downstream_tps,
+            self.total_discard_random, self.total_dedup, self.total_excess_fail);
 
         datapoint_info!(
             name,
@@ -447,7 +453,7 @@ impl SigVerifyStage {
                             _ => error!("{:?}", e),
                         }
                     }
-                    if last_print.elapsed().as_secs() > 2 {
+                    if last_print.elapsed().as_secs() > 4 {
                         stats.maybe_report(metrics_name);
                         stats = SigVerifierStats::default();
                         last_print = Instant::now();
