@@ -89,6 +89,15 @@ macro_rules! measure_us {
     }};
 }
 
+#[macro_export]
+macro_rules! measure_ns {
+    ($val:expr) => {{
+        let start = std::time::Instant::now();
+        let result = $val;
+        (result, solana_sdk::timing::duration_as_ns(&start.elapsed()))
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use std::{thread::sleep, time::Duration};

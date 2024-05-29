@@ -27,7 +27,7 @@ use {
     itertools::Itertools,
     solana_cost_model::cost_model::CostModel,
     solana_fee::FeeBudgetLimits,
-    solana_measure::measure_us,
+    solana_measure::{measure_ns, measure_us},
     solana_perf::packet::PACKETS_PER_BATCH,
     solana_program_runtime::compute_budget_processor::process_compute_budget_instructions,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
@@ -286,74 +286,74 @@ impl TransactionViewReceiveAndBuffer {
         // let mut lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
         let mut error_counts = TransactionErrorMetrics::default();
 
-        let mut max_per_packet_time_us = 0;
-        let mut total_reserve_key_us = 0;
-        let mut total_populate_from_time_us = 0;
-        let mut total_sanitize_time_us = 0;
-        let mut total_validate_account_locks_us = 0;
-        let mut total_resolve_addresses_us = 0;
-        let mut total_verify_precompiles_us = 0;
-        let mut total_process_compute_budget_instructions_us = 0;
-        let mut total_calculate_priority_and_cost_us = 0;
-        let mut total_push_priority_queue_us = 0;
+        let mut max_per_packet_time_ns = 0;
+        let mut total_reserve_key_ns = 0;
+        let mut total_populate_from_time_ns = 0;
+        let mut total_sanitize_time_ns = 0;
+        let mut total_validate_account_locks_ns = 0;
+        let mut total_resolve_addresses_ns = 0;
+        let mut total_verify_precompiles_ns = 0;
+        let mut total_process_compute_budget_instructions_ns = 0;
+        let mut total_calculate_priority_and_cost_ns = 0;
+        let mut total_push_priority_queue_ns = 0;
         let mut num_dropped = 0;
 
-        let mut total_inner_loop_us = 0;
-        let mut total_with_us = 0;
-        let mut total_inner_with_us = 0;
-        let (_, outer_loop_us) = measure_us!({
+        let mut total_inner_loop_ns = 0;
+        let mut total_with_ns = 0;
+        let mut total_inner_with_ns = 0;
+        let (_, outer_loop_ns) = measure_ns!({
             for batch in &message.0 {
                 total_packet_count += batch.len();
-                let (_, inner_loop_us) = measure_us!({
+                let (_, inner_loop_ns) = measure_ns!({
                     for packet in batch {
-                        let (_, us) = measure_us!({
+                        let (_, ns) = measure_ns!({
                             // Get free id
-                            let (transaction_id, us) = measure_us!(container.reserve_key());
-                            total_reserve_key_us += us;
+                            let (transaction_id, ns) = measure_ns!(container.reserve_key());
+                            total_reserve_key_ns += ns;
 
                             // Run sanitization and checks
-                            let (maybe_priority_id, with_us) = measure_us!(container
+                            let (maybe_priority_id, with_ns) = measure_ns!(container
                                 .with_mut_transaction_state(&transaction_id, |state| {
-                                    let (maybe_priority_id, with_inner_us) = measure_us!({
+                                    let (maybe_priority_id, with_inner_ns) = measure_ns!({
                                         let transaction =
                                             &mut state.mut_transaction_ttl().transaction;
 
-                                        let (_, us) =
-                                            measure_us!(transaction.populate_from(packet)?);
-                                        total_populate_from_time_us += us;
+                                        let (_, ns) =
+                                            measure_ns!(transaction.populate_from(packet)?);
+                                        total_populate_from_time_ns += ns;
 
-                                        let (_, us) = measure_us!(transaction.sanitize().ok()?);
-                                        total_sanitize_time_us += us;
+                                        let (_, ns) = measure_ns!(transaction.sanitize().ok()?);
+                                        total_sanitize_time_ns += ns;
 
-                                        let (_, us) = measure_us!(transaction
+                                        let (_, ns) = measure_ns!(transaction
                                             .validate_account_locks(transaction_account_lock_limit)
                                             .ok()?);
-                                        total_validate_account_locks_us += us;
+                                        total_validate_account_locks_ns += ns;
 
-                                        let (_, us) = measure_us!(transaction
+                                        let (_, ns) = measure_ns!(transaction
                                             .resolve_addresses(&bank)
                                             .ok()?);
-                                        total_resolve_addresses_us += us;
+                                        total_resolve_addresses_ns += ns;
 
-                                        let (_, us) = measure_us!(transaction
+                                        let (_, ns) = measure_ns!(transaction
                                             .verify_precompiles(feature_set)
                                             .ok()?);
-                                        total_verify_precompiles_us += us;
+                                        total_verify_precompiles_ns += ns;
 
-                                        let (compute_budget_limits, us) =
-                                            measure_us!(process_compute_budget_instructions(
+                                        let (compute_budget_limits, ns) =
+                                            measure_ns!(process_compute_budget_instructions(
                                                 transaction.program_instructions_iter(),
                                             )
                                             .ok()?);
-                                        total_process_compute_budget_instructions_us += us;
+                                        total_process_compute_budget_instructions_ns += ns;
 
-                                        let ((priority, cost), us) =
-                                            measure_us!(calculate_priority_and_cost(
+                                        let ((priority, cost), ns) =
+                                            measure_ns!(calculate_priority_and_cost(
                                                 transaction,
                                                 &compute_budget_limits.into(),
                                                 &bank,
                                             ));
-                                        total_calculate_priority_and_cost_us += us;
+                                        total_calculate_priority_and_cost_ns += ns;
 
                                         state.set_priority(priority);
                                         state.set_cost(cost);
@@ -364,30 +364,30 @@ impl TransactionViewReceiveAndBuffer {
 
                                         Some(TransactionPriorityId::new(priority, transaction_id))
                                     });
-                                    total_inner_with_us += with_inner_us;
+                                    total_inner_with_ns += with_inner_ns;
                                     maybe_priority_id
                                 })
                                 .expect("transaction must exist"));
-                            total_with_us += with_us;
+                            total_with_ns += with_ns;
                             let Some(priority_id) = maybe_priority_id else {
                                 num_dropped += 1;
                                 container.remove_by_id(&transaction_id);
                                 continue;
                             };
 
-                            let (a_tx_was_dropped, us) =
-                                measure_us!(container.push_id_into_queue(priority_id));
-                            total_push_priority_queue_us += us;
+                            let (a_tx_was_dropped, ns) =
+                                measure_ns!(container.push_id_into_queue(priority_id));
+                            total_push_priority_queue_ns += ns;
 
                             if a_tx_was_dropped {
                                 saturating_add_assign!(num_dropped_on_capacity, 1);
                             }
                             saturating_add_assign!(num_buffered, 1);
                         });
-                        max_per_packet_time_us = max_per_packet_time_us.max(us);
+                        max_per_packet_time_ns = max_per_packet_time_ns.max(ns);
                     }
                 });
-                total_inner_loop_us += inner_loop_us;
+                total_inner_loop_ns += inner_loop_ns;
                 // for batch in batch.into_iter().chunks(PACKETS_PER_BATCH).into_iter() {
                 //     let valid_packet_references: ArrayVec<&Packet, PACKETS_PER_BATCH> =
                 //         ArrayVec::from_iter(batch.filter(|p| !p.meta().discard()));
@@ -515,39 +515,39 @@ impl TransactionViewReceiveAndBuffer {
             // );
         });
 
-        let (_, drop_message_us) = measure_us!({ drop(message) });
+        let (_, drop_message_ns) = measure_ns!({ drop(message) });
         if std::thread::current().name().unwrap() == "solBnkTxSched" {
             datapoint_info!(
                 "txview_receive_and_buffer_details",
                 ("num_buffered", num_buffered, i64),
-                ("reserve_key_us", total_reserve_key_us, i64),
-                ("populate_from_time_us", total_populate_from_time_us, i64),
-                ("sanitize_time_us", total_sanitize_time_us, i64),
+                ("reserve_key_ns", total_reserve_key_ns, i64),
+                ("populate_from_time_ns", total_populate_from_time_ns, i64),
+                ("sanitize_time_ns", total_sanitize_time_ns, i64),
                 (
-                    "validate_account_locks_us",
-                    total_validate_account_locks_us,
+                    "validate_account_locks_ns",
+                    total_validate_account_locks_ns,
                     i64
                 ),
-                ("resolve_addresses_us", total_resolve_addresses_us, i64),
-                ("verify_precompiles_us", total_verify_precompiles_us, i64),
+                ("resolve_addresses_ns", total_resolve_addresses_ns, i64),
+                ("verify_precompiles_ns", total_verify_precompiles_ns, i64),
                 (
-                    "process_compute_budget_instructions_us",
-                    total_process_compute_budget_instructions_us,
+                    "process_compute_budget_instructions_ns",
+                    total_process_compute_budget_instructions_ns,
                     i64
                 ),
                 (
-                    "calculate_priority_and_cost_us",
-                    total_calculate_priority_and_cost_us,
+                    "calculate_priority_and_cost_ns",
+                    total_calculate_priority_and_cost_ns,
                     i64
                 ),
-                ("push_priority_queue_us", total_push_priority_queue_us, i64),
-                ("max_per_packet_time_us", max_per_packet_time_us, i64),
+                ("push_priority_queue_ns", total_push_priority_queue_ns, i64),
+                ("max_per_packet_time_ns", max_per_packet_time_ns, i64),
                 ("num_dropped", num_dropped, i64),
-                ("outer_loop_us", outer_loop_us, i64),
-                ("inner_loop_us", total_inner_loop_us, i64),
-                ("drop_message_us", drop_message_us, i64),
-                ("with_us", total_with_us, i64),
-                ("inner_with_us", total_inner_with_us, i64),
+                ("outer_loop_ns", outer_loop_ns, i64),
+                ("inner_loop_ns", total_inner_loop_ns, i64),
+                ("drop_message_ns", drop_message_ns, i64),
+                ("with_ns", total_with_ns, i64),
+                ("inner_with_ns", total_inner_with_ns, i64),
             );
         }
     }
