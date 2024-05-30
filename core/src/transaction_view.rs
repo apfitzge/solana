@@ -101,7 +101,7 @@ pub struct TransactionView {
     // /// Cache of whether accounts are writable or not.
     // /// Implied length of 256 bits (32 bytes).
     // is_writable_offset: u16,
-    is_writable_cache: [u8; 32],
+    is_writable_cache: [bool; 256],
 
     /// Message hash.
     message_hash: Hash,
@@ -131,7 +131,7 @@ impl Default for TransactionView {
                 writable: vec![],
                 readonly: vec![],
             },
-            is_writable_cache: [0; 32],
+            is_writable_cache: [false; 256],
             message_hash: Hash::default(),
         }
     }
@@ -372,17 +372,14 @@ impl TransactionView {
 
         // Loop through all accounts to check if they are writable.
         // Default to all readable.
-        let mut is_writable_array = [0u8; 32];
         let account_keys = self.account_keys();
+        let mut is_writable_cache = [false; 256];
         let reserved_account_keys = bank.get_reserved_account_keys();
         for (index, _account) in account_keys.iter().enumerate() {
-            if self.is_writable_internal(index, reserved_account_keys) {
-                is_writable_array[index / 8] |= 1 << (index % 8);
-            }
+            is_writable_cache[index] = self.is_writable_internal(index, reserved_account_keys);
         }
         // self.buffer[offset..offset + 32].copy_from_slice(&is_writable_array);
-        self.is_writable_cache = is_writable_array;
-
+        self.is_writable_cache = is_writable_cache;
         Ok(())
     }
 
@@ -630,6 +627,7 @@ impl Message for TransactionView {
         &TransactionView::static_account_keys(self)[0]
     }
 
+    #[inline]
     fn is_writable(&self, key_index: usize) -> bool {
         // Calculate offset into the is_writable cache
         // Load the bit from the cache.
@@ -637,7 +635,7 @@ impl Message for TransactionView {
 
         // self.buffer[usize::from(self.is_writable_offset) + key_index / 8] & (1 << (key_index % 8))
         //     != 0
-        (self.is_writable_cache[key_index / 8] & 1 << (key_index % 8)) != 0
+        self.is_writable_cache[key_index]
     }
 
     fn is_signer(&self, i: usize) -> bool {
