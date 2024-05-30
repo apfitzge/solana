@@ -25,7 +25,7 @@ use {
     core::time::Duration,
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
     itertools::Itertools,
-    solana_cost_model::cost_model::CostModel,
+    solana_cost_model::{cost_model::CostModel, instruction_details::InstructionDetails},
     solana_fee::FeeBudgetLimits,
     solana_measure::{measure_ns, measure_us},
     solana_perf::packet::PACKETS_PER_BATCH,
@@ -155,7 +155,7 @@ impl SimpleReceiveAndBuffer {
 
             let mut arc_packets = Vec::with_capacity(chunk.len());
             let mut transactions = Vec::with_capacity(chunk.len());
-            let mut fee_budget_limits_vec = Vec::with_capacity(chunk.len());
+            let mut instruction_details_vec = Vec::with_capacity(chunk.len());
 
             chunk
                 .iter()
@@ -175,14 +175,14 @@ impl SimpleReceiveAndBuffer {
                         .is_ok()
                 })
                 .filter_map(|(packet, tx)| {
-                    process_compute_budget_instructions(tx.program_instructions_iter())
-                        .map(|compute_budget| (packet, tx, compute_budget.into()))
+                    InstructionDetails::new(&tx)
+                        .map(|instruction_details| (packet, tx, instruction_details))
                         .ok()
                 })
-                .for_each(|(packet, tx, fee_budget_limits)| {
+                .for_each(|(packet, tx, instruction_details)| {
                     arc_packets.push(packet);
                     transactions.push(tx);
-                    fee_budget_limits_vec.push(fee_budget_limits);
+                    instruction_details_vec.push(instruction_details);
                 });
 
             let check_results = bank.check_transactions(
@@ -196,17 +196,17 @@ impl SimpleReceiveAndBuffer {
             let mut post_transaction_check_count: usize = 0;
             let mut num_dropped_on_capacity: usize = 0;
             let mut num_buffered: usize = 0;
-            for (((packet, transaction), fee_budget_limits), _) in arc_packets
+            for (((packet, transaction), instruction_details), _) in arc_packets
                 .into_iter()
                 .zip(transactions)
-                .zip(fee_budget_limits_vec)
+                .zip(instruction_details_vec)
                 .zip(check_results)
                 .filter(|(_, check_result)| check_result.0.is_ok())
             {
                 saturating_add_assign!(post_transaction_check_count, 1);
 
                 let (priority, cost) =
-                    calculate_priority_and_cost(&transaction, &fee_budget_limits, &bank);
+                    calculate_priority_and_cost(&transaction, &instruction_details, &bank);
                 let transaction_ttl = SanitizedTransactionTTL {
                     transaction,
                     max_age_slot: last_slot_in_epoch,
@@ -293,7 +293,7 @@ impl TransactionViewReceiveAndBuffer {
         let mut total_validate_account_locks_ns = 0;
         let mut total_resolve_addresses_ns = 0;
         let mut total_verify_precompiles_ns = 0;
-        let mut total_process_compute_budget_instructions_ns = 0;
+        let mut total_instruction_details_ns = 0;
         let mut total_calculate_priority_and_cost_ns = 0;
         let mut total_push_priority_queue_ns = 0;
         let mut num_dropped = 0;
@@ -340,17 +340,14 @@ impl TransactionViewReceiveAndBuffer {
                                             .ok()?);
                                         total_verify_precompiles_ns += ns;
 
-                                        let (compute_budget_limits, ns) =
-                                            measure_ns!(process_compute_budget_instructions(
-                                                transaction.program_instructions_iter(),
-                                            )
-                                            .ok()?);
-                                        total_process_compute_budget_instructions_ns += ns;
+                                        let (instruction_details, ns) =
+                                            measure_ns!(InstructionDetails::new(transaction).ok()?);
+                                        total_instruction_details_ns += ns;
 
                                         let ((priority, cost), ns) =
                                             measure_ns!(calculate_priority_and_cost(
                                                 transaction,
-                                                &compute_budget_limits.into(),
+                                                &instruction_details,
                                                 &bank,
                                             ));
                                         total_calculate_priority_and_cost_ns += ns;
@@ -530,11 +527,7 @@ impl TransactionViewReceiveAndBuffer {
                 ),
                 ("resolve_addresses_ns", total_resolve_addresses_ns, i64),
                 ("verify_precompiles_ns", total_verify_precompiles_ns, i64),
-                (
-                    "process_compute_budget_instructions_ns",
-                    total_process_compute_budget_instructions_ns,
-                    i64
-                ),
+                ("instruction_details_ns", total_instruction_details_ns, i64),
                 (
                     "calculate_priority_and_cost_ns",
                     total_calculate_priority_and_cost_ns,
@@ -649,11 +642,12 @@ impl ReceiveAndBufferPackets<TransactionView, TransactionViewStateContainer>
 /// the current transaction costs.
 fn calculate_priority_and_cost(
     transaction: &impl SignedMessage,
-    fee_budget_limits: &FeeBudgetLimits,
+    instruction_details: &InstructionDetails,
     bank: &Bank,
 ) -> (u64, u64) {
-    let cost = CostModel::calculate_cost_sum(transaction, &bank.feature_set);
-    let reward = bank.calculate_reward_for_transaction(transaction, fee_budget_limits);
+    let cost = CostModel::calculate_cost_sum(transaction, instruction_details, &bank.feature_set);
+    let reward = bank
+        .calculate_reward_for_transaction(transaction, &FeeBudgetLimits::from(instruction_details));
 
     // We need a multiplier here to avoid rounding down too aggressively.
     // For many transactions, the cost will be greater than the fees in terms of raw lamports.

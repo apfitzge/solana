@@ -1,14 +1,18 @@
 use {
     crate::block_cost_limits::BUILT_IN_INSTRUCTION_COSTS,
-    solana_program_runtime::compute_budget_processor::{
-        DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_LIMIT, MAX_HEAP_FRAME_BYTES,
-        MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES,
+    solana_fee::FeeBudgetLimits,
+    solana_program_runtime::{
+        compute_budget::DEFAULT_HEAP_COST,
+        compute_budget_processor::{
+            DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_LIMIT, MAX_HEAP_FRAME_BYTES,
+            MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES,
+        },
+        prioritization_fee::{PrioritizationFeeDetails, PrioritizationFeeType},
     },
     solana_sdk::{
         borsh1::try_from_slice_unchecked,
         compute_budget::{self, ComputeBudgetInstruction},
         entrypoint::HEAP_LENGTH as MIN_HEAP_FRAME_BYTES,
-        feature_set::FeatureSet,
         instruction::InstructionError,
         transaction::TransactionError,
     },
@@ -142,6 +146,12 @@ impl InstructionDetails {
             .unwrap_or(MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES)
             .min(MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES);
 
+        if has_user_space_instructions {
+            if let Some(compute_unit_limit) = updated_compute_unit_limit {
+                programs_execution_costs = u64::from(compute_unit_limit);
+            }
+        }
+
         Ok(Self {
             num_secp256k1_instruction_signatures,
             num_ed25519_instruction_signatures,
@@ -158,4 +168,23 @@ impl InstructionDetails {
 fn sanitize_requested_heap_size(bytes: u32) -> bool {
     (u32::try_from(MIN_HEAP_FRAME_BYTES).unwrap()..=MAX_HEAP_FRAME_BYTES).contains(&bytes)
         && bytes % 1024 == 0
+}
+
+impl From<&InstructionDetails> for FeeBudgetLimits {
+    fn from(value: &InstructionDetails) -> Self {
+        let prioritization_fee_details = PrioritizationFeeDetails::new(
+            PrioritizationFeeType::ComputeUnitPrice(value.compute_unit_price),
+            u64::from(value.compute_unit_limit),
+        );
+        let prioritization_fee = prioritization_fee_details.get_fee();
+
+        Self {
+            // NOTE - usize::from(u32).unwrap() may fail if target is 16-bit and
+            // `loaded_accounts_bytes` is greater than u16::MAX. In that case, panic is proper.
+            loaded_accounts_data_size_limit: usize::try_from(value.loaded_accounts_bytes).unwrap(),
+            heap_cost: DEFAULT_HEAP_COST,
+            compute_unit_limit: u64::from(value.compute_unit_limit),
+            prioritization_fee,
+        }
+    }
 }
