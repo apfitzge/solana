@@ -15,7 +15,7 @@ use {
     solana_signed_message::Instruction,
 };
 
-const MAX_HEAP_FRAME_BYTES: u32 = 256 * 1024;
+pub const MAX_HEAP_FRAME_BYTES: u32 = 256 * 1024;
 pub const DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT: u32 = 200_000;
 pub const MAX_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
 
