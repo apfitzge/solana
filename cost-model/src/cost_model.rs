@@ -33,23 +33,97 @@ pub struct CostModel;
 impl CostModel {
     /// Only calculate the sum of costs, without internal allocations.
     pub fn calculate_cost_sum(transaction: &impl SignedMessage, feature_set: &FeatureSet) -> u64 {
-        let mut tx_cost = UsageCostDetails::new_with_capacity(0); // specifying 0 capacity to avoid allocations
+        let mut total_cost = {
+            let signatures_count_detail = transaction.get_signature_details();
+            signatures_count_detail
+                .num_transaction_signatures()
+                .saturating_mul(SIGNATURE_COST)
+                .saturating_add(
+                    signatures_count_detail
+                        .num_secp256k1_instruction_signatures()
+                        .saturating_mul(SECP256K1_VERIFY_COST),
+                )
+                .saturating_add(
+                    signatures_count_detail
+                        .num_ed25519_instruction_signatures()
+                        .saturating_mul(ED25519_VERIFY_COST),
+                )
+        };
 
-        Self::get_signature_cost(&mut tx_cost, transaction); // only assigns some internal fields. no allocations
-        Self::get_transaction_cost(&mut tx_cost, transaction, feature_set); // loops through ixs. no allocations.
-
-        // Need to have custom write_lock cost. No allocations.
+        // transaction cost
         {
-            let num_write_locks = if feature_set
-                .is_active(&feature_set::cost_model_requested_write_lock_cost::id())
-            {
-                transaction.num_write_locks()
-            } else {
-                tx_cost.writable_accounts.len() as u64
-            };
-            tx_cost.write_lock_cost = WRITE_LOCK_UNITS.saturating_mul(num_write_locks);
+            let mut programs_execution_costs = 0u64;
+            let mut loaded_accounts_data_size_cost = 0u64;
+            let mut data_bytes_len_total = 0u64;
+            let mut compute_unit_limit_is_set = false;
+            let mut has_user_space_instructions = false;
+
+            for (program_id, instruction) in transaction.program_instructions_iter() {
+                let ix_execution_cost =
+                    if let Some(builtin_cost) = BUILT_IN_INSTRUCTION_COSTS.get(program_id) {
+                        *builtin_cost
+                    } else {
+                        has_user_space_instructions = true;
+                        u64::from(DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT)
+                    };
+
+                programs_execution_costs = programs_execution_costs
+                    .saturating_add(ix_execution_cost)
+                    .min(u64::from(MAX_COMPUTE_UNIT_LIMIT));
+
+                data_bytes_len_total =
+                    data_bytes_len_total.saturating_add(instruction.data.len() as u64);
+
+                if compute_budget::check_id(program_id) {
+                    if let Ok(ComputeBudgetInstruction::SetComputeUnitLimit(_)) =
+                        try_from_slice_unchecked(instruction.data)
+                    {
+                        compute_unit_limit_is_set = true;
+                    }
+                }
+            }
+
+            // if failed to process compute_budget instructions, the transaction will not be executed
+            // by `bank`, therefore it should be considered as no execution cost by cost model.
+            match process_compute_budget_instructions(transaction.program_instructions_iter()) {
+                Ok(compute_budget_limits) => {
+                    // if tx contained user-space instructions and a more accurate estimate available correct it,
+                    // where "user-space instructions" must be specifically checked by
+                    // 'compute_unit_limit_is_set' flag, because compute_budget does not distinguish
+                    // builtin and bpf instructions when calculating default compute-unit-limit. (see
+                    // compute_budget.rs test `test_process_mixed_instructions_without_compute_budget`)
+                    if has_user_space_instructions && compute_unit_limit_is_set {
+                        programs_execution_costs =
+                            u64::from(compute_budget_limits.compute_unit_limit);
+                    }
+
+                    if feature_set
+                        .is_active(&include_loaded_accounts_data_size_in_fee_calculation::id())
+                    {
+                        loaded_accounts_data_size_cost = FeeStructure::calculate_memory_usage_cost(
+                            usize::try_from(compute_budget_limits.loaded_accounts_bytes).unwrap(),
+                            DEFAULT_HEAP_COST,
+                        )
+                    }
+                }
+                Err(_) => {
+                    programs_execution_costs = 0;
+                }
+            }
+
+            total_cost = total_cost.saturating_add(programs_execution_costs);
+            total_cost = total_cost.saturating_add(loaded_accounts_data_size_cost);
+            total_cost =
+                total_cost.saturating_add(data_bytes_len_total / INSTRUCTION_DATA_BYTES_COST);
+        };
+
+        // Need to have custom write_lock cost
+        // TODO: support feature instead of just using raw `num_write_locks()` here
+        {
+            total_cost = total_cost
+                .saturating_add(WRITE_LOCK_UNITS.saturating_mul(transaction.num_write_locks()));
         }
-        tx_cost.sum()
+        total_cost
     }
 
     pub fn calculate_cost(
