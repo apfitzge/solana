@@ -286,210 +286,48 @@ impl TransactionViewReceiveAndBuffer {
         // let mut lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
         let mut error_counts = TransactionErrorMetrics::default();
 
-        let mut max_per_packet_time_ns = 0;
-        let mut total_reserve_key_ns = 0;
-        let mut total_populate_from_time_ns = 0;
-        let mut total_sanitize_time_ns = 0;
-        let mut total_validate_account_locks_ns = 0;
-        let mut total_resolve_addresses_ns = 0;
-        let mut total_verify_precompiles_ns = 0;
-        let mut total_instruction_details_ns = 0;
-        let mut total_calculate_priority_and_cost_ns = 0;
-        let mut total_push_priority_queue_ns = 0;
-        let mut num_dropped = 0;
+        for batch in &message.0 {
+            total_packet_count += batch.len();
+            for packet in batch {
+                // Get free id
+                let transaction_id = container.reserve_key();
+                // Run sanitization and checks
+                let maybe_priority_id = container
+                    .with_mut_transaction_state(&transaction_id, |state| {
+                        let transaction = &mut state.mut_transaction_ttl().transaction;
+                        transaction.populate_from(packet)?;
+                        transaction.sanitize().ok()?;
+                        transaction
+                            .validate_account_locks(transaction_account_lock_limit)
+                            .ok()?;
+                        transaction.resolve_addresses(&bank).ok()?;
+                        transaction.verify_precompiles(feature_set).ok()?;
 
-        let mut total_inner_loop_ns = 0;
-        let mut total_with_ns = 0;
-        let mut total_inner_with_ns = 0;
-        let (_, outer_loop_ns) = measure_ns!({
-            for batch in &message.0 {
-                total_packet_count += batch.len();
-                let (_, inner_loop_ns) = measure_ns!({
-                    for packet in batch {
-                        let (_, ns) = measure_ns!({
-                            // Get free id
-                            let (transaction_id, ns) = measure_ns!(container.reserve_key());
-                            total_reserve_key_ns += ns;
+                        let instruction_details = InstructionDetails::new(transaction).ok()?;
+                        let (priority, cost) =
+                            calculate_priority_and_cost(transaction, &instruction_details, &bank);
 
-                            // Run sanitization and checks
-                            let (maybe_priority_id, with_ns) = measure_ns!(container
-                                .with_mut_transaction_state(&transaction_id, |state| {
-                                    let (maybe_priority_id, with_inner_ns) = measure_ns!({
-                                        let transaction =
-                                            &mut state.mut_transaction_ttl().transaction;
+                        state.set_priority(priority);
+                        state.set_cost(cost);
+                        // TODO: fix this, should come from packet flags
+                        state.set_should_forward(false);
+                        state.mut_transaction_ttl().max_age_slot = last_slot_in_epoch;
 
-                                        let (_, ns) =
-                                            measure_ns!(transaction.populate_from(packet)?);
-                                        total_populate_from_time_ns += ns;
+                        Some(TransactionPriorityId::new(priority, transaction_id))
+                    })
+                    .expect("transaction must exist");
+                let Some(priority_id) = maybe_priority_id else {
+                    container.remove_by_id(&transaction_id);
+                    continue;
+                };
 
-                                        let (_, ns) = measure_ns!(transaction.sanitize().ok()?);
-                                        total_sanitize_time_ns += ns;
-
-                                        let (_, ns) = measure_ns!(transaction
-                                            .validate_account_locks(transaction_account_lock_limit)
-                                            .ok()?);
-                                        total_validate_account_locks_ns += ns;
-
-                                        let (_, ns) = measure_ns!(transaction
-                                            .resolve_addresses(&bank)
-                                            .ok()?);
-                                        total_resolve_addresses_ns += ns;
-
-                                        let (_, ns) = measure_ns!(transaction
-                                            .verify_precompiles(feature_set)
-                                            .ok()?);
-                                        total_verify_precompiles_ns += ns;
-
-                                        let (instruction_details, ns) =
-                                            measure_ns!(InstructionDetails::new(transaction).ok()?);
-                                        total_instruction_details_ns += ns;
-
-                                        let ((priority, cost), ns) =
-                                            measure_ns!(calculate_priority_and_cost(
-                                                transaction,
-                                                &instruction_details,
-                                                &bank,
-                                            ));
-                                        total_calculate_priority_and_cost_ns += ns;
-
-                                        state.set_priority(priority);
-                                        state.set_cost(cost);
-                                        // TODO: fix this, should come from packet flags
-                                        state.set_should_forward(false);
-                                        state.mut_transaction_ttl().max_age_slot =
-                                            last_slot_in_epoch;
-
-                                        Some(TransactionPriorityId::new(priority, transaction_id))
-                                    });
-                                    total_inner_with_ns += with_inner_ns;
-                                    maybe_priority_id
-                                })
-                                .expect("transaction must exist"));
-                            total_with_ns += with_ns;
-                            let Some(priority_id) = maybe_priority_id else {
-                                num_dropped += 1;
-                                container.remove_by_id(&transaction_id);
-                                continue;
-                            };
-
-                            let (a_tx_was_dropped, ns) =
-                                measure_ns!(container.push_id_into_queue(priority_id));
-                            total_push_priority_queue_ns += ns;
-
-                            if a_tx_was_dropped {
-                                saturating_add_assign!(num_dropped_on_capacity, 1);
-                            }
-                            saturating_add_assign!(num_buffered, 1);
-                        });
-                        max_per_packet_time_ns = max_per_packet_time_ns.max(ns);
-                    }
-                });
-                total_inner_loop_ns += inner_loop_ns;
-                // for batch in batch.into_iter().chunks(PACKETS_PER_BATCH).into_iter() {
-                //     let valid_packet_references: ArrayVec<&Packet, PACKETS_PER_BATCH> =
-                //         ArrayVec::from_iter(batch.filter(|p| !p.meta().discard()));
-                //     total_packet_count += valid_packet_references.len();
-
-                //     // Get free ids from the container.
-                //     let ids: ArrayVec<TransactionId, PACKETS_PER_BATCH> = ArrayVec::from_iter(
-                //         valid_packet_references
-                //             .iter()
-                //             .map(|_| container.reserve_key()),
-                //     );
-
-                //     // Perform deserialization, sanitization, address resolution.
-                //     let check_results = container
-                //         .batched_with_mut_ref_transaction_state::<PACKETS_PER_BATCH, _, _>(
-                //             &ids,
-                //             |state| &mut state.mut_transaction_ttl().transaction,
-                //             |transactions| {
-                //                 // Initial deserialization and sanitization. Set `lock_results`.
-                //                 for (index, packet) in valid_packet_references.into_iter().enumerate() {
-                //                     let transaction = &mut transactions[index];
-                //                     if transaction.populate_from(packet).is_none() {
-                //                         lock_results[index] = Err(TransactionError::SanitizeFailure);
-                //                         continue;
-                //                     }
-                //                     if transaction.sanitize().is_err() {
-                //                         lock_results[index] = Err(TransactionError::SanitizeFailure);
-                //                         continue;
-                //                     }
-                //                     if let Err(e) = transaction.resolve_addresses(&bank) {
-                //                         lock_results[index] = Err(e);
-                //                         continue;
-                //                     }
-                //                     if let Err(e) = transaction
-                //                         .validate_account_locks(transaction_account_lock_limit)
-                //                     {
-                //                         lock_results[index] = Err(e);
-                //                         continue;
-                //                     }
-                //                     if let Err(e) = transaction.verify_precompiles(feature_set) {
-                //                         lock_results[index] = Err(e);
-                //                         continue;
-                //                     }
-                //                     lock_results[index] = Ok(());
-                //                 }
-
-                //                 // Return check results in order to remove or modify states accordingly.
-                //                 bank.check_transactions::<&mut TransactionView, TransactionView>(
-                //                     transactions,
-                //                     &lock_results,
-                //                     MAX_PROCESSING_AGE,
-                //                     &mut error_counts,
-                //                 )
-                //             },
-                //         )
-                //         .expect("batched_with_mut_ref_transaction_state failed");
-
-                //     // Use check results to either remove the invalid transactions, or to calculate
-                //     // priority, cost and update state for valid transactions.
-                //     for (id, check_result) in ids.into_iter().zip(check_results.into_iter()) {
-                //         match check_result.0 {
-                //             Ok(_) => {
-                //                 match container
-                //                     .with_mut_transaction_state(&id, |state| {
-                //                         let transaction = &state.transaction_ttl().transaction;
-                //                         let Ok(compute_budget_limits) =
-                //                             process_compute_budget_instructions(
-                //                                 transaction.program_instructions_iter(),
-                //                             )
-                //                         else {
-                //                             return None;
-                //                         };
-                //                         let (priority, cost) = calculate_priority_and_cost(
-                //                             transaction,
-                //                             &compute_budget_limits.into(),
-                //                             &bank,
-                //                         );
-
-                //                         state.set_priority(priority);
-                //                         state.set_cost(cost);
-                //                         // TODO: fix this, should come from packet flags
-                //                         state.set_should_forward(false);
-                //                         state.mut_transaction_ttl().max_age_slot = last_slot_in_epoch;
-
-                //                         Some(TransactionPriorityId::new(priority, id))
-                //                     })
-                //                     .expect("transaction must be exist")
-                //                 {
-                //                     Some(priority_id) => {
-                //                         if container.push_id_into_queue(priority_id) {
-                //                             saturating_add_assign!(num_dropped_on_capacity, 1);
-                //                         }
-                //                         saturating_add_assign!(num_buffered, 1);
-                //                     }
-                //                     None => container.remove_by_id(&id),
-                //                 }
-                //             }
-                //             Err(_) => {
-                //                 container.remove_by_id(&id);
-                //             }
-                //         }
-                //     }
-                // }
+                let a_tx_was_dropped = container.push_id_into_queue(priority_id);
+                if a_tx_was_dropped {
+                    saturating_add_assign!(num_dropped_on_capacity, 1);
+                }
+                saturating_add_assign!(num_buffered, 1);
             }
-        });
+        }
 
         count_metrics.update(|count_metrics| {
             saturating_add_assign!(count_metrics.num_received, total_packet_count);
@@ -498,51 +336,7 @@ impl TransactionViewReceiveAndBuffer {
                 num_dropped_on_capacity
             );
             saturating_add_assign!(count_metrics.num_buffered, num_buffered);
-            // saturating_add_assign!(
-            //     count_metrics.num_dropped_on_sanitization,
-            //     num_dropped_on_sanitization
-            // );
-            // saturating_add_assign!(
-            //     count_metrics.num_dropped_on_validate_locks,
-            //     num_dropped_on_lock_validation
-            // );
-            // saturating_add_assign!(
-            //     count_metrics.num_dropped_on_receive_transaction_checks,
-            //     num_dropped_on_transaction_checks
-            // );
         });
-
-        let (_, drop_message_ns) = measure_ns!({ drop(message) });
-        if std::thread::current().name().unwrap() == "solBnkTxSched" {
-            datapoint_info!(
-                "txview_receive_and_buffer_details",
-                ("num_buffered", num_buffered, i64),
-                ("reserve_key_ns", total_reserve_key_ns, i64),
-                ("populate_from_time_ns", total_populate_from_time_ns, i64),
-                ("sanitize_time_ns", total_sanitize_time_ns, i64),
-                (
-                    "validate_account_locks_ns",
-                    total_validate_account_locks_ns,
-                    i64
-                ),
-                ("resolve_addresses_ns", total_resolve_addresses_ns, i64),
-                ("verify_precompiles_ns", total_verify_precompiles_ns, i64),
-                ("instruction_details_ns", total_instruction_details_ns, i64),
-                (
-                    "calculate_priority_and_cost_ns",
-                    total_calculate_priority_and_cost_ns,
-                    i64
-                ),
-                ("push_priority_queue_ns", total_push_priority_queue_ns, i64),
-                ("max_per_packet_time_ns", max_per_packet_time_ns, i64),
-                ("num_dropped", num_dropped, i64),
-                ("outer_loop_ns", outer_loop_ns, i64),
-                ("inner_loop_ns", total_inner_loop_ns, i64),
-                ("drop_message_ns", drop_message_ns, i64),
-                ("with_ns", total_with_ns, i64),
-                ("inner_with_ns", total_inner_with_ns, i64),
-            );
-        }
     }
 }
 
