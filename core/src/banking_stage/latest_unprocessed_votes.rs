@@ -204,6 +204,10 @@ impl LatestUnprocessedVotes {
         let slot = vote.slot();
         let timestamp = vote.timestamp();
         if let Some(latest_vote) = self.get_entry(pubkey) {
+            eprintln!(
+                "{}: entry exists...",
+                std::thread::current().name().unwrap()
+            );
             let (latest_slot, latest_timestamp) = latest_vote
                 .read()
                 .map(|vote| (vote.slot(), vote.timestamp()))
@@ -228,6 +232,12 @@ impl LatestUnprocessedVotes {
             return Some(vote);
         }
 
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        eprintln!(
+            "{}: entry does not exist...",
+            std::thread::current().name().unwrap()
+        );
         // Should have low lock contention because this is only hit on the first few blocks of startup
         // and when a new vote account starts voting.
         let mut latest_votes_per_pubkey = self.latest_votes_per_pubkey.write().unwrap();
@@ -344,6 +354,21 @@ impl LatestUnprocessedVotes {
                 }
             });
     }
+
+    #[cfg(test)]
+    pub fn remove_entry(&self, pubkey: &Pubkey) {
+        eprintln!(
+            "{}: removing entry...",
+            std::thread::current().name().unwrap()
+        );
+        if let Some(_latest_vote) = self.latest_votes_per_pubkey.write().unwrap().remove(pubkey) {
+            eprintln!(
+                "{}: removed entry...",
+                std::thread::current().name().unwrap()
+            );
+            self.num_unprocessed_votes.fetch_sub(1, Ordering::Relaxed); // removed a vote, so should decrement.
+        }
+    }
 }
 
 #[cfg(test)]
@@ -362,7 +387,10 @@ mod tests {
             vote_state::TowerSync,
             vote_transaction::{new_tower_sync_transaction, new_vote_transaction},
         },
-        std::{sync::Arc, thread::Builder},
+        std::{
+            sync::{atomic::AtomicBool, Arc},
+            thread::Builder,
+        },
     };
 
     fn from_slots(
@@ -875,5 +903,73 @@ mod tests {
             Some(4),
             latest_unprocessed_votes.get_latest_vote_slot(keypair_d.node_keypair.pubkey())
         );
+    }
+
+    #[test]
+    fn test_update_latest_vote_race() {
+        // Spawn 2 thread to insert 100 votes.
+        let keypair_a = ValidatorVoteKeypairs::new_rand();
+        let pubkey_a = keypair_a.node_keypair.pubkey();
+
+        let slots = (0..100).map(|i| (i, 1)).collect_vec();
+        let gossip_votes = from_slots(slots.clone(), VoteSource::Gossip, &keypair_a, None);
+        let tpu_votes = from_slots(slots.clone(), VoteSource::Tpu, &keypair_a, None);
+
+        let latest_unprocessed_votes = Arc::new(LatestUnprocessedVotes::new());
+        let latest_unprocessed_votes_gossip = latest_unprocessed_votes.clone();
+        let latest_unprocessed_votes_tpu = latest_unprocessed_votes.clone();
+
+        let exit = Arc::new(AtomicBool::new(false));
+        let inserted = Arc::new(AtomicBool::new(false));
+
+        let inserted_gossip = inserted.clone();
+        let inserted_tpu = inserted.clone();
+
+        // Spawn gossip and tpu threads
+        const NUM_INSERTS: usize = 1000;
+        let gossip = Builder::new()
+            .name("gossip".to_owned())
+            .spawn(move || {
+                for _ in 0..NUM_INSERTS {
+                    latest_unprocessed_votes_gossip.update_latest_vote(gossip_votes.clone());
+                    inserted_gossip.store(true, Ordering::Relaxed);
+                }
+            })
+            .unwrap();
+
+        let tpu = Builder::new()
+            .name("tpu".to_owned())
+            .spawn(move || {
+                for _ in 0..NUM_INSERTS {
+                    latest_unprocessed_votes_tpu.update_latest_vote(tpu_votes.clone());
+                    inserted_tpu.store(true, Ordering::Relaxed);
+                }
+            })
+            .unwrap();
+
+        // Another thread just to clear things out to increase chances of race.
+        let latest_unprocessed_votes_clear = latest_unprocessed_votes.clone();
+        let exit_clear = exit.clone();
+        let clear = Builder::new()
+            .name("remover".to_owned())
+            .spawn(move || {
+                while !exit_clear.load(Ordering::Relaxed) {
+                    if inserted.load(Ordering::Relaxed) {
+                        latest_unprocessed_votes_clear.remove_entry(&pubkey_a);
+                        inserted.store(false, Ordering::Relaxed);
+                    }
+                }
+            })
+            .unwrap();
+
+        gossip.join().unwrap();
+        tpu.join().unwrap();
+
+        exit.store(true, Ordering::Relaxed);
+        clear.join().unwrap();
+
+        // clear out any votes.
+        let _ = latest_unprocessed_votes.remove_entry(&pubkey_a);
+        assert_eq!(0, latest_unprocessed_votes.len());
     }
 }
