@@ -23,6 +23,7 @@ use {
         pubkey::Pubkey, saturating_add_assign, slot_history::Slot,
         transaction::SanitizedTransaction,
     },
+    std::time::{Duration, Instant},
 };
 
 pub(crate) struct PrioGraphScheduler {
@@ -70,6 +71,10 @@ impl PrioGraphScheduler {
         pre_graph_filter: impl Fn(&[&SanitizedTransaction], &mut [bool]),
         pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
+        // Stop scheduling immediately if scheduling for over 100ms.
+        const SCHEDULING_TIMEOUT: Duration = Duration::from_millis(100);
+        let start = Instant::now();
+
         let num_threads = self.consume_work_senders.len();
         let max_cu_per_thread = MAX_BLOCK_UNITS / num_threads as u64;
 
@@ -161,7 +166,7 @@ impl PrioGraphScheduler {
         let mut num_unschedulable: usize = 0;
         while num_scheduled < MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
             // If nothing is in the main-queue of the `PrioGraph` then there's nothing left to schedule.
-            if prio_graph.is_empty() {
+            if prio_graph.is_empty() || start.elapsed() > SCHEDULING_TIMEOUT {
                 break;
             }
 
