@@ -7767,6 +7767,7 @@ dependencies = [
 name = "solana-transaction-ffi"
 version = "2.0.0"
 dependencies = [
+ "criterion",
  "solana-sdk",
 ]
 
