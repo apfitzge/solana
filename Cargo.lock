@@ -7764,6 +7764,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-transaction-ffi"
+version = "2.0.0"
+dependencies = [
+ "solana-sdk",
+]
+
+[[package]]
 name = "solana-transaction-metrics-tracker"
 version = "2.0.0"
 dependencies = [

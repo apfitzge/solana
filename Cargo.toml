@@ -113,7 +113,7 @@ members = [
     "tokens",
     "tps-client",
     "tpu-client",
-    "transaction-dos",
+    "transaction-dos", "transaction-ffi",
     "transaction-metrics-tracker",
     "transaction-status",
     "turbine",
