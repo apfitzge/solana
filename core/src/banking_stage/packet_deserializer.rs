@@ -206,7 +206,7 @@ impl PacketDeserializer {
         Ok((num_packets_received, messages))
     }
 
-    fn generate_packet_indexes(packet_batch: &PacketBatch) -> Vec<usize> {
+    pub fn generate_packet_indexes(packet_batch: &PacketBatch) -> Vec<usize> {
         packet_batch
             .iter()
             .enumerate()
@@ -215,7 +215,7 @@ impl PacketDeserializer {
             .collect()
     }
 
-    fn deserialize_packets<'a>(
+    pub fn deserialize_packets<'a>(
         packet_batch: &'a PacketBatch,
         packet_indexes: &'a [usize],
         round_compute_unit_price_enabled: bool,
