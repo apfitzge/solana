@@ -64,10 +64,6 @@ pub struct SchedulerCountMetricsInner {
 
     /// Number of transactions that were immediately dropped on receive.
     pub num_dropped_on_receive: usize,
-    /// Number of transactions that were dropped due to sanitization failure.
-    pub num_dropped_on_sanitization: usize,
-    /// Number of transactions that were dropped due to failed lock validation.
-    pub num_dropped_on_validate_locks: usize,
     /// Number of transactions that were dropped due to failed transaction
     /// checks during receive.
     pub num_dropped_on_receive_transaction_checks: usize,
@@ -127,16 +123,6 @@ impl SchedulerCountMetricsInner {
             ("num_forwarded", self.num_forwarded, i64),
             ("num_dropped_on_receive", self.num_dropped_on_receive, i64),
             (
-                "num_dropped_on_sanitization",
-                self.num_dropped_on_sanitization,
-                i64
-            ),
-            (
-                "num_dropped_on_validate_locks",
-                self.num_dropped_on_validate_locks,
-                i64
-            ),
-            (
                 "num_dropped_on_receive_transaction_checks",
                 self.num_dropped_on_receive_transaction_checks,
                 i64
@@ -167,8 +153,6 @@ impl SchedulerCountMetricsInner {
             || self.num_retryable != 0
             || self.num_forwarded != 0
             || self.num_dropped_on_receive != 0
-            || self.num_dropped_on_sanitization != 0
-            || self.num_dropped_on_validate_locks != 0
             || self.num_dropped_on_receive_transaction_checks != 0
             || self.num_dropped_on_clear != 0
             || self.num_dropped_on_age_and_status != 0
@@ -185,8 +169,6 @@ impl SchedulerCountMetricsInner {
         self.num_retryable = 0;
         self.num_forwarded = 0;
         self.num_dropped_on_receive = 0;
-        self.num_dropped_on_sanitization = 0;
-        self.num_dropped_on_validate_locks = 0;
         self.num_dropped_on_receive_transaction_checks = 0;
         self.num_dropped_on_clear = 0;
         self.num_dropped_on_age_and_status = 0;

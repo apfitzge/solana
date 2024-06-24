@@ -1,5 +1,4 @@
 use {
-    super::transaction_state::SanitizedTransactionTTL,
     crate::{
         banking_stage::{
             immutable_deserialized_packet::ImmutableDeserializedPacket,
@@ -21,7 +20,7 @@ pub struct PacketReceiveAndBuffer {
     /// Provides working bank for deserializer to check feature activation
     bank_forks: Arc<RwLock<BankForks>>,
     /// Sender to BankingStage
-    sender: Sender<Vec<(Arc<ImmutableDeserializedPacket>, SanitizedTransactionTTL)>>,
+    sender: Sender<Vec<(Arc<ImmutableDeserializedPacket>, SanitizedTransaction)>>,
 }
 
 impl PacketReceiveAndBuffer {
@@ -29,7 +28,7 @@ impl PacketReceiveAndBuffer {
     pub fn new(
         packet_batch_receiver: BankingPacketReceiver,
         bank_forks: Arc<RwLock<BankForks>>,
-        sender: Sender<Vec<(Arc<ImmutableDeserializedPacket>, SanitizedTransactionTTL)>>,
+        sender: Sender<Vec<(Arc<ImmutableDeserializedPacket>, SanitizedTransaction)>>,
     ) -> Self {
         Self {
             packet_batch_receiver,
@@ -50,7 +49,6 @@ impl PacketReceiveAndBuffer {
         let _stats = &message.1; // TODO: collect stats
 
         let bank = self.bank_forks.read().unwrap().working_bank();
-        let last_slot_in_epoch = bank.epoch_schedule().get_last_slot_in_epoch(bank.epoch());
         let transaction_account_lock_limit = bank.get_transaction_account_lock_limit();
         let vote_only = bank.vote_only_bank();
 
@@ -86,15 +84,6 @@ impl PacketReceiveAndBuffer {
                         transaction_account_lock_limit,
                     )
                     .is_ok()
-                })
-                .map(|(packet, tx)| {
-                    (
-                        packet,
-                        SanitizedTransactionTTL {
-                            transaction: tx,
-                            max_age_slot: last_slot_in_epoch,
-                        },
-                    )
                 })
                 .collect();
 

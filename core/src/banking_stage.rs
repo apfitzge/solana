@@ -18,7 +18,6 @@ use {
     crate::{
         banking_stage::{
             consume_worker::ConsumeWorker,
-            packet_deserializer::PacketDeserializer,
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
@@ -50,6 +49,7 @@ use {
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
     },
+    transaction_scheduler::packet_receive_and_buffer::PacketReceiveAndBuffer,
 };
 
 // Below modules are pub to allow use by banking_stage bench
@@ -601,14 +601,28 @@ impl BankingStage {
             )
         });
 
+        // Spawn a separate thread that deserializes packets and sends them to the scheduler
+        let (deserialized_sender, deserialized_receiver) = unbounded();
+        bank_thread_hdls.push({
+            let packet_receive_and_buffer = PacketReceiveAndBuffer::new(
+                non_vote_receiver,
+                bank_forks.clone(),
+                deserialized_sender,
+            );
+            Builder::new()
+                .name("solBnkPktRcvBuf".to_string())
+                .spawn(move || {
+                    packet_receive_and_buffer.run();
+                })
+                .unwrap()
+        });
+
         // Spawn the central scheduler thread
         bank_thread_hdls.push({
-            let packet_deserializer =
-                PacketDeserializer::new(non_vote_receiver, bank_forks.clone());
             let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
             let scheduler_controller = SchedulerController::new(
                 decision_maker.clone(),
-                packet_deserializer,
+                deserialized_receiver,
                 bank_forks,
                 scheduler,
                 worker_metrics,
