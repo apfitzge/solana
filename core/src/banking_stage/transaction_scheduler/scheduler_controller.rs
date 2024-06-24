@@ -509,10 +509,6 @@ impl SchedulerController {
 
         const CHUNK_SIZE: usize = 128;
         debug_assert!(batch.len() <= CHUNK_SIZE, "batch too large");
-
-        let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
-        let mut error_counts = TransactionErrorMetrics::default();
-
         let mut arc_packets = Vec::with_capacity(batch.len());
         let mut transactions = Vec::with_capacity(batch.len());
         let mut fee_budget_limits_vec = Vec::with_capacity(batch.len());
@@ -529,24 +525,15 @@ impl SchedulerController {
                 transactions.push(tx);
                 fee_budget_limits_vec.push(fee_budget_limits);
             });
-
-        let check_results = bank.check_transactions(
-            &transactions,
-            &lock_results[..transactions.len()],
-            MAX_PROCESSING_AGE,
-            &mut error_counts,
-        );
         let post_lock_validation_count = transactions.len();
 
         let mut post_transaction_check_count: usize = 0;
         let mut num_dropped_on_capacity: usize = 0;
         let mut num_buffered: usize = 0;
-        for (((packet, transaction), fee_budget_limits), _) in arc_packets
+        for ((packet, transaction), fee_budget_limits) in arc_packets
             .into_iter()
             .zip(transactions)
             .zip(fee_budget_limits_vec)
-            .zip(check_results)
-            .filter(|(_, check_result)| check_result.is_ok())
         {
             saturating_add_assign!(post_transaction_check_count, 1);
             let transaction_id = self.transaction_id_generator.next();

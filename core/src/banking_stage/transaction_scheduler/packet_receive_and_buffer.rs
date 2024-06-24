@@ -6,9 +6,12 @@ use {
         },
         banking_trace::{BankingPacketBatch, BankingPacketReceiver},
     },
+    arrayvec::ArrayVec,
     crossbeam_channel::Sender,
+    solana_perf::packet::PACKETS_PER_BATCH,
     solana_runtime::bank_forks::BankForks,
-    solana_sdk::transaction::SanitizedTransaction,
+    solana_sdk::{clock::MAX_PROCESSING_AGE, transaction::SanitizedTransaction},
+    solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::sync::{Arc, RwLock},
 };
 
@@ -54,10 +57,13 @@ impl PacketReceiveAndBuffer {
 
         let round_compute_unit_price_enabled = false; // TODO get from working_bank.feature_set
         let mut packet_stats = PacketReceiverStats::default();
+        let lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
+        let mut error_counters = TransactionErrorMetrics::default();
 
         for packet_batch in packet_batches {
+            assert!(packet_batch.len() <= PACKETS_PER_BATCH);
             let packet_indexes = PacketDeserializer::generate_packet_indexes(packet_batch);
-            let deserialized_packets_and_transactions: Vec<_> =
+            let mut deserialized_packets_and_transactions: Vec<_> =
                 PacketDeserializer::deserialize_packets(
                     packet_batch,
                     &packet_indexes,
@@ -86,6 +92,24 @@ impl PacketReceiveAndBuffer {
                     .is_ok()
                 })
                 .collect();
+            let mut tx_refs = ArrayVec::<_, PACKETS_PER_BATCH>::new();
+            for (_packet, tx) in &deserialized_packets_and_transactions {
+                tx_refs.push(tx);
+            }
+            let check_results = bank.check_transactions(
+                &tx_refs,
+                &lock_results,
+                MAX_PROCESSING_AGE,
+                &mut error_counters,
+            );
+            drop(tx_refs);
+
+            let mut idx = 0;
+            deserialized_packets_and_transactions.retain(|_| {
+                let result = &check_results[idx];
+                idx += 1;
+                result.is_ok()
+            });
 
             // TODO: exit on error
             let _ = self.sender.send(deserialized_packets_and_transactions);
