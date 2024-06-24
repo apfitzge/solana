@@ -9,10 +9,13 @@ use {
     arrayvec::ArrayVec,
     crossbeam_channel::Sender,
     solana_perf::packet::PACKETS_PER_BATCH,
-    solana_runtime::bank_forks::BankForks,
+    solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_sdk::{clock::MAX_PROCESSING_AGE, transaction::SanitizedTransaction},
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
-    std::sync::{Arc, RwLock},
+    std::{
+        sync::{Arc, RwLock},
+        time::{Duration, Instant},
+    },
 };
 
 /// A pass-through stage that receives packets after signature verification,
@@ -42,16 +45,23 @@ impl PacketReceiveAndBuffer {
 
     pub fn run(self) {
         // receive packets until the sender is dropped
+        let mut bank = self.bank_forks.read().unwrap().working_bank();
+        let time_per_slot = Duration::from_nanos(bank.ns_per_slot as u64);
+        let mut last_receive_time = Instant::now();
         while let Ok(message) = self.packet_batch_receiver.recv() {
-            self.process_packets(message);
+            let now = Instant::now();
+            if now.duration_since(last_receive_time) > time_per_slot {
+                bank = self.bank_forks.read().unwrap().working_bank();
+                last_receive_time = now;
+            }
+            self.process_packets(message, &bank);
         }
     }
 
-    fn process_packets(&self, message: BankingPacketBatch) {
+    fn process_packets(&self, message: BankingPacketBatch, bank: &Bank) {
         let packet_batches = &message.0;
         let _stats = &message.1; // TODO: collect stats
 
-        let bank = self.bank_forks.read().unwrap().working_bank();
         let transaction_account_lock_limit = bank.get_transaction_account_lock_limit();
         let vote_only = bank.vote_only_bank();
 
@@ -79,7 +89,7 @@ impl PacketReceiveAndBuffer {
                     packet
                         .build_sanitized_transaction(
                             vote_only,
-                            bank.as_ref(),
+                            bank,
                             bank.get_reserved_account_keys(),
                         )
                         .map(|tx| (packet, tx))
