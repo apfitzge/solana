@@ -148,6 +148,7 @@ impl SchedulerController {
     ) -> Result<(), SchedulerError> {
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {
+                let reserved_account_keys = bank_start.working_bank.get_reserved_account_keys();
                 let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
                     &mut self.container,
                     |txs, results| {
@@ -158,7 +159,8 @@ impl SchedulerController {
                             MAX_PROCESSING_AGE,
                         )
                     },
-                    |_| true // no pre-lock filter for now
+                    |_| true,                                   // no pre-lock filter for now
+                    |key| !reserved_account_keys.contains(key), // if key cannot be write-locked, skip in prio-graph
                 )?);
 
                 self.count_metrics.update(|count_metrics| {

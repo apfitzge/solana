@@ -69,6 +69,7 @@ impl PrioGraphScheduler {
         container: &mut TransactionStateContainer,
         pre_graph_filter: impl Fn(&[&SanitizedTransaction], &mut [bool]),
         pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
+        allow_pubkey_lock_for_prio_graph: impl Fn(&Pubkey) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
         let num_threads = self.consume_work_senders.len();
         let max_cu_per_thread = MAX_BLOCK_UNITS / num_threads as u64;
@@ -135,7 +136,10 @@ impl PrioGraphScheduler {
                         let transaction = container.get_transaction_ttl(&id.id).unwrap();
                         prio_graph.insert_transaction(
                             *id,
-                            Self::get_transaction_account_access(transaction),
+                            Self::get_transaction_account_access(
+                                transaction,
+                                &allow_pubkey_lock_for_prio_graph,
+                            ),
                         );
                     } else {
                         saturating_add_assign!(num_filtered_out, 1);
@@ -443,14 +447,16 @@ impl PrioGraphScheduler {
     }
 
     /// Gets accessed accounts (resources) for use in `PrioGraph`.
-    fn get_transaction_account_access(
-        transaction: &SanitizedTransactionTTL,
-    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + '_ {
+    fn get_transaction_account_access<'a>(
+        transaction: &'a SanitizedTransactionTTL,
+        allow_pubkey_lock_for_prio_graph: &'a impl Fn(&Pubkey) -> bool,
+    ) -> impl Iterator<Item = (Pubkey, AccessKind)> + 'a {
         let message = transaction.transaction.message();
         message
             .account_keys()
             .iter()
             .enumerate()
+            .filter(|&(_index, key)| allow_pubkey_lock_for_prio_graph(key))
             .map(|(index, key)| {
                 if message.is_writable(index) {
                     (*key, AccessKind::Write)
@@ -711,6 +717,10 @@ mod tests {
         true
     }
 
+    fn test_allow_pubkey_lock_for_prio_graph(_pubkey: &Pubkey) -> bool {
+        true
+    }
+
     #[test]
     fn test_schedule_disconnected_channel() {
         let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(1);
@@ -718,7 +728,12 @@ mod tests {
 
         drop(work_receivers); // explicitly drop receivers
         assert_matches!(
-            scheduler.schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter),
+            scheduler.schedule(
+                &mut container,
+                test_pre_graph_filter,
+                test_pre_lock_filter,
+                test_allow_pubkey_lock_for_prio_graph,
+            ),
             Err(SchedulerError::DisconnectedSendChannel(_))
         );
     }
@@ -732,7 +747,12 @@ mod tests {
         ]);
 
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(
+                &mut container,
+                test_pre_graph_filter,
+                test_pre_lock_filter,
+                test_allow_pubkey_lock_for_prio_graph,
+            )
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
@@ -749,7 +769,12 @@ mod tests {
         ]);
 
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(
+                &mut container,
+                test_pre_graph_filter,
+                test_pre_lock_filter,
+                test_allow_pubkey_lock_for_prio_graph,
+            )
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
@@ -769,7 +794,12 @@ mod tests {
 
         // expect 4 full batches to be scheduled
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(
+                &mut container,
+                test_pre_graph_filter,
+                test_pre_lock_filter,
+                test_allow_pubkey_lock_for_prio_graph,
+            )
             .unwrap();
         assert_eq!(
             scheduling_summary.num_scheduled,
@@ -791,7 +821,12 @@ mod tests {
             create_container((0..4).map(|i| (Keypair::new(), [Pubkey::new_unique()], 1, i)));
 
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(
+                &mut container,
+                test_pre_graph_filter,
+                test_pre_lock_filter,
+                test_allow_pubkey_lock_for_prio_graph,
+            )
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 4);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
@@ -832,7 +867,12 @@ mod tests {
         // not have knowledge of the joining at transaction [4] until after [0] and [1]
         // have been scheduled.
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(
+                &mut container,
+                test_pre_graph_filter,
+                test_pre_lock_filter,
+                test_allow_pubkey_lock_for_prio_graph,
+            )
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 4);
         assert_eq!(scheduling_summary.num_unschedulable, 2);
@@ -845,7 +885,12 @@ mod tests {
 
         // Cannot schedule even on next pass because of lock conflicts
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(
+                &mut container,
+                test_pre_graph_filter,
+                test_pre_lock_filter,
+                test_allow_pubkey_lock_for_prio_graph,
+            )
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 0);
         assert_eq!(scheduling_summary.num_unschedulable, 2);
@@ -859,7 +904,12 @@ mod tests {
             .unwrap();
         scheduler.receive_completed(&mut container).unwrap();
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .schedule(
+                &mut container,
+                test_pre_graph_filter,
+                test_pre_lock_filter,
+                test_allow_pubkey_lock_for_prio_graph,
+            )
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
@@ -885,7 +935,12 @@ mod tests {
         let pre_lock_filter =
             |tx: &SanitizedTransaction| tx.message().fee_payer() != &keypair.pubkey();
         let scheduling_summary = scheduler
-            .schedule(&mut container, test_pre_graph_filter, pre_lock_filter)
+            .schedule(
+                &mut container,
+                test_pre_graph_filter,
+                pre_lock_filter,
+                test_allow_pubkey_lock_for_prio_graph,
+            )
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 2);
         assert_eq!(scheduling_summary.num_unschedulable, 0);
