@@ -603,19 +603,21 @@ impl BankingStage {
 
         // Spawn a separate thread that deserializes packets and sends them to the scheduler
         let (deserialized_sender, deserialized_receiver) = unbounded();
-        bank_thread_hdls.push({
-            let packet_receive_and_buffer = PacketReceiveAndBuffer::new(
-                non_vote_receiver,
-                bank_forks.clone(),
-                deserialized_sender,
-            );
-            Builder::new()
-                .name("solBnkPktRcvBuf".to_string())
-                .spawn(move || {
-                    packet_receive_and_buffer.run();
-                })
-                .unwrap()
-        });
+        for idx in 0..4 {
+            bank_thread_hdls.push({
+                let packet_receive_and_buffer = PacketReceiveAndBuffer::new(
+                    non_vote_receiver.clone(),
+                    bank_forks.clone(),
+                    deserialized_sender.clone(),
+                );
+                Builder::new()
+                    .name(format!("solBnkPktRcvBuf{idx:02}"))
+                    .spawn(move || {
+                        packet_receive_and_buffer.run();
+                    })
+                    .unwrap()
+            });
+        }
 
         // Spawn the central scheduler thread
         bank_thread_hdls.push({
