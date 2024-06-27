@@ -70,10 +70,13 @@ impl PacketReceiveAndBuffer {
         let lock_results: [_; PACKETS_PER_BATCH] = core::array::from_fn(|_| Ok(()));
         let mut error_counters = TransactionErrorMetrics::default();
 
+        let mut deserialized_packets_and_transactions =
+            Vec::with_capacity(packet_batches.iter().map(|batch| batch.len()).sum());
+
         for packet_batch in packet_batches {
             assert!(packet_batch.len() <= PACKETS_PER_BATCH);
             let packet_indexes = PacketDeserializer::generate_packet_indexes(packet_batch);
-            let mut deserialized_packets_and_transactions: Vec<_> =
+            let mut local_deserialized_packets_and_transactions: Vec<_> =
                 PacketDeserializer::deserialize_packets(
                     packet_batch,
                     &packet_indexes,
@@ -103,7 +106,7 @@ impl PacketReceiveAndBuffer {
                 })
                 .collect();
             let mut tx_refs = ArrayVec::<_, PACKETS_PER_BATCH>::new();
-            for (_packet, tx) in &deserialized_packets_and_transactions {
+            for (_packet, tx) in &local_deserialized_packets_and_transactions {
                 tx_refs.push(tx);
             }
             let check_results = bank.check_transactions(
@@ -114,15 +117,16 @@ impl PacketReceiveAndBuffer {
             );
             drop(tx_refs);
 
-            let mut idx = 0;
-            deserialized_packets_and_transactions.retain(|_| {
-                let result = &check_results[idx];
-                idx += 1;
-                result.is_ok()
-            });
-
-            // TODO: exit on error
-            let _ = self.sender.send(deserialized_packets_and_transactions);
+            deserialized_packets_and_transactions.extend(
+                local_deserialized_packets_and_transactions
+                    .drain(..)
+                    .zip(check_results)
+                    .filter(|(_, result)| result.is_ok())
+                    .map(|(packet, _)| packet),
+            );
         }
+
+        // TODO: exit on error
+        let _ = self.sender.send(deserialized_packets_and_transactions);
     }
 }
