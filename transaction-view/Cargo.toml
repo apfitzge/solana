@@ -10,3 +10,13 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+solana-sdk = { workspace = true }
+qualifier_attr = { workspace = true }
+
+[dev-dependencies]
+# See order-crates-for-publishing.py for using this unusual `path = "."`
+agave-transaction-view = { path = ".", features = ["dev-context-only-utils"] }
+bincode = { workspace = true }
+
+[features]
+dev-context-only-utils = []

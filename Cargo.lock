@@ -219,6 +219,12 @@ dependencies = [
 [[package]]
 name = "agave-transaction-view"
 version = "2.1.0"
+dependencies = [
+ "agave-transaction-view",
+ "bincode",
+ "qualifier_attr",
+ "solana-sdk",
+]
 
 [[package]]
 name = "agave-validator"
