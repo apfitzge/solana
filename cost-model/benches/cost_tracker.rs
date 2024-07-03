@@ -12,6 +12,7 @@ use {
 
 struct BenchSetup {
     cost_tracker: CostTracker,
+    writable_accounts: Vec<Vec<Pubkey>>,
     tx_costs: Vec<TransactionCost>,
 }
 
@@ -22,19 +23,21 @@ fn setup(num_transactions: usize, contentious_transactions: bool) -> BenchSetup 
 
     let max_accounts_per_tx = 128;
     let pubkey = Pubkey::new_unique();
+    let mut writable_accounts = Vec::with_capacity(num_transactions);
     let tx_costs = (0..num_transactions)
         .map(|_| {
             let mut usage_cost_details = UsageCostDetails::default();
-            (0..max_accounts_per_tx).for_each(|_| {
-                let writable_account_key = if contentious_transactions {
-                    pubkey
-                } else {
-                    Pubkey::new_unique()
-                };
-                usage_cost_details
-                    .writable_accounts
-                    .push(writable_account_key)
-            });
+            writable_accounts.push(
+                (0..max_accounts_per_tx)
+                    .map(|_| {
+                        if contentious_transactions {
+                            pubkey
+                        } else {
+                            Pubkey::new_unique()
+                        }
+                    })
+                    .collect(),
+            );
             usage_cost_details.programs_execution_cost = 9999;
             TransactionCost::Transaction(usage_cost_details)
         })
@@ -42,6 +45,7 @@ fn setup(num_transactions: usize, contentious_transactions: bool) -> BenchSetup 
 
     BenchSetup {
         cost_tracker,
+        writable_accounts,
         tx_costs,
     }
 }
@@ -50,15 +54,20 @@ fn setup(num_transactions: usize, contentious_transactions: bool) -> BenchSetup 
 fn bench_cost_tracker_non_contentious_transaction(bencher: &mut Bencher) {
     let BenchSetup {
         mut cost_tracker,
+        writable_accounts,
         tx_costs,
     } = setup(1024, false);
 
     bencher.iter(|| {
-        for tx_cost in tx_costs.iter() {
-            if cost_tracker.try_add(tx_cost).is_err() {
+        for (writable_accounts, tx_cost) in writable_accounts.iter().zip(tx_costs.iter()) {
+            if cost_tracker
+                .try_add(writable_accounts.iter(), tx_cost)
+                .is_err()
+            {
                 break;
             } // stop when hit limits
-            cost_tracker.update_execution_cost(tx_cost, 0, 0); // update execution cost down to zero
+            cost_tracker.update_execution_cost(writable_accounts.iter(), tx_cost, 0, 0);
+            // update execution cost down to zero
         }
     });
 }
@@ -67,15 +76,20 @@ fn bench_cost_tracker_non_contentious_transaction(bencher: &mut Bencher) {
 fn bench_cost_tracker_contentious_transaction(bencher: &mut Bencher) {
     let BenchSetup {
         mut cost_tracker,
+        writable_accounts,
         tx_costs,
     } = setup(1024, true);
 
     bencher.iter(|| {
-        for tx_cost in tx_costs.iter() {
-            if cost_tracker.try_add(tx_cost).is_err() {
+        for (writable_accounts, tx_cost) in writable_accounts.iter().zip(tx_costs.iter()) {
+            if cost_tracker
+                .try_add(writable_accounts.iter(), tx_cost)
+                .is_err()
+            {
                 break;
             } // stop when hit limits
-            cost_tracker.update_execution_cost(tx_cost, 0, 0); // update execution cost down to zero
+            cost_tracker.update_execution_cost(writable_accounts.iter(), tx_cost, 0, 0);
+            // update execution cost down to zero
         }
     });
 }

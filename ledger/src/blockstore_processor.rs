@@ -253,7 +253,7 @@ fn check_block_cost_limits(
 ) -> Result<()> {
     assert_eq!(loaded_accounts_stats.len(), execution_results.len());
 
-    let tx_costs_with_actual_execution_units: Vec<_> = execution_results
+    let writable_accounts_and_tx_costs_with_actual_execution_units: Vec<_> = execution_results
         .iter()
         .zip(loaded_accounts_stats)
         .zip(sanitized_transactions)
@@ -267,7 +267,7 @@ fn check_block_cost_limits(
                         .map_or(0, |stats| stats.loaded_accounts_data_size),
                     &bank.feature_set,
                 );
-                Some(tx_cost)
+                Some((writable_accounts_iter(tx), tx_cost))
             } else {
                 None
             }
@@ -276,13 +276,24 @@ fn check_block_cost_limits(
 
     {
         let mut cost_tracker = bank.write_cost_tracker().unwrap();
-        for tx_cost in &tx_costs_with_actual_execution_units {
+        for (writable_accounts, tx_cost) in
+            writable_accounts_and_tx_costs_with_actual_execution_units
+        {
             cost_tracker
-                .try_add(tx_cost)
+                .try_add(writable_accounts, &tx_cost)
                 .map_err(TransactionError::from)?;
         }
     }
     Ok(())
+}
+
+fn writable_accounts_iter(tx: &SanitizedTransaction) -> impl Iterator<Item = &Pubkey> + Clone {
+    tx.message()
+        .account_keys()
+        .iter()
+        .enumerate()
+        .filter(|(index, _key)| tx.message().is_writable(*index))
+        .map(|(_index, key)| key)
 }
 
 #[derive(Default)]

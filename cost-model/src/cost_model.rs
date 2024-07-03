@@ -34,11 +34,9 @@ impl CostModel {
         feature_set: &FeatureSet,
     ) -> TransactionCost {
         if transaction.is_simple_vote_transaction() {
-            TransactionCost::SimpleVote {
-                writable_accounts: Self::get_writable_accounts(transaction),
-            }
+            TransactionCost::SimpleVote
         } else {
-            let mut tx_cost = UsageCostDetails::new_with_default_capacity();
+            let mut tx_cost = UsageCostDetails::default();
 
             Self::get_signature_cost(&mut tx_cost, transaction, feature_set);
             Self::get_write_lock_cost(&mut tx_cost, transaction, feature_set);
@@ -60,11 +58,9 @@ impl CostModel {
         feature_set: &FeatureSet,
     ) -> TransactionCost {
         if transaction.is_simple_vote_transaction() {
-            TransactionCost::SimpleVote {
-                writable_accounts: Self::get_writable_accounts(transaction),
-            }
+            TransactionCost::SimpleVote
         } else {
-            let mut tx_cost = UsageCostDetails::new_with_default_capacity();
+            let mut tx_cost = UsageCostDetails::default();
 
             Self::get_signature_cost(&mut tx_cost, transaction, feature_set);
             Self::get_write_lock_cost(&mut tx_cost, transaction, feature_set);
@@ -116,20 +112,23 @@ impl CostModel {
             );
     }
 
-    fn get_writable_accounts(transaction: &SanitizedTransaction) -> Vec<Pubkey> {
+    pub fn writable_accounts_iter(
+        transaction: &SanitizedTransaction,
+    ) -> impl Iterator<Item = &Pubkey> + Clone {
         let message = transaction.message();
         message
             .account_keys()
             .iter()
             .enumerate()
-            .filter_map(|(i, k)| {
-                if message.is_writable(i) {
-                    Some(*k)
-                } else {
-                    None
-                }
-            })
-            .collect()
+            .filter(|(i, _k)| message.is_writable(*i))
+            .map(|(_i, k)| k)
+    }
+
+    fn get_num_actual_writable_accounts(transaction: &SanitizedTransaction) -> u64 {
+        let message = transaction.message();
+        (0..message.account_keys().len())
+            .filter(|i| message.is_writable(*i))
+            .count() as u64
     }
 
     fn get_write_lock_cost(
@@ -137,12 +136,11 @@ impl CostModel {
         transaction: &SanitizedTransaction,
         feature_set: &FeatureSet,
     ) {
-        tx_cost.writable_accounts = Self::get_writable_accounts(transaction);
         let num_write_locks =
             if feature_set.is_active(&feature_set::cost_model_requested_write_lock_cost::id()) {
                 transaction.message().num_write_locks()
             } else {
-                tx_cost.writable_accounts.len() as u64
+                Self::get_num_actual_writable_accounts(transaction)
             };
         tx_cost.write_lock_cost = WRITE_LOCK_UNITS.saturating_mul(num_write_locks);
     }
@@ -429,7 +427,6 @@ mod tests {
         {
             let tx_cost = CostModel::calculate_cost(&simple_transaction, &FeatureSet::default());
             assert_eq!(WRITE_LOCK_UNITS, tx_cost.write_lock_cost());
-            assert_eq!(1, tx_cost.writable_accounts().len());
         }
 
         // Feature enabled - write lock is demoted but still counts towards cost
@@ -437,7 +434,6 @@ mod tests {
             let tx_cost =
                 CostModel::calculate_cost(&simple_transaction, &FeatureSet::all_enabled());
             assert_eq!(2 * WRITE_LOCK_UNITS, tx_cost.write_lock_cost());
-            assert_eq!(1, tx_cost.writable_accounts().len());
         }
     }
 
@@ -581,37 +577,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cost_model_sort_message_accounts_by_type() {
-        // construct a transaction with two random instructions with same signer
-        let signer1 = Keypair::new();
-        let signer2 = Keypair::new();
-        let key1 = Pubkey::new_unique();
-        let key2 = Pubkey::new_unique();
-        let prog1 = Pubkey::new_unique();
-        let prog2 = Pubkey::new_unique();
-        let instructions = vec![
-            CompiledInstruction::new(4, &(), vec![0, 2]),
-            CompiledInstruction::new(5, &(), vec![1, 3]),
-        ];
-        let tx = SanitizedTransaction::from_transaction_for_tests(
-            Transaction::new_with_compiled_instructions(
-                &[&signer1, &signer2],
-                &[key1, key2],
-                Hash::new_unique(),
-                vec![prog1, prog2],
-                instructions,
-            ),
-        );
-
-        let tx_cost = CostModel::calculate_cost(&tx, &FeatureSet::all_enabled());
-        assert_eq!(2 + 2, tx_cost.writable_accounts().len());
-        assert_eq!(signer1.pubkey(), tx_cost.writable_accounts()[0]);
-        assert_eq!(signer2.pubkey(), tx_cost.writable_accounts()[1]);
-        assert_eq!(key1, tx_cost.writable_accounts()[2]);
-        assert_eq!(key2, tx_cost.writable_accounts()[3]);
-    }
-
-    #[test]
     fn test_cost_model_calculate_cost_all_default() {
         let (mint_keypair, start_hash) = test_setup();
         let tx = SanitizedTransaction::from_transaction_for_tests(system_transaction::transfer(
@@ -635,7 +600,6 @@ mod tests {
         let tx_cost = CostModel::calculate_cost(&tx, &FeatureSet::all_enabled());
         assert_eq!(expected_account_cost, tx_cost.write_lock_cost());
         assert_eq!(*expected_execution_cost, tx_cost.programs_execution_cost());
-        assert_eq!(2, tx_cost.writable_accounts().len());
         assert_eq!(
             expected_loaded_accounts_data_size_cost,
             tx_cost.loaded_accounts_data_size_cost()
@@ -671,7 +635,6 @@ mod tests {
         let tx_cost = CostModel::calculate_cost(&tx, &feature_set);
         assert_eq!(expected_account_cost, tx_cost.write_lock_cost());
         assert_eq!(expected_execution_cost, tx_cost.programs_execution_cost());
-        assert_eq!(2, tx_cost.writable_accounts().len());
         assert_eq!(
             expected_loaded_accounts_data_size_cost,
             tx_cost.loaded_accounts_data_size_cost()

@@ -110,7 +110,10 @@ impl ForwardPacketBatchesByAccounts {
     ) -> bool {
         let tx_cost = CostModel::calculate_cost(sanitized_transaction, feature_set);
 
-        if let Ok(updated_costs) = self.cost_tracker.try_add(&tx_cost) {
+        if let Ok(updated_costs) = self.cost_tracker.try_add(
+            CostModel::writable_accounts_iter(sanitized_transaction),
+            &tx_cost,
+        ) {
             let batch_index = self.get_batch_index_by_updated_costs(&tx_cost, &updated_costs);
 
             if let Some(forward_batch) = self.forward_batches.get_mut(batch_index) {
@@ -349,9 +352,7 @@ mod tests {
                 ForwardPacketBatchesByAccounts::new_with_default_batch_limits();
             forward_packet_batches_by_accounts.batch_vote_limit = test_cost + 1;
 
-            let transaction_cost = TransactionCost::SimpleVote {
-                writable_accounts: vec![],
-            };
+            let transaction_cost = TransactionCost::SimpleVote;
             assert_eq!(
                 0,
                 forward_packet_batches_by_accounts.get_batch_index_by_updated_costs(
