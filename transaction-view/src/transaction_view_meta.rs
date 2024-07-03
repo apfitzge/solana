@@ -181,6 +181,10 @@ impl TransactionViewMeta {
         let static_accounts_offset = offset as u16;
         offset_array_len::<Pubkey>(bytes, &mut offset, num_static_accounts)?;
 
+        // Move to end of recent blockhash.
+        let recent_blockhash_offset = offset as u16;
+        offset_type::<Hash>(bytes, &mut offset)?;
+
         // It is possible that we have fewer than 3 bytes remaining. A case of
         // this is if we have a message with no instructions, and no address
         // lookups. Therefore, we cannot use the optimized
@@ -240,6 +244,7 @@ impl TransactionViewMeta {
         // Ensure that we have read the entire packet. If we have not, then
         // the packet is malformed.
         if offset != packet_len {
+            eprintln!("offset: {}, packet_len: {}", offset, packet_len);
             return None;
         }
 
@@ -257,11 +262,159 @@ impl TransactionViewMeta {
             message_offset,
             num_static_accounts,
             static_accounts_offset,
-            recent_blockhash_offset: message_offset + 1,
+            recent_blockhash_offset,
             num_instructions,
             instructions_offset,
             num_address_lookups: address_lookups_len,
             address_lookups_offset,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        solana_sdk::{
+            address_lookup_table::AddressLookupTableAccount,
+            message::{v0, Message, MessageHeader, VersionedMessage},
+            packet::Packet,
+            signature::Keypair,
+            signer::Signer,
+            system_instruction, system_program,
+            transaction::VersionedTransaction,
+        },
+    };
+
+    fn verify_transaction_view_meta(tx: &VersionedTransaction) {
+        let mut packet = Packet::default();
+        packet.populate_packet(None, tx).unwrap();
+        let bytes = packet.data(..).unwrap();
+        let meta = TransactionViewMeta::try_new(bytes).unwrap();
+
+        assert_eq!(meta.packet_len as usize, packet.meta().size);
+
+        assert_eq!(meta.num_signatures, tx.signatures.len() as u16);
+        assert_eq!(meta.signature_offset as usize, 1);
+
+        assert_eq!(
+            meta.num_required_signatures,
+            tx.message.header().num_required_signatures
+        );
+        assert_eq!(
+            meta.num_readonly_signed_accounts,
+            tx.message.header().num_readonly_signed_accounts
+        );
+        assert_eq!(
+            meta.num_readonly_unsigned_accounts,
+            tx.message.header().num_readonly_unsigned_accounts
+        );
+
+        assert_eq!(
+            meta.num_static_accounts,
+            tx.message.static_account_keys().len() as u16
+        );
+        assert_eq!(
+            meta.num_instructions,
+            tx.message.instructions().len() as u16
+        );
+        assert_eq!(
+            meta.num_address_lookups,
+            tx.message
+                .address_table_lookups()
+                .map(|x| x.len())
+                .unwrap_or(0) as u16
+        );
+    }
+
+    fn minimally_sized_transaction() -> VersionedTransaction {
+        VersionedTransaction {
+            signatures: vec![Signature::default()], // 1 signature to be valid.
+            message: VersionedMessage::Legacy(Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![Pubkey::default()],
+                recent_blockhash: Hash::default(),
+                instructions: vec![],
+            }),
+        }
+    }
+
+    fn simple_transfer() -> VersionedTransaction {
+        let payer = Pubkey::new_unique();
+        VersionedTransaction {
+            signatures: vec![Signature::default()], // 1 signature to be valid.
+            message: VersionedMessage::Legacy(Message::new(
+                &[system_instruction::transfer(
+                    &payer,
+                    &Pubkey::new_unique(),
+                    1,
+                )],
+                Some(&payer),
+            )),
+        }
+    }
+
+    fn simple_transfer_v0() -> VersionedTransaction {
+        let payer = Pubkey::new_unique();
+        VersionedTransaction {
+            signatures: vec![Signature::default()], // 1 signature to be valid.
+            message: VersionedMessage::V0(
+                v0::Message::try_compile(
+                    &payer,
+                    &[system_instruction::transfer(
+                        &payer,
+                        &Pubkey::new_unique(),
+                        1,
+                    )],
+                    &[],
+                    Hash::default(),
+                )
+                .unwrap(),
+            ),
+        }
+    }
+
+    fn v0_with_lookup() -> VersionedTransaction {
+        let payer = Pubkey::new_unique();
+        let to = Pubkey::new_unique();
+        VersionedTransaction {
+            signatures: vec![Signature::default()], // 1 signature to be valid.
+            message: VersionedMessage::V0(
+                v0::Message::try_compile(
+                    &payer,
+                    &[system_instruction::transfer(&payer, &to, 1)],
+                    &[AddressLookupTableAccount {
+                        key: Pubkey::new_unique(),
+                        addresses: vec![to],
+                    }],
+                    Hash::default(),
+                )
+                .unwrap(),
+            ),
+        }
+    }
+
+    #[test]
+    fn test_minimal_sized_transaction() {
+        verify_transaction_view_meta(&minimally_sized_transaction());
+    }
+
+    #[test]
+    fn test_simple_transfer() {
+        verify_transaction_view_meta(&simple_transfer());
+    }
+
+    #[test]
+    fn test_simple_transfer_v0() {
+        verify_transaction_view_meta(&simple_transfer_v0());
+    }
+
+    #[test]
+    fn test_v0_with_lookup() {
+        verify_transaction_view_meta(&v0_with_lookup());
     }
 }
