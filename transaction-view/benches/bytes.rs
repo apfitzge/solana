@@ -1,7 +1,7 @@
 #![feature(test)]
 
 use {
-    agave_transaction_view::bytes::unchecked_read_u16_compressed,
+    agave_transaction_view::bytes::{read_compressed_u16, unchecked_read_compressed_u16},
     bincode::{serialize_into, DefaultOptions, Options},
     solana_sdk::short_vec::{decode_shortu16_len, ShortU16},
     test::Bencher,
@@ -33,7 +33,7 @@ fn bench_decode_shortu16_len(bencher: &mut Bencher) {
     bencher.iter(|| {
         for (value, serialized_len, buffer) in values_serialized_lengths_and_buffers.iter() {
             // Read the value back using bincode's decode
-            let (read_value, bytes_read) = decode_shortu16_len(&buffer).unwrap();
+            let (read_value, bytes_read) = decode_shortu16_len(buffer).unwrap();
 
             // Assert that the read value matches the original value
             assert_eq!(read_value, *value as usize, "Value mismatch for: {}", value);
@@ -49,7 +49,7 @@ fn bench_decode_shortu16_len(bencher: &mut Bencher) {
 }
 
 #[bench]
-fn bench_unchecked_read_u16_compressed(bencher: &mut Bencher) {
+fn bench_unchecked_read_compressed_u16(bencher: &mut Bencher) {
     let values_serialized_lengths_and_buffers = setup();
 
     bencher.iter(|| {
@@ -57,17 +57,33 @@ fn bench_unchecked_read_u16_compressed(bencher: &mut Bencher) {
             let mut offset = 0;
 
             // Read the value back using unchecked_read_u16_compressed
-            let read_value = unchecked_read_u16_compressed(&buffer, &mut offset);
+            let read_value = unchecked_read_compressed_u16(buffer, &mut offset);
 
             // Assert that the read value matches the original value
             assert_eq!(read_value, *value, "Value mismatch for: {}", value);
 
             // Assert that the offset matches the serialized length
-            assert_eq!(
-                offset, *serialized_len as usize,
-                "Offset mismatch for: {}",
-                value
-            );
+            assert_eq!(offset, *serialized_len, "Offset mismatch for: {}", value);
+        }
+    })
+}
+
+#[bench]
+fn bench_read_compressed_u16(bencher: &mut Bencher) {
+    let values_serialized_lengths_and_buffers = setup();
+
+    bencher.iter(|| {
+        for (value, serialized_len, buffer) in values_serialized_lengths_and_buffers.iter() {
+            let mut offset = 0;
+
+            // Read the value back using unchecked_read_u16_compressed
+            let read_value = read_compressed_u16(buffer, &mut offset).unwrap();
+
+            // Assert that the read value matches the original value
+            assert_eq!(read_value, *value, "Value mismatch for: {}", value);
+
+            // Assert that the offset matches the serialized length
+            assert_eq!(offset, *serialized_len, "Offset mismatch for: {}", value);
         }
     })
 }
