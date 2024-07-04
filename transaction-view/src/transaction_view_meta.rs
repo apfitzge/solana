@@ -244,7 +244,6 @@ impl TransactionViewMeta {
         // Ensure that we have read the entire packet. If we have not, then
         // the packet is malformed.
         if offset != packet_len {
-            eprintln!("offset: {}, packet_len: {}", offset, packet_len);
             return None;
         }
 
@@ -416,5 +415,102 @@ mod tests {
     #[test]
     fn test_v0_with_lookup() {
         verify_transaction_view_meta(&v0_with_lookup());
+    }
+
+    #[test]
+    fn test_trailing_byte() {
+        let tx = simple_transfer();
+        let mut packet = Packet::default();
+        packet.populate_packet(None, &tx).unwrap();
+        let bytes = packet.data(..).unwrap();
+        let mut bytes = bytes.to_vec();
+        bytes.push(0);
+        assert!(TransactionViewMeta::try_new(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_insufficient_bytes() {
+        let tx = simple_transfer();
+        let mut packet = Packet::default();
+        packet.populate_packet(None, &tx).unwrap();
+        let bytes = packet.data(..).unwrap();
+        let bytes = &bytes[..bytes.len() - 1];
+        assert!(TransactionViewMeta::try_new(bytes).is_none());
+    }
+
+    #[test]
+    fn test_signature_overflow() {
+        let tx = simple_transfer();
+        let mut packet = Packet::default();
+        packet.populate_packet(None, &tx).unwrap();
+        let bytes = packet.data(..).unwrap();
+        let mut bytes = bytes.to_vec();
+        // Set the number of signatures to u16::MAX
+        bytes[0] = 0xff;
+        bytes[1] = 0xff;
+        bytes[2] = 0xff;
+        assert!(TransactionViewMeta::try_new(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_account_key_overflow() {
+        let tx = simple_transfer();
+        let mut packet = Packet::default();
+        packet.populate_packet(None, &tx).unwrap();
+        let bytes = packet.data(..).unwrap();
+        let mut bytes = bytes.to_vec();
+        // Set the number of accounts to u16::MAX
+        let offset = 1 + core::mem::size_of::<Signature>() + 3;
+        bytes[offset + 0] = 0xff;
+        bytes[offset + 1] = 0xff;
+        bytes[offset + 2] = 0xff;
+        assert!(TransactionViewMeta::try_new(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_instructions_overflow() {
+        let tx = simple_transfer();
+        let mut packet = Packet::default();
+        packet.populate_packet(None, &tx).unwrap();
+        let bytes = packet.data(..).unwrap();
+        let mut bytes = bytes.to_vec();
+        // Set the number of instructions to u16::MAX
+        let offset = 1
+            + core::mem::size_of::<Signature>()
+            + 3
+            + 1
+            + 3 * core::mem::size_of::<Pubkey>()
+            + core::mem::size_of::<Hash>();
+        bytes[offset + 0] = 0xff;
+        bytes[offset + 1] = 0xff;
+        bytes[offset + 2] = 0xff;
+        assert!(TransactionViewMeta::try_new(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_alt_overflow() {
+        let tx = simple_transfer_v0();
+        let mut packet = Packet::default();
+        packet.populate_packet(None, &tx).unwrap();
+        let bytes = packet.data(..).unwrap();
+        let mut bytes = bytes.to_vec();
+        // Set the number of instructions to u16::MAX
+        let offset = 1 // byte for num signatures
+            + core::mem::size_of::<Signature>() // signature
+            + 1 // version byte
+            + 3 // message header
+            + 1 // byte for num account keys
+            + 3 * core::mem::size_of::<Pubkey>() // account keys
+            + core::mem::size_of::<Hash>() // recent blockhash
+            + 1 // byte for num instructions
+            + 1 // program index
+            + 1 // byte for num accounts
+            + 2 // bytes for account index
+            + 1
+            + core::mem::size_of::<u64>();
+        bytes[offset + 0] = 0xff;
+        bytes[offset + 1] = 0xff;
+        bytes[offset + 2] = 0xff;
+        assert!(TransactionViewMeta::try_new(&bytes).is_none());
     }
 }
