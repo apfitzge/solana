@@ -490,6 +490,9 @@ mod tests {
     #[test]
     fn test_alt_overflow() {
         let tx = simple_transfer_v0();
+
+        let ix_bytes = tx.message.instructions()[0].data.len();
+
         let mut packet = Packet::default();
         packet.populate_packet(None, &tx).unwrap();
         let bytes = packet.data(..).unwrap();
@@ -506,11 +509,9 @@ mod tests {
             + 1 // program index
             + 1 // byte for num accounts
             + 2 // bytes for account index
-            + 1
-            + core::mem::size_of::<u64>();
-        bytes[offset + 0] = 0xff;
-        bytes[offset + 1] = 0xff;
-        bytes[offset + 2] = 0xff;
+            + 1 // byte for data length
+            + ix_bytes;
+        bytes[offset + 0] = 0x01;
         assert!(TransactionViewMeta::try_new(&bytes).is_none());
     }
 }
