@@ -18,6 +18,7 @@ use {
 /// to extract information from the transaction packet.
 //
 // - All offsets are relative to the start of the packet.
+#[allow(dead_code)]
 #[derive(Default)]
 pub struct TransactionViewMeta {
     /// The total length of the received packet.
