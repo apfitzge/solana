@@ -63,10 +63,10 @@ pub fn read_compressed_u16(bytes: &[u8], offset: &mut usize) -> Option<u16> {
 
 #[inline(always)]
 pub fn check_offset(bytes: &[u8], offset: usize) -> Option<()> {
-    if offset < bytes.len() {
-        Some(())
-    } else {
+    if offset > bytes.len() {
         None
+    } else {
+        Some(())
     }
 }
 
