@@ -28,12 +28,7 @@ fn create_simple_transfer_packet() -> Packet {
 
 const NUM_PACKETS: usize = 1024;
 
-#[bench]
-fn bench_versioned_transaction_deserialization(bencher: &mut Bencher) {
-    let packets = (0..NUM_PACKETS)
-        .map(|_| create_simple_transfer_packet())
-        .collect::<Vec<_>>();
-
+fn bench_versioned_transaction_deserialize_packets(bencher: &mut Bencher, packets: &[Packet]) {
     bencher.iter(|| {
         for packet in packets.iter() {
             let _: VersionedTransaction = packet.deserialize_slice(..).unwrap();
@@ -41,11 +36,7 @@ fn bench_versioned_transaction_deserialization(bencher: &mut Bencher) {
     });
 }
 
-#[bench]
-fn bench_transaction_view_try_new_from_slice(bencher: &mut Bencher) {
-    let packets = (0..NUM_PACKETS)
-        .map(|_| create_simple_transfer_packet())
-        .collect::<Vec<_>>();
+fn bench_transaction_view_try_new_from_slice_packets(bencher: &mut Bencher, packets: &[Packet]) {
     bencher.iter(|| {
         for packet in packets.iter() {
             let _ = TransactionView::try_new_from_slice(packet.data(..).unwrap()).unwrap();
@@ -53,11 +44,7 @@ fn bench_transaction_view_try_new_from_slice(bencher: &mut Bencher) {
     })
 }
 
-#[bench]
-fn bench_transaction_view_copy_from_slice(bencher: &mut Bencher) {
-    let packets = (0..NUM_PACKETS)
-        .map(|_| create_simple_transfer_packet())
-        .collect::<Vec<_>>();
+fn bench_transaction_view_copy_from_slice_packets(bencher: &mut Bencher, packets: &[Packet]) {
     let mut transaction_views = (0..NUM_PACKETS)
         .map(|_| TransactionView::default())
         .collect::<Vec<_>>();
@@ -72,13 +59,12 @@ fn bench_transaction_view_copy_from_slice(bencher: &mut Bencher) {
     })
 }
 
-#[bench]
-fn bench_transaction_view_try_new_from_boxed_data(bencher: &mut Bencher) {
-    let packets = (0..NUM_PACKETS)
-        .map(|_| create_simple_transfer_packet())
-        .collect::<Vec<_>>();
+fn bench_transaction_view_try_new_from_boxed_data_packets(
+    bencher: &mut Bencher,
+    packets: &[Packet],
+) {
     let mut boxed_data_and_lens = packets
-        .into_iter()
+        .iter()
         .map(|packet| {
             let packet_data = packet.data(..).unwrap();
             let mut boxed_data = Box::new([0u8; PACKET_DATA_SIZE]);
@@ -97,4 +83,34 @@ fn bench_transaction_view_try_new_from_boxed_data(bencher: &mut Bencher) {
             let _ = boxed_data_and_len.insert(transaction_view.take_data());
         }
     });
+}
+
+fn create_simple_transfer_packets() -> Vec<Packet> {
+    (0..NUM_PACKETS)
+        .map(|_| create_simple_transfer_packet())
+        .collect::<Vec<_>>()
+}
+
+#[bench]
+fn bench_versioned_transaction_deserialization(bencher: &mut Bencher) {
+    let packets = create_simple_transfer_packets();
+    bench_versioned_transaction_deserialize_packets(bencher, &packets);
+}
+
+#[bench]
+fn bench_transaction_view_try_new_from_slice(bencher: &mut Bencher) {
+    let packets = create_simple_transfer_packets();
+    bench_transaction_view_try_new_from_slice_packets(bencher, &packets);
+}
+
+#[bench]
+fn bench_transaction_view_copy_from_slice(bencher: &mut Bencher) {
+    let packets = create_simple_transfer_packets();
+    bench_transaction_view_copy_from_slice_packets(bencher, &packets);
+}
+
+#[bench]
+fn bench_transaction_view_try_new_from_boxed_data(bencher: &mut Bencher) {
+    let packets = create_simple_transfer_packets();
+    bench_transaction_view_try_new_from_boxed_data_packets(bencher, &packets);
 }
