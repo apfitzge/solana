@@ -55,6 +55,11 @@ impl TransactionView {
         self.populate_meta()
     }
 
+    /// Consume the `TransactionView` and return the boxed data and length.
+    pub fn take_data(self) -> (Box<[u8; PACKET_DATA_SIZE]>, usize) {
+        (self.data, self.len)
+    }
+
     fn populate_meta(&mut self) -> Option<()> {
         self.meta = TransactionViewMeta::try_new(&self.data[..self.len])?;
         Some(())
