@@ -74,6 +74,14 @@ pub fn offset_array_len<T: Sized>(bytes: &[u8], offset: &mut usize, len: u16) ->
     Some(())
 }
 
+/// Given the buffer, the current offset, and a length.
+/// Assumes the offset and lengths have already been validated.
+/// Returns a slice of length `len` of type `T`.
+#[inline(always)]
+pub fn unchecked_read_array<T: Sized>(bytes: &[u8], offset: usize, len: usize) -> &[T] {
+    unsafe { core::slice::from_raw_parts(bytes.as_ptr().add(offset) as *const T, len) }
+}
+
 /// Given the buffer, the current offset, and a length. Update the offset to
 /// point to the byte after the `T`.
 /// The size of `T` is assumed to be small enough such that a usize will not
