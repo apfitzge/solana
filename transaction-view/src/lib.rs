@@ -4,4 +4,5 @@ pub mod bytes;
 mod bytes;
 
 pub mod transaction_version;
+pub mod transaction_view;
 pub mod transaction_view_meta;
