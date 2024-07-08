@@ -61,6 +61,23 @@ pub fn read_compressed_u16(bytes: &[u8], offset: &mut usize) -> Option<u16> {
     Some(result)
 }
 
+#[inline(always)]
+pub fn check_offset(bytes: &[u8], offset: usize) -> Option<()> {
+    if offset < bytes.len() {
+        Some(())
+    } else {
+        None
+    }
+}
+
+/// Given the current offset and a length, update the offset to point to the
+/// byte after the array of length `len` and of type `T`.
+/// The offset is not checked to still be within the bounds of the buffer.
+#[inline(always)]
+pub fn unchecked_offset_array_len<T: Sized>(offset: &mut usize, len: u16) {
+    *offset += (len as usize) * core::mem::size_of::<T>();
+}
+
 /// Given the buffer, the current offset, and a length. Update the offset to
 /// point to the byte after the array of length `len` of type `T`.
 /// The size of `T` is assumed to be small enough such that a usize will not
@@ -68,10 +85,7 @@ pub fn read_compressed_u16(bytes: &[u8], offset: &mut usize) -> Option<u16> {
 #[inline(always)]
 pub fn offset_array_len<T: Sized>(bytes: &[u8], offset: &mut usize, len: u16) -> Option<()> {
     *offset = offset.checked_add((len as usize) * core::mem::size_of::<T>())?;
-    if *offset > bytes.len() {
-        return None;
-    }
-    Some(())
+    check_offset(bytes, *offset)
 }
 
 /// Given the buffer, the current offset, and a length.
@@ -87,13 +101,18 @@ pub fn unchecked_read_array<T: Sized>(bytes: &[u8], offset: usize, len: usize) -
 /// The size of `T` is assumed to be small enough such that a usize will not
 /// overflow, given then offset is currently less than u16::MAX.
 #[inline(always)]
-pub fn offset_type<T: Sized>(bytes: &[u8], offset: &mut usize) -> Option<()> {
+pub fn unchecked_offset_type<T: Sized>(offset: &mut usize) {
     *offset += core::mem::size_of::<T>();
-    if *offset > bytes.len() {
-        None
-    } else {
-        Some(())
-    }
+}
+
+/// Given the buffer, the current offset, and a length. Update the offset to
+/// point to the byte after the `T`.
+/// The size of `T` is assumed to be small enough such that a usize will not
+/// overflow, given then offset is currently less than u16::MAX.
+#[inline(always)]
+pub fn offset_type<T: Sized>(bytes: &[u8], offset: &mut usize) -> Option<()> {
+    unchecked_offset_type::<T>(offset);
+    check_offset(bytes, *offset)
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 use {
     crate::{
         bytes::{
-            offset_array_len, offset_type, read_byte, read_compressed_u16, unchecked_read_byte,
-            unchecked_read_compressed_u16,
+            read_compressed_u16, unchecked_offset_array_len, unchecked_offset_type,
+            unchecked_read_byte, unchecked_read_compressed_u16,
         },
         transaction_version::TransactionVersion,
     },
@@ -91,8 +91,10 @@ impl TransactionViewMeta {
         // the array elements. We can avoid a checked multiplication if the
         // types in our arrays are small enough such that
         // `u16::MAX * size_of::<T>` does not overflow a usize.
+        // Further, we can avoid a checked addition if the offset is assumed to
+        // be less than a u16::MAX, and our size is less than the below const.
         #[allow(dead_code)] // This is used in the assert below.
-        const MAX_SIZE_OF_T: usize = usize::MAX / (u16::MAX as usize);
+        const MAX_SIZE_OF_T: usize = (usize::MAX - u16::MAX as usize) / (u16::MAX as usize);
         const _: () = assert!(core::mem::size_of::<u8>() <= MAX_SIZE_OF_T);
         const _: () = assert!(core::mem::size_of::<Signature>() <= MAX_SIZE_OF_T);
         const _: () = assert!(core::mem::size_of::<Pubkey>() <= MAX_SIZE_OF_T);
@@ -127,8 +129,9 @@ impl TransactionViewMeta {
         // compressed u16 can only use up to 3 bytes, so there is no need to
         // check if the offset is greater than u16::MAX.
         let signature_offset = offset as u16;
-        // Update offset for array of signatures.
-        offset_array_len::<Signature>(bytes, &mut offset, num_signatures)?;
+        // Update offset for array of signatures. We do not need to check if we
+        // overflow here, because we will check before the next read.
+        unchecked_offset_array_len::<Signature>(&mut offset, num_signatures);
 
         // Get the message offset.
         // We know the offset does not exceed packet length, and our packet
@@ -180,11 +183,13 @@ impl TransactionViewMeta {
         let num_static_accounts = unchecked_read_compressed_u16(bytes, &mut offset);
         // Previous guarantees means that the offset is still less than u16::MAX.
         let static_accounts_offset = offset as u16;
-        offset_array_len::<Pubkey>(bytes, &mut offset, num_static_accounts)?;
+        // We can safely increment the offset here, as long as we check bounds
+        // before the next read.
+        unchecked_offset_array_len::<Pubkey>(&mut offset, num_static_accounts);
 
         // Move to end of recent blockhash.
         let recent_blockhash_offset = offset as u16;
-        offset_type::<Hash>(bytes, &mut offset)?;
+        unchecked_offset_type::<Hash>(&mut offset);
 
         // It is possible that we have fewer than 3 bytes remaining. A case of
         // this is if we have a message with no instructions, and no address
@@ -200,19 +205,19 @@ impl TransactionViewMeta {
         // each instruction to find the total size of the instructions,
         // and check for any malformed instructions or buffer overflows.
         for _ in 0..num_instructions {
-            // u8 for the program index.
-            read_byte(bytes, &mut offset)?;
+            // u8 for the program index. We can avoid checking bounds because
+            // it will be checked before the next read.
+            unchecked_offset_type::<u8>(&mut offset);
             // u16 for number of account indexes.
             let num_accounts = read_compressed_u16(bytes, &mut offset)?;
-            offset_array_len::<u8>(bytes, &mut offset, num_accounts)?;
+            // We can avoid checking bounds here because it will be checked
+            // before the next read.
+            unchecked_offset_array_len::<u8>(&mut offset, num_accounts);
             // u16 for the number of bytes in the instruction data.
             let data_len = read_compressed_u16(bytes, &mut offset)?;
-            // Offset is guaranteed to be less than u16::MAX, so we can safely
-            // do addition of a u16 here without overflow.
-            offset += usize::from(data_len);
-            if offset > packet_len {
-                return None;
-            }
+            // We can avoid checking bounds here because it will be checked
+            // before the next read.
+            unchecked_offset_array_len::<u8>(&mut offset, data_len);
         }
 
         // If the transaction is a V0 transaction, there may be address
@@ -228,14 +233,16 @@ impl TransactionViewMeta {
                 let address_lookups_offset = offset as u16;
 
                 for _ in 0..address_lookups_len {
-                    // Pubkey for address
-                    offset_type::<Pubkey>(bytes, &mut offset)?;
+                    // Pubkey for address.
+                    // We can safely increment the offset here, as long as we check bounds
+                    // before the next read.
+                    unchecked_offset_type::<Pubkey>(&mut offset);
                     // u16 for length of writable_indexes
                     let writable_indexes_len = read_compressed_u16(bytes, &mut offset)?;
-                    offset_array_len::<u8>(bytes, &mut offset, writable_indexes_len)?;
+                    unchecked_offset_array_len::<u8>(&mut offset, writable_indexes_len);
                     // u16 for length of readonly_indexes
                     let readonly_indexes_len = read_compressed_u16(bytes, &mut offset)?;
-                    offset_array_len::<u8>(bytes, &mut offset, readonly_indexes_len)?;
+                    unchecked_offset_array_len::<u8>(&mut offset, readonly_indexes_len);
                 }
 
                 (address_lookups_len, address_lookups_offset)
