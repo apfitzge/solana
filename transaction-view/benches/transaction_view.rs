@@ -4,27 +4,17 @@ use {
     agave_transaction_view::transaction_view::TransactionView,
     solana_sdk::{
         hash::Hash,
+        message::Message,
         packet::{Packet, PACKET_DATA_SIZE},
         pubkey::Pubkey,
         signature::Keypair,
-        system_transaction,
-        transaction::VersionedTransaction,
+        signer::Signer,
+        system_instruction, system_transaction,
+        transaction::{Transaction, VersionedTransaction},
     },
     test::Bencher,
 };
 extern crate test;
-
-// Create a simple transfer transaction, convert to a `Packet`.
-fn create_simple_transfer_packet() -> Packet {
-    let transaction =
-        system_transaction::transfer(&Keypair::new(), &Pubkey::new_unique(), 1, Hash::default());
-    let versioned_transaction = VersionedTransaction::from(transaction);
-    let mut packet = Packet::default();
-    packet
-        .populate_packet(None, &versioned_transaction)
-        .unwrap();
-    packet
-}
 
 const NUM_PACKETS: usize = 1024;
 
@@ -85,32 +75,91 @@ fn bench_transaction_view_try_new_from_boxed_data_packets(
     });
 }
 
+// Create a simple transfer transaction, convert to a `Packet`.
+fn create_simple_transfer_packet() -> Packet {
+    let transaction =
+        system_transaction::transfer(&Keypair::new(), &Pubkey::new_unique(), 1, Hash::default());
+    let versioned_transaction = VersionedTransaction::from(transaction);
+    let mut packet = Packet::default();
+    packet
+        .populate_packet(None, &versioned_transaction)
+        .unwrap();
+    packet
+}
+
+// Create a transaction that does as many transfer ixs as possible.
+// Convert to Packet.
+fn create_packed_transfer_packet() -> Packet {
+    let from_keypair = Keypair::new();
+    let to_pubkey = Pubkey::new_unique();
+    // 60 transfer instructions.
+    let ixs = system_instruction::transfer_many(&from_keypair.pubkey(), &[(to_pubkey, 1); 60]);
+    let message = Message::new(&ixs, Some(&from_keypair.pubkey()));
+    let transaction = Transaction::new(&[from_keypair], message, Hash::default());
+    let versioned_transaction = VersionedTransaction::from(transaction);
+    let mut packet = Packet::default();
+    packet
+        .populate_packet(None, &versioned_transaction)
+        .unwrap();
+    packet
+}
+
 fn create_simple_transfer_packets() -> Vec<Packet> {
     (0..NUM_PACKETS)
         .map(|_| create_simple_transfer_packet())
         .collect::<Vec<_>>()
 }
 
+fn create_many_transfer_packets() -> Vec<Packet> {
+    (0..NUM_PACKETS)
+        .map(|_| create_packed_transfer_packet())
+        .collect::<Vec<_>>()
+}
+
 #[bench]
-fn bench_versioned_transaction_deserialization(bencher: &mut Bencher) {
+fn bench_versioned_transaction_deserialization_simple_transfer(bencher: &mut Bencher) {
     let packets = create_simple_transfer_packets();
     bench_versioned_transaction_deserialize_packets(bencher, &packets);
 }
 
 #[bench]
-fn bench_transaction_view_try_new_from_slice(bencher: &mut Bencher) {
+fn bench_transaction_view_try_new_from_slice_simple_transfer(bencher: &mut Bencher) {
     let packets = create_simple_transfer_packets();
     bench_transaction_view_try_new_from_slice_packets(bencher, &packets);
 }
 
 #[bench]
-fn bench_transaction_view_copy_from_slice(bencher: &mut Bencher) {
+fn bench_transaction_view_copy_from_slice_simple_transfer(bencher: &mut Bencher) {
     let packets = create_simple_transfer_packets();
     bench_transaction_view_copy_from_slice_packets(bencher, &packets);
 }
 
 #[bench]
-fn bench_transaction_view_try_new_from_boxed_data(bencher: &mut Bencher) {
+fn bench_transaction_view_try_new_from_boxed_data_simple_transfer(bencher: &mut Bencher) {
     let packets = create_simple_transfer_packets();
+    bench_transaction_view_try_new_from_boxed_data_packets(bencher, &packets);
+}
+
+#[bench]
+fn bench_versioned_transaction_deserialization_packed_transfer(bencher: &mut Bencher) {
+    let packets = create_many_transfer_packets();
+    bench_versioned_transaction_deserialize_packets(bencher, &packets);
+}
+
+#[bench]
+fn bench_transaction_view_try_new_from_slice_packed_transfer(bencher: &mut Bencher) {
+    let packets = create_many_transfer_packets();
+    bench_transaction_view_try_new_from_slice_packets(bencher, &packets);
+}
+
+#[bench]
+fn bench_transaction_view_copy_from_slice_packed_transfer(bencher: &mut Bencher) {
+    let packets = create_many_transfer_packets();
+    bench_transaction_view_copy_from_slice_packets(bencher, &packets);
+}
+
+#[bench]
+fn bench_transaction_view_try_new_from_boxed_data_packed_transfer(bencher: &mut Bencher) {
+    let packets = create_many_transfer_packets();
     bench_transaction_view_try_new_from_boxed_data_packets(bencher, &packets);
 }
