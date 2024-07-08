@@ -278,9 +278,7 @@ mod tests {
             address_lookup_table::AddressLookupTableAccount,
             message::{v0, Message, MessageHeader, VersionedMessage},
             packet::Packet,
-            signature::Keypair,
-            signer::Signer,
-            system_instruction, system_program,
+            system_instruction,
             transaction::VersionedTransaction,
         },
     };
@@ -461,7 +459,7 @@ mod tests {
         let mut bytes = bytes.to_vec();
         // Set the number of accounts to u16::MAX
         let offset = 1 + core::mem::size_of::<Signature>() + 3;
-        bytes[offset + 0] = 0xff;
+        bytes[offset] = 0xff;
         bytes[offset + 1] = 0xff;
         bytes[offset + 2] = 0xff;
         assert!(TransactionViewMeta::try_new(&bytes).is_none());
@@ -481,7 +479,7 @@ mod tests {
             + 1
             + 3 * core::mem::size_of::<Pubkey>()
             + core::mem::size_of::<Hash>();
-        bytes[offset + 0] = 0xff;
+        bytes[offset] = 0xff;
         bytes[offset + 1] = 0xff;
         bytes[offset + 2] = 0xff;
         assert!(TransactionViewMeta::try_new(&bytes).is_none());
@@ -511,7 +509,7 @@ mod tests {
             + 2 // bytes for account index
             + 1 // byte for data length
             + ix_bytes;
-        bytes[offset + 0] = 0x01;
+        bytes[offset] = 0x01;
         assert!(TransactionViewMeta::try_new(&bytes).is_none());
     }
 }
