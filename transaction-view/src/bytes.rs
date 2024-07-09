@@ -24,8 +24,9 @@ pub fn read_compressed_u16(bytes: &[u8], offset: &mut usize) -> Option<u16> {
 
     for i in 0..3 {
         let byte = *bytes.get(*offset + i)?;
-        if i > 0 && byte == 0 {
-            return None; // non-minimal encoding
+        // non-minimal encoding or overflow
+        if (i > 0 && byte == 0) || (i == 2 && byte > 3) {
+            return None;
         }
         result |= ((byte & 0x7F) as u16) << shift;
         shift += 7;
@@ -165,8 +166,12 @@ mod tests {
         // Test bounds.
         // All 0s => 0
         assert_eq!(Some(0), read_compressed_u16(&[0; 3], &mut 0));
-        // All 1s => u16::MAX
-        assert_eq!(Some(u16::MAX), read_compressed_u16(&[u8::MAX; 3], &mut 0));
+        // Overflow
+        assert!(read_compressed_u16(&[0xFF, 0xFF, 0x04], &mut 0).is_none());
+        assert_eq!(
+            read_compressed_u16(&[0xFF, 0xFF, 0x03], &mut 0),
+            Some(u16::MAX)
+        );
 
         // overflow errors
         assert_eq!(None, read_compressed_u16(&[u8::MAX; 1], &mut 0));
