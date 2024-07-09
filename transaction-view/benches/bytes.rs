@@ -1,7 +1,7 @@
 #![feature(test)]
 
 use {
-    agave_transaction_view::bytes::{read_compressed_u16, unchecked_read_compressed_u16},
+    agave_transaction_view::bytes::read_compressed_u16,
     bincode::{serialize_into, DefaultOptions, Options},
     solana_sdk::short_vec::{decode_shortu16_len, ShortU16},
     test::Bencher,
@@ -44,26 +44,6 @@ fn bench_decode_shortu16_len(bencher: &mut Bencher) {
                 "Offset mismatch for: {}",
                 value
             );
-        }
-    })
-}
-
-#[bench]
-fn bench_unchecked_read_compressed_u16(bencher: &mut Bencher) {
-    let values_serialized_lengths_and_buffers = setup();
-
-    bencher.iter(|| {
-        for (value, serialized_len, buffer) in values_serialized_lengths_and_buffers.iter() {
-            let mut offset = 0;
-
-            // Read the value back using unchecked_read_u16_compressed
-            let read_value = unchecked_read_compressed_u16(buffer, &mut offset);
-
-            // Assert that the read value matches the original value
-            assert_eq!(read_value, *value, "Value mismatch for: {}", value);
-
-            // Assert that the offset matches the serialized length
-            assert_eq!(offset, *serialized_len, "Offset mismatch for: {}", value);
         }
     })
 }

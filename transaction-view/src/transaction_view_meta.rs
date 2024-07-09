@@ -2,7 +2,7 @@ use {
     crate::{
         bytes::{
             read_compressed_u16, unchecked_offset_array_len, unchecked_offset_type,
-            unchecked_read_byte, unchecked_read_compressed_u16,
+            unchecked_read_byte,
         },
         transaction_version::TransactionVersion,
     },
@@ -124,7 +124,7 @@ impl TransactionViewMeta {
         // We have already checked that the length is at least 134 bytes,
         // so it is safe for us to assume that there are at least 3 bytes
         // for our compressed u16 here.
-        let num_signatures = unchecked_read_compressed_u16(bytes, &mut offset);
+        let num_signatures = read_compressed_u16(bytes, &mut offset)?;
         // We also know that the offset must be less than 3 here, since the
         // compressed u16 can only use up to 3 bytes, so there is no need to
         // check if the offset is greater than u16::MAX.
@@ -180,7 +180,7 @@ impl TransactionViewMeta {
         // From our minimum-sized message of 69 bytes. We have read either 3 or 4.
         // This means we have at least 64 bytes remaining.
         // We can safely read the number of static accounts, without checking for overflow.
-        let num_static_accounts = unchecked_read_compressed_u16(bytes, &mut offset);
+        let num_static_accounts = read_compressed_u16(bytes, &mut offset)?;
         // Previous guarantees means that the offset is still less than u16::MAX.
         let static_accounts_offset = offset as u16;
         // We can safely increment the offset here, as long as we check bounds

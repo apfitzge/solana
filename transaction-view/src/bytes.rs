@@ -14,30 +14,6 @@ pub fn read_byte(bytes: &[u8], offset: &mut usize) -> Option<u8> {
     value
 }
 
-/// Read a compressed u16, without checking for buffer overflows.
-/// This should only be used if the caller has already verified that
-/// there are at least 3 bytes remaining.
-/// The offset is updated to point to the byte after the u16.
-#[inline(always)]
-pub fn unchecked_read_compressed_u16(bytes: &[u8], offset: &mut usize) -> u16 {
-    let mut result = 0u16;
-    let mut shift = 0;
-
-    for i in 0..3 {
-        let byte = *unsafe { bytes.get_unchecked(*offset + i) };
-        result |= ((byte & 0x7F) as u16) << shift;
-        shift += 7;
-        if byte & 0x80 == 0 {
-            *offset += i + 1;
-            return result;
-        }
-    }
-
-    // if we reach here, it means that all 3 bytes were used
-    *offset += 3;
-    result
-}
-
 /// Read a compressed u16, checking for buffer overflows.
 /// The offset is updated to point to the byte after the u16.
 /// Returns None if the buffer is too short to read the u16.
@@ -47,7 +23,10 @@ pub fn read_compressed_u16(bytes: &[u8], offset: &mut usize) -> Option<u16> {
     let mut shift = 0;
 
     for i in 0..3 {
-        let byte = bytes.get(*offset + i)?;
+        let byte = *bytes.get(*offset + i)?;
+        if i > 0 && byte == 0 {
+            return None; // non-minimal encoding
+        }
         result |= ((byte & 0x7F) as u16) << shift;
         shift += 7;
         if byte & 0x80 == 0 {
@@ -149,51 +128,6 @@ mod tests {
     }
 
     #[test]
-    fn test_unchecked_read_compressed_u16() {
-        let mut buffer = [0u8; 1024];
-        let options = DefaultOptions::new().with_fixint_encoding(); // Ensure fixed-int encoding
-
-        // Test all possible u16 values
-        for value in 0..=u16::MAX {
-            let mut offset;
-            let short_u16 = ShortU16(value);
-
-            // Serialize the value into the buffer
-            serialize_into(&mut buffer[..], &short_u16).expect("Serialization failed");
-
-            // Use bincode's size calculation to determine the length of the serialized data
-            let serialized_len = options
-                .serialized_size(&short_u16)
-                .expect("Failed to get serialized size");
-
-            // Reset offset
-            offset = 0;
-
-            // Read the value back using unchecked_read_u16_compressed
-            let read_value = unchecked_read_compressed_u16(&buffer, &mut offset);
-
-            // Assert that the read value matches the original value
-            assert_eq!(read_value, value, "Value mismatch for: {}", value);
-
-            // Assert that the offset matches the serialized length
-            assert_eq!(
-                offset, serialized_len as usize,
-                "Offset mismatch for: {}",
-                value
-            );
-        }
-
-        // Test bounds.
-        // All 0s => 0
-        assert_eq!(0, unchecked_read_compressed_u16(&[0; 3], &mut 0));
-        // All 1s => u16::MAX
-        assert_eq!(
-            u16::MAX,
-            unchecked_read_compressed_u16(&[u8::MAX; 3], &mut 0)
-        );
-    }
-
-    #[test]
     fn test_read_compressed_u16() {
         let mut buffer = [0u8; 1024];
         let options = DefaultOptions::new().with_fixint_encoding(); // Ensure fixed-int encoding
@@ -237,6 +171,9 @@ mod tests {
         // overflow errors
         assert_eq!(None, read_compressed_u16(&[u8::MAX; 1], &mut 0));
         assert_eq!(None, read_compressed_u16(&[u8::MAX; 2], &mut 0));
+
+        // Minimal encoding checks
+        assert!(read_compressed_u16(&[0x81, 0x80, 0x00], &mut 0).is_none());
     }
 
     #[test]
