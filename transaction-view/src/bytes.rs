@@ -1,7 +1,7 @@
 /// Reads the byte at the current offset without checking if the buffer is long enough.
 #[inline(always)]
 pub fn unchecked_read_byte(bytes: &[u8], offset: &mut usize) -> u8 {
-    let value = bytes[*offset];
+    let value = *unsafe { bytes.get_unchecked(*offset) };
     *offset += 1;
     value
 }
@@ -24,7 +24,7 @@ pub fn unchecked_read_compressed_u16(bytes: &[u8], offset: &mut usize) -> u16 {
     let mut shift = 0;
 
     for i in 0..3 {
-        let byte = bytes[*offset + i];
+        let byte = *unsafe { bytes.get_unchecked(*offset + i) };
         result |= ((byte & 0x7F) as u16) << shift;
         shift += 7;
         if byte & 0x80 == 0 {
