@@ -67,7 +67,9 @@ serde_bytes = { workspace = true }
 # See order-crates-for-publishing.py for using this unusual `path = "."`
 solana-accounts-db = { path = ".", features = ["dev-context-only-utils"] }
 solana-compute-budget = { workspace = true }
+solana-ledger = { workspace = true }
 solana-logger = { workspace = true }
+solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }
 solana-sdk = { workspace = true, features = ["dev-context-only-utils"] }
 solana-svm = { workspace = true, features = ["dev-context-only-utils"] }
 static_assertions = { workspace = true }
@@ -82,7 +84,11 @@ targets = ["x86_64-unknown-linux-gnu"]
 rustc_version = { workspace = true }
 
 [features]
-dev-context-only-utils = ["dep:qualifier_attr", "dep:solana-stake-program", "dep:solana-vote-program"]
+dev-context-only-utils = [
+    "dep:qualifier_attr",
+    "dep:solana-stake-program",
+    "dep:solana-vote-program",
+]
 frozen-abi = [
     "dep:solana-frozen-abi",
     "dep:solana-frozen-abi-macro",
