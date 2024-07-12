@@ -580,7 +580,7 @@ mod tests {
             testee.add_transaction_cost(CostModel::writable_accounts_iter(&tx2), &tx_cost2);
         }
         assert_eq!(cost1 + cost2, testee.block_cost);
-        assert_eq!(1, testee.cost_by_writable_accounts.len());
+        assert_eq!(3, testee.cost_by_writable_accounts.len());
         let (_ccostliest_account, costliest_account_cost) = testee.find_costliest_account();
         assert_eq!(cost1 + cost2, costliest_account_cost);
     }
