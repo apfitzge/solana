@@ -1,12 +1,12 @@
-use solana_sdk::{
-    fee::{FeeBudgetLimits, FeeDetails, FeeStructure},
-    message::SanitizedMessage,
+use {
+    solana_sdk::fee::{FeeBudgetLimits, FeeDetails, FeeStructure},
+    solana_svm_transaction::svm_message::SVMMessage,
 };
 
 /// Calculate fee for `SanitizedMessage`
 pub fn calculate_fee(
     fee_structure: &FeeStructure,
-    message: &SanitizedMessage,
+    message: &impl SVMMessage,
     lamports_per_signature: u64,
     budget_limits: &FeeBudgetLimits,
     include_loaded_account_data_size_in_fee: bool,
@@ -26,7 +26,7 @@ pub fn calculate_fee(
 /// Calculate fee details for `SanitizedMessage`
 pub fn calculate_fee_details(
     fee_structure: &FeeStructure,
-    message: &SanitizedMessage,
+    message: &impl SVMMessage,
     lamports_per_signature: u64,
     budget_limits: &FeeBudgetLimits,
     include_loaded_account_data_size_in_fee: bool,

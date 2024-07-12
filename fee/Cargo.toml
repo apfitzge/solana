@@ -10,3 +10,4 @@ edition = { workspace = true }
 
 [dependencies]
 solana-sdk = { workspace = true }
+solana-svm-transaction = { workspace = true }
