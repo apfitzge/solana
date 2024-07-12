@@ -10028,8 +10028,14 @@ fn calculate_test_fee(
     let budget_limits = process_compute_budget_instructions(message.program_instructions_iter())
         .unwrap_or_default()
         .into();
-
-    fee_structure.calculate_fee(message, lamports_per_signature, &budget_limits, false, true)
+    solana_fee::calculate_fee(
+        fee_structure,
+        message,
+        lamports_per_signature,
+        &budget_limits,
+        false,
+        true,
+    )
 }
 
 #[test]

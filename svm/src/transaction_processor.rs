@@ -451,7 +451,8 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         } = checked_details;
 
         let fee_budget_limits = FeeBudgetLimits::from(compute_budget_limits);
-        let fee_details = fee_structure.calculate_fee_details(
+        let fee_details = solana_fee::calculate_fee_details(
+            fee_structure,
             message,
             lamports_per_signature,
             &fee_budget_limits,

@@ -3068,7 +3068,8 @@ impl Bank {
         message: &SanitizedMessage,
         lamports_per_signature: u64,
     ) -> u64 {
-        self.fee_structure().calculate_fee(
+        solana_fee::calculate_fee(
+            self.fee_structure(),
             message,
             lamports_per_signature,
             &process_compute_budget_instructions(message.program_instructions_iter())

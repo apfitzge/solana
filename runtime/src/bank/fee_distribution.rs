@@ -85,7 +85,8 @@ impl Bank {
         transaction: &SanitizedTransaction,
         fee_budget_limits: &FeeBudgetLimits,
     ) -> u64 {
-        let fee_details = self.fee_structure().calculate_fee_details(
+        let fee_details = solana_fee::calculate_fee_details(
+            self.fee_structure(),
             transaction.message(),
             self.get_lamports_per_signature(),
             fee_budget_limits,
