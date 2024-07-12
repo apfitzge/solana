@@ -3890,7 +3890,8 @@ fn test_program_fees() {
         &ReservedAccountKeys::empty_key_set(),
     )
     .unwrap();
-    let expected_normal_fee = fee_structure.calculate_fee(
+    let expected_normal_fee = solana_fee::calculate_fee(
+        &fee_structure,
         &sanitized_message,
         congestion_multiplier,
         &process_compute_budget_instructions(sanitized_message.program_instructions_iter())
@@ -3918,7 +3919,8 @@ fn test_program_fees() {
         &ReservedAccountKeys::empty_key_set(),
     )
     .unwrap();
-    let expected_prioritized_fee = fee_structure.calculate_fee(
+    let expected_prioritized_fee = solana_fee::calculate_fee(
+        &fee_structure,
         &sanitized_message,
         congestion_multiplier,
         &process_compute_budget_instructions(sanitized_message.program_instructions_iter())
