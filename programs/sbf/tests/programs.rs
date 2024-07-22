@@ -3891,13 +3891,11 @@ fn test_program_fees() {
     )
     .unwrap();
     let expected_normal_fee = solana_fee::calculate_fee(
-        &fee_structure,
         &sanitized_message,
-        congestion_multiplier,
+        bank.get_lamports_per_signature(),
         &process_compute_budget_instructions(sanitized_message.program_instructions_iter())
             .unwrap_or_default()
             .into(),
-        false,
         true,
     );
     bank_client
@@ -3920,13 +3918,11 @@ fn test_program_fees() {
     )
     .unwrap();
     let expected_prioritized_fee = solana_fee::calculate_fee(
-        &fee_structure,
         &sanitized_message,
-        congestion_multiplier,
+        bank.get_lamports_per_signature(),
         &process_compute_budget_instructions(sanitized_message.program_instructions_iter())
             .unwrap_or_default()
             .into(),
-        false,
         true,
     );
     assert!(expected_normal_fee < expected_prioritized_fee);
