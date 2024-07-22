@@ -2645,7 +2645,6 @@ fn test_bank_tx_compute_unit_fee() {
             .fee_rate_governor
             .create_fee_calculator()
             .lamports_per_signature,
-        bank.fee_structure(),
     );
 
     let (expected_fee_collected, expected_fee_burned) =
@@ -2770,7 +2769,6 @@ fn test_bank_blockhash_fee_structure() {
     let cheap_fee = calculate_test_fee(
         &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
         cheap_lamports_per_signature,
-        bank.fee_structure(),
     );
     assert_eq!(
         bank.get_balance(&mint_keypair.pubkey()),
@@ -2786,7 +2784,6 @@ fn test_bank_blockhash_fee_structure() {
     let expensive_fee = calculate_test_fee(
         &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
         expensive_lamports_per_signature,
-        bank.fee_structure(),
     );
     assert_eq!(
         bank.get_balance(&mint_keypair.pubkey()),
@@ -2832,7 +2829,6 @@ fn test_bank_blockhash_compute_unit_fee_structure() {
     let cheap_fee = calculate_test_fee(
         &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
         cheap_lamports_per_signature,
-        bank.fee_structure(),
     );
     assert_eq!(
         bank.get_balance(&mint_keypair.pubkey()),
@@ -2848,7 +2844,6 @@ fn test_bank_blockhash_compute_unit_fee_structure() {
     let expensive_fee = calculate_test_fee(
         &new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique()))),
         expensive_lamports_per_signature,
-        bank.fee_structure(),
     );
     assert_eq!(
         bank.get_balance(&mint_keypair.pubkey()),
@@ -10020,52 +10015,21 @@ fn test_call_precomiled_program() {
     bank.process_transaction(&tx).unwrap();
 }
 
-fn calculate_test_fee(
-    message: &SanitizedMessage,
-    lamports_per_signature: u64,
-    fee_structure: &FeeStructure,
-) -> u64 {
+fn calculate_test_fee(message: &SanitizedMessage, lamports_per_signature: u64) -> u64 {
     let budget_limits = process_compute_budget_instructions(message.program_instructions_iter())
         .unwrap_or_default()
         .into();
-    solana_fee::calculate_fee(
-        fee_structure,
-        message,
-        lamports_per_signature,
-        &budget_limits,
-        false,
-        true,
-    )
+    solana_fee::calculate_fee(message, lamports_per_signature, &budget_limits, true)
 }
 
 #[test]
 fn test_calculate_fee() {
     // Default: no fee.
     let message = new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
-    assert_eq!(
-        calculate_test_fee(
-            &message,
-            0,
-            &FeeStructure {
-                lamports_per_signature: 0,
-                ..FeeStructure::default()
-            },
-        ),
-        0
-    );
+    assert_eq!(calculate_test_fee(&message, 0), 0);
 
     // One signature, a fee.
-    assert_eq!(
-        calculate_test_fee(
-            &message,
-            1,
-            &FeeStructure {
-                lamports_per_signature: 1,
-                ..FeeStructure::default()
-            },
-        ),
-        1
-    );
+    assert_eq!(calculate_test_fee(&message, 1), 1);
 
     // Two signatures, double the fee.
     let key0 = Pubkey::new_unique();
@@ -10073,17 +10037,7 @@ fn test_calculate_fee() {
     let ix0 = system_instruction::transfer(&key0, &key1, 1);
     let ix1 = system_instruction::transfer(&key1, &key0, 1);
     let message = new_sanitized_message(Message::new(&[ix0, ix1], Some(&key0)));
-    assert_eq!(
-        calculate_test_fee(
-            &message,
-            2,
-            &FeeStructure {
-                lamports_per_signature: 2,
-                ..FeeStructure::default()
-            },
-        ),
-        4
-    );
+    assert_eq!(calculate_test_fee(&message, 2), 4);
 }
 
 #[test]
@@ -10099,7 +10053,7 @@ fn test_calculate_fee_compute_units() {
 
     let message = new_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
     assert_eq!(
-        calculate_test_fee(&message, 1, &fee_structure,),
+        calculate_test_fee(&message, 1),
         max_fee + lamports_per_signature
     );
 
@@ -10109,7 +10063,7 @@ fn test_calculate_fee_compute_units() {
     let ix1 = system_instruction::transfer(&Pubkey::new_unique(), &Pubkey::new_unique(), 1);
     let message = new_sanitized_message(Message::new(&[ix0, ix1], Some(&Pubkey::new_unique())));
     assert_eq!(
-        calculate_test_fee(&message, 1, &fee_structure,),
+        calculate_test_fee(&message, 1),
         max_fee + 3 * lamports_per_signature
     );
 
@@ -10141,7 +10095,7 @@ fn test_calculate_fee_compute_units() {
             ],
             Some(&Pubkey::new_unique()),
         ));
-        let fee = calculate_test_fee(&message, 1, &fee_structure);
+        let fee = calculate_test_fee(&message, 1);
         assert_eq!(
             fee,
             lamports_per_signature + prioritization_fee_details.get_fee()
@@ -10172,11 +10126,7 @@ fn test_calculate_prioritization_fee() {
         Some(&Pubkey::new_unique()),
     ));
 
-    let fee = calculate_test_fee(
-        &message,
-        fee_structure.lamports_per_signature,
-        &fee_structure,
-    );
+    let fee = calculate_test_fee(&message, fee_structure.lamports_per_signature);
     assert_eq!(
         fee,
         fee_structure.lamports_per_signature + prioritization_fee
@@ -10185,10 +10135,6 @@ fn test_calculate_prioritization_fee() {
 
 #[test]
 fn test_calculate_fee_secp256k1() {
-    let fee_structure = FeeStructure {
-        lamports_per_signature: 1,
-        ..FeeStructure::default()
-    };
     let key0 = Pubkey::new_unique();
     let key1 = Pubkey::new_unique();
     let ix0 = system_instruction::transfer(&key0, &key1, 1);
@@ -10212,7 +10158,7 @@ fn test_calculate_fee_secp256k1() {
         ],
         Some(&key0),
     ));
-    assert_eq!(calculate_test_fee(&message, 1, &fee_structure,), 2);
+    assert_eq!(calculate_test_fee(&message, 1), 2);
 
     secp_instruction1.data = vec![0];
     secp_instruction2.data = vec![10];
@@ -10220,7 +10166,7 @@ fn test_calculate_fee_secp256k1() {
         &[ix0, secp_instruction1, secp_instruction2],
         Some(&key0),
     ));
-    assert_eq!(calculate_test_fee(&message, 1, &fee_structure,), 11);
+    assert_eq!(calculate_test_fee(&message, 1), 11);
 }
 
 #[test]
@@ -11798,10 +11744,6 @@ fn test_calculate_fee_with_congestion_multiplier() {
     let expensive_lamports_per_signature: u64 = base_lamports_per_signature * lamports_scale;
     let signature_count: u64 = 2;
     let signature_fee: u64 = 10;
-    let fee_structure = FeeStructure {
-        lamports_per_signature: signature_fee,
-        ..FeeStructure::default()
-    };
 
     // Two signatures, double the fee.
     let key0 = Pubkey::new_unique();
@@ -11813,14 +11755,14 @@ fn test_calculate_fee_with_congestion_multiplier() {
     // assert when lamports_per_signature is less than BASE_LAMPORTS, turnning on/off
     // congestion_multiplier has no effect on fee.
     assert_eq!(
-        calculate_test_fee(&message, cheap_lamports_per_signature, &fee_structure),
+        calculate_test_fee(&message, cheap_lamports_per_signature),
         signature_fee * signature_count
     );
 
     // assert when lamports_per_signature is more than BASE_LAMPORTS, turnning on/off
     // congestion_multiplier will change calculated fee.
     assert_eq!(
-        calculate_test_fee(&message, expensive_lamports_per_signature, &fee_structure,),
+        calculate_test_fee(&message, expensive_lamports_per_signature),
         signature_fee * signature_count
     );
 }
@@ -11833,10 +11775,6 @@ fn test_calculate_fee_with_request_heap_frame_flag() {
     let signature_fee: u64 = 10;
     let request_cu: u64 = 1;
     let lamports_per_cu: u64 = 5;
-    let fee_structure = FeeStructure {
-        lamports_per_signature: signature_fee,
-        ..FeeStructure::default()
-    };
     let message = new_sanitized_message(Message::new(
         &[
             system_instruction::transfer(&key0, &key1, 1),
@@ -11850,7 +11788,7 @@ fn test_calculate_fee_with_request_heap_frame_flag() {
     // assert when request_heap_frame is presented in tx, prioritization fee will be counted
     // into transaction fee
     assert_eq!(
-        calculate_test_fee(&message, lamports_per_signature, &fee_structure),
+        calculate_test_fee(&message, lamports_per_signature),
         signature_fee + request_cu * lamports_per_cu
     );
 }

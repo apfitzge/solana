@@ -744,13 +744,9 @@ impl Consumer {
         let budget_limits =
             process_compute_budget_instructions(message.program_instructions_iter())?.into();
         let fee = solana_fee::calculate_fee(
-            bank.fee_structure(),
             message,
-            bank.get_lamports_per_signature(),
+            bank.fee_structure().lamports_per_signature,
             &budget_limits,
-            bank.feature_set.is_active(
-                &feature_set::include_loaded_accounts_data_size_in_fee_calculation::id(),
-            ),
             bank.feature_set
                 .is_active(&feature_set::remove_rounding_in_fee_calculation::id()),
         );

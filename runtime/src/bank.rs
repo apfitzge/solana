@@ -114,8 +114,7 @@ use {
         epoch_schedule::EpochSchedule,
         feature,
         feature_set::{
-            self, include_loaded_accounts_data_size_in_fee_calculation,
-            remove_rounding_in_fee_calculation, reward_full_priority_fee, FeatureSet,
+            self, remove_rounding_in_fee_calculation, reward_full_priority_fee, FeatureSet,
         },
         fee::{FeeDetails, FeeStructure},
         fee_calculator::FeeRateGovernor,
@@ -3069,14 +3068,11 @@ impl Bank {
         lamports_per_signature: u64,
     ) -> u64 {
         solana_fee::calculate_fee(
-            self.fee_structure(),
             message,
             lamports_per_signature,
             &process_compute_budget_instructions(message.program_instructions_iter())
                 .unwrap_or_default()
                 .into(),
-            self.feature_set
-                .is_active(&include_loaded_accounts_data_size_in_fee_calculation::id()),
             self.feature_set
                 .is_active(&remove_rounding_in_fee_calculation::id()),
         )
