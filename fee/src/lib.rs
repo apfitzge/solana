@@ -32,7 +32,7 @@ pub fn calculate_fee_details(
     }
 
     let signature_fee = message
-        .num_signatures()
+        .num_total_signatures()
         .saturating_mul(lamports_per_signature);
 
     FeeDetails {
