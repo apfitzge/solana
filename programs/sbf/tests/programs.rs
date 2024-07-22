@@ -3867,6 +3867,7 @@ fn test_program_fees() {
     let fee_structure =
         FeeStructure::new(0.000005, 0.0, vec![(200, 0.0000005), (1400000, 0.000005)]);
     bank.set_fee_structure(&fee_structure);
+    let lamports_per_signature = bank.get_lamports_per_signature();
     let (bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
     let mut bank_client = BankClient::new_shared(bank);
     let authority_keypair = Keypair::new();
@@ -3892,7 +3893,7 @@ fn test_program_fees() {
     .unwrap();
     let expected_normal_fee = solana_fee::calculate_fee(
         &sanitized_message,
-        bank.get_lamports_per_signature(),
+        lamports_per_signature,
         &process_compute_budget_instructions(sanitized_message.program_instructions_iter())
             .unwrap_or_default()
             .into(),
@@ -3919,7 +3920,7 @@ fn test_program_fees() {
     .unwrap();
     let expected_prioritized_fee = solana_fee::calculate_fee(
         &sanitized_message,
-        bank.get_lamports_per_signature(),
+        lamports_per_signature,
         &process_compute_budget_instructions(sanitized_message.program_instructions_iter())
             .unwrap_or_default()
             .into(),
