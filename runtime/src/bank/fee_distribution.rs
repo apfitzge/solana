@@ -84,7 +84,7 @@ impl Bank {
     ) -> u64 {
         let fee_details = solana_fee::calculate_fee_details(
             transaction.message(),
-            self.fee_structure().lamports_per_signature,
+            self.get_lamports_per_signature(),
             fee_budget_limits,
             self.feature_set
                 .is_active(&remove_rounding_in_fee_calculation::id()),

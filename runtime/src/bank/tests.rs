@@ -4484,6 +4484,7 @@ fn test_status_cache_ancestors() {
 fn test_add_builtin() {
     let (genesis_config, mint_keypair) = create_genesis_config_no_tx_fee_no_rent(500);
     let mut bank = Bank::new_for_tests(&genesis_config);
+    bank.fee_structure.lamports_per_signature = 0; // no fees for this test
 
     fn mock_vote_program_id() -> Pubkey {
         Pubkey::from([42u8; 32])
@@ -4574,6 +4575,7 @@ fn test_add_duplicate_static_program() {
 
     let slot = bank.slot().saturating_add(1);
     let mut bank = Bank::new_from_parent(bank, &Pubkey::default(), slot);
+    bank.fee_structure.lamports_per_signature = 0; // no fees for this test
     bank.add_mockup_builtin(solana_vote_program::id(), MockBuiltin::vm);
     let bank = bank_forks
         .write()
@@ -6011,6 +6013,7 @@ fn test_account_ids_after_program_ids() {
     let slot = bank.slot().saturating_add(1);
     let mut bank = Bank::new_from_parent(bank, &Pubkey::default(), slot);
     bank.add_mockup_builtin(solana_vote_program::id(), MockBuiltin::vm);
+    bank.fee_structure.lamports_per_signature = 0; // no fees for this test
     let bank = bank_forks
         .write()
         .unwrap()
@@ -11737,42 +11740,11 @@ fn test_feature_hashes_per_tick() {
 }
 
 #[test]
-fn test_calculate_fee_with_congestion_multiplier() {
-    let lamports_scale: u64 = 5;
-    let base_lamports_per_signature: u64 = 5_000;
-    let cheap_lamports_per_signature: u64 = base_lamports_per_signature / lamports_scale;
-    let expensive_lamports_per_signature: u64 = base_lamports_per_signature * lamports_scale;
-    let signature_count: u64 = 2;
-    let signature_fee: u64 = 10;
-
-    // Two signatures, double the fee.
-    let key0 = Pubkey::new_unique();
-    let key1 = Pubkey::new_unique();
-    let ix0 = system_instruction::transfer(&key0, &key1, 1);
-    let ix1 = system_instruction::transfer(&key1, &key0, 1);
-    let message = new_sanitized_message(Message::new(&[ix0, ix1], Some(&key0)));
-
-    // assert when lamports_per_signature is less than BASE_LAMPORTS, turnning on/off
-    // congestion_multiplier has no effect on fee.
-    assert_eq!(
-        calculate_test_fee(&message, cheap_lamports_per_signature),
-        signature_fee * signature_count
-    );
-
-    // assert when lamports_per_signature is more than BASE_LAMPORTS, turnning on/off
-    // congestion_multiplier will change calculated fee.
-    assert_eq!(
-        calculate_test_fee(&message, expensive_lamports_per_signature),
-        signature_fee * signature_count
-    );
-}
-
-#[test]
 fn test_calculate_fee_with_request_heap_frame_flag() {
     let key0 = Pubkey::new_unique();
     let key1 = Pubkey::new_unique();
     let lamports_per_signature: u64 = 5_000;
-    let signature_fee: u64 = 10;
+    let signature_fee: u64 = lamports_per_signature;
     let request_cu: u64 = 1;
     let lamports_per_cu: u64 = 5;
     let message = new_sanitized_message(Message::new(
