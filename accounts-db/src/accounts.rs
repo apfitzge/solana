@@ -48,16 +48,16 @@ pub struct AccountLocks {
 }
 
 impl AccountLocks {
-    fn try_lock_accounts(
+    fn try_lock_accounts<'a>(
         &mut self,
-        write_accounts: &[&Pubkey],
-        read_accounts: &[&Pubkey],
+        write_accounts: impl Iterator<Item = &'a Pubkey> + Clone,
+        read_accounts: impl Iterator<Item = &'a Pubkey> + Clone,
     ) -> Result<()> {
         if !write_accounts
-            .iter()
+            .clone()
             .all(|pubkey| self.can_write_lock(pubkey))
             || !read_accounts
-                .iter()
+                .clone()
                 .all(|pubkey| self.can_read_lock(pubkey))
         {
             return Err(TransactionError::AccountInUse);
@@ -74,7 +74,11 @@ impl AccountLocks {
         Ok(())
     }
 
-    fn unlock_accounts(&mut self, write_accounts: &[&Pubkey], read_accounts: &[&Pubkey]) {
+    fn unlock_accounts<'a>(
+        &mut self,
+        write_accounts: impl Iterator<Item = &'a Pubkey> + Clone,
+        read_accounts: impl Iterator<Item = &'a Pubkey> + Clone,
+    ) {
         for pubkey in write_accounts {
             self.remove_write_lock(pubkey);
         }
@@ -636,7 +640,7 @@ impl Accounts {
         writable_keys: Vec<&Pubkey>,
         readonly_keys: Vec<&Pubkey>,
     ) -> Result<()> {
-        account_locks.try_lock_accounts(&writable_keys, &readonly_keys)
+        account_locks.try_lock_accounts(writable_keys.into_iter(), readonly_keys.into_iter())
     }
 
     fn unlock_account(
@@ -645,7 +649,7 @@ impl Accounts {
         writable_keys: Vec<&Pubkey>,
         readonly_keys: Vec<&Pubkey>,
     ) {
-        account_locks.unlock_accounts(&writable_keys, &readonly_keys);
+        account_locks.unlock_accounts(writable_keys.into_iter(), readonly_keys.into_iter());
     }
 
     /// This function will prevent multiple threads from modifying the same account state at the
