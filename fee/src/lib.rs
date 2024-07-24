@@ -25,12 +25,6 @@ pub fn calculate_fee_details(
     budget_limits: &FeeBudgetLimits,
     remove_rounding_in_fee_calculation: bool,
 ) -> FeeDetails {
-    // Backward compatibility - lamports_per_signature == 0 means to clear
-    // transaction fee to zero
-    if lamports_per_signature == 0 {
-        return FeeDetails::default();
-    }
-
     let signature_fee = message
         .num_total_signatures()
         .saturating_mul(lamports_per_signature);
