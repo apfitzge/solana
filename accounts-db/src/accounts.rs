@@ -8,7 +8,7 @@ use {
         ancestors::Ancestors,
         storable_accounts::StorableAccounts,
     },
-    ahash::{AHashMap, AHashSet},
+    ahash::AHashMap,
     dashmap::DashMap,
     log::*,
     solana_sdk::{
@@ -34,57 +34,147 @@ use {
 
 pub type PubkeyAccountSlot = (Pubkey, AccountSharedData, Slot);
 
+#[derive(Debug)]
+struct Lock {
+    /// Whether the account is write-locked
+    write_locked: bool,
+    /// Number of outstanding read-locks
+    read_lock_count: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct AccountLocks {
-    write_locks: AHashSet<Pubkey>,
-    readonly_locks: AHashMap<Pubkey, u64>,
+    locks: AHashMap<Pubkey, Lock>,
 }
 
 impl AccountLocks {
-    fn is_locked_readonly(&self, key: &Pubkey) -> bool {
-        self.readonly_locks
-            .get(key)
-            .map_or(false, |count| *count > 0)
+    fn try_lock_accounts(
+        &mut self,
+        write_accounts: &[&Pubkey],
+        read_accounts: &[&Pubkey],
+    ) -> Result<()> {
+        if !write_accounts
+            .iter()
+            .all(|pubkey| self.can_write_lock(pubkey))
+            || !read_accounts
+                .iter()
+                .all(|pubkey| self.can_read_lock(pubkey))
+        {
+            return Err(TransactionError::AccountInUse);
+        }
+
+        for pubkey in write_accounts {
+            self.add_write_lock(pubkey);
+        }
+
+        for pubkey in read_accounts {
+            self.add_read_lock(pubkey);
+        }
+
+        Ok(())
     }
 
-    fn is_locked_write(&self, key: &Pubkey) -> bool {
-        self.write_locks.contains(key)
-    }
-
-    fn insert_new_readonly(&mut self, key: &Pubkey) {
-        assert!(self.readonly_locks.insert(*key, 1).is_none());
-    }
-
-    fn lock_readonly(&mut self, key: &Pubkey) -> bool {
-        self.readonly_locks.get_mut(key).map_or(false, |count| {
-            *count += 1;
-            true
-        })
-    }
-
-    fn unlock_readonly(&mut self, key: &Pubkey) {
-        if let hash_map::Entry::Occupied(mut occupied_entry) = self.readonly_locks.entry(*key) {
-            let count = occupied_entry.get_mut();
-            *count -= 1;
-            if *count == 0 {
-                occupied_entry.remove_entry();
-            }
-        } else {
-            debug_assert!(
-                false,
-                "Attempted to remove a read-lock for a key that wasn't read-locked"
-            );
+    fn unlock_accounts(&mut self, write_accounts: &[&Pubkey], read_accounts: &[&Pubkey]) {
+        for pubkey in write_accounts {
+            self.remove_write_lock(pubkey);
+        }
+        for pubkey in read_accounts {
+            self.remove_read_lock(pubkey);
         }
     }
 
-    fn unlock_write(&mut self, key: &Pubkey) {
-        let removed = self.write_locks.remove(key);
-        debug_assert!(
-            removed,
-            "Attempted to remove a write-lock for a key that wasn't write-locked"
+    fn can_write_lock(&self, pubkey: &Pubkey) -> bool {
+        // If any outstanding write or read, then can't write lock
+        !self.locks.contains_key(pubkey)
+    }
+
+    fn can_read_lock(&self, pubkey: &Pubkey) -> bool {
+        match self.locks.get(pubkey) {
+            None => true,
+            Some(lock) => !lock.write_locked,
+        }
+    }
+
+    fn add_write_lock(&mut self, pubkey: &Pubkey) {
+        self.locks.insert(
+            *pubkey,
+            Lock {
+                write_locked: true,
+                read_lock_count: 0,
+            },
         );
     }
+
+    fn add_read_lock(&mut self, pubkey: &Pubkey) {
+        match self.locks.entry(*pubkey) {
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert(Lock {
+                    write_locked: false,
+                    read_lock_count: 1,
+                });
+            }
+            hash_map::Entry::Occupied(mut entry) => entry.get_mut().read_lock_count += 1,
+        }
+    }
+
+    fn remove_write_lock(&mut self, pubkey: &Pubkey) {
+        self.locks.remove(pubkey);
+    }
+
+    fn remove_read_lock(&mut self, pubkey: &Pubkey) {
+        let lock = self.locks.get_mut(pubkey).expect("account must be locked");
+        lock.read_lock_count -= 1;
+        if lock.read_lock_count == 0 {
+            self.locks.remove(pubkey);
+        }
+    }
 }
+
+// impl AccountLocks {
+//     fn is_locked_readonly(&self, key: &Pubkey) -> bool {
+//         self.readonly_locks
+//             .get(key)
+//             .map_or(false, |count| *count > 0)
+//     }
+
+//     fn is_locked_write(&self, key: &Pubkey) -> bool {
+//         self.write_locks.contains(key)
+//     }
+
+//     fn insert_new_readonly(&mut self, key: &Pubkey) {
+//         assert!(self.readonly_locks.insert(*key, 1).is_none());
+//     }
+
+//     fn lock_readonly(&mut self, key: &Pubkey) -> bool {
+//         self.readonly_locks.get_mut(key).map_or(false, |count| {
+//             *count += 1;
+//             true
+//         })
+//     }
+
+//     fn unlock_readonly(&mut self, key: &Pubkey) {
+//         if let hash_map::Entry::Occupied(mut occupied_entry) = self.readonly_locks.entry(*key) {
+//             let count = occupied_entry.get_mut();
+//             *count -= 1;
+//             if *count == 0 {
+//                 occupied_entry.remove_entry();
+//             }
+//         } else {
+//             debug_assert!(
+//                 false,
+//                 "Attempted to remove a read-lock for a key that wasn't read-locked"
+//             );
+//         }
+//     }
+
+//     fn unlock_write(&mut self, key: &Pubkey) {
+//         let removed = self.write_locks.remove(key);
+//         debug_assert!(
+//             removed,
+//             "Attempted to remove a write-lock for a key that wasn't write-locked"
+//         );
+//     }
+// }
 
 /// This structure handles synchronization for db
 #[derive(Debug)]
@@ -546,30 +636,7 @@ impl Accounts {
         writable_keys: Vec<&Pubkey>,
         readonly_keys: Vec<&Pubkey>,
     ) -> Result<()> {
-        for k in writable_keys.iter() {
-            if account_locks.is_locked_write(k) || account_locks.is_locked_readonly(k) {
-                debug!("Writable account in use: {:?}", k);
-                return Err(TransactionError::AccountInUse);
-            }
-        }
-        for k in readonly_keys.iter() {
-            if account_locks.is_locked_write(k) {
-                debug!("Read-only account in use: {:?}", k);
-                return Err(TransactionError::AccountInUse);
-            }
-        }
-
-        for k in writable_keys {
-            account_locks.write_locks.insert(*k);
-        }
-
-        for k in readonly_keys {
-            if !account_locks.lock_readonly(k) {
-                account_locks.insert_new_readonly(k);
-            }
-        }
-
-        Ok(())
+        account_locks.try_lock_accounts(&writable_keys, &readonly_keys)
     }
 
     fn unlock_account(
@@ -578,12 +645,7 @@ impl Accounts {
         writable_keys: Vec<&Pubkey>,
         readonly_keys: Vec<&Pubkey>,
     ) {
-        for k in writable_keys {
-            account_locks.unlock_write(k);
-        }
-        for k in readonly_keys {
-            account_locks.unlock_readonly(k);
-        }
+        account_locks.unlock_accounts(&writable_keys, &readonly_keys);
     }
 
     /// This function will prevent multiple threads from modifying the same account state at the
@@ -1021,13 +1083,14 @@ mod tests {
 
         assert_eq!(results0, vec![Ok(())]);
         assert_eq!(
-            *accounts
+            accounts
                 .account_locks
                 .lock()
                 .unwrap()
-                .readonly_locks
+                .locks
                 .get(&keypair1.pubkey())
-                .unwrap(),
+                .unwrap()
+                .read_lock_count,
             1
         );
 
@@ -1061,13 +1124,14 @@ mod tests {
             ],
         );
         assert_eq!(
-            *accounts
+            accounts
                 .account_locks
                 .lock()
                 .unwrap()
-                .readonly_locks
+                .locks
                 .get(&keypair1.pubkey())
-                .unwrap(),
+                .unwrap()
+                .read_lock_count,
             2
         );
 
@@ -1094,7 +1158,7 @@ mod tests {
             .account_locks
             .lock()
             .unwrap()
-            .readonly_locks
+            .locks
             .contains_key(&keypair1.pubkey()));
     }
 
@@ -1210,28 +1274,37 @@ mod tests {
         assert!(results0[0].is_ok());
         // Instruction program-id account demoted to readonly
         assert_eq!(
-            *accounts
+            accounts
                 .account_locks
                 .lock()
                 .unwrap()
-                .readonly_locks
+                .locks
                 .get(&native_loader::id())
-                .unwrap(),
+                .unwrap()
+                .read_lock_count,
             1
         );
         // Non-program accounts remain writable
-        assert!(accounts
-            .account_locks
-            .lock()
-            .unwrap()
-            .write_locks
-            .contains(&keypair0.pubkey()));
-        assert!(accounts
-            .account_locks
-            .lock()
-            .unwrap()
-            .write_locks
-            .contains(&keypair1.pubkey()));
+        assert!(
+            accounts
+                .account_locks
+                .lock()
+                .unwrap()
+                .locks
+                .get(&keypair0.pubkey())
+                .unwrap()
+                .write_locked
+        );
+        assert!(
+            accounts
+                .account_locks
+                .lock()
+                .unwrap()
+                .locks
+                .get(&keypair1.pubkey())
+                .unwrap()
+                .write_locked
+        );
     }
 
     impl Accounts {
@@ -1322,13 +1395,14 @@ mod tests {
 
         // verify that keypair0 read-only lock twice (for tx0 and tx2)
         assert_eq!(
-            *accounts
+            accounts
                 .account_locks
                 .lock()
                 .unwrap()
-                .readonly_locks
+                .locks
                 .get(&keypair0.pubkey())
-                .unwrap(),
+                .unwrap()
+                .read_lock_count,
             2
         );
         // verify that keypair2 (for tx1) is not write-locked
@@ -1336,24 +1410,13 @@ mod tests {
             .account_locks
             .lock()
             .unwrap()
-            .write_locks
-            .contains(&keypair2.pubkey()));
+            .locks
+            .contains_key(&keypair2.pubkey()));
 
         accounts.unlock_accounts(txs.iter().zip(&results));
 
         // check all locks to be removed
-        assert!(accounts
-            .account_locks
-            .lock()
-            .unwrap()
-            .readonly_locks
-            .is_empty());
-        assert!(accounts
-            .account_locks
-            .lock()
-            .unwrap()
-            .write_locks
-            .is_empty());
+        assert!(accounts.account_locks.lock().unwrap().locks.is_empty());
     }
 
     #[test]
