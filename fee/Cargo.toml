@@ -11,3 +11,10 @@ edition = { workspace = true }
 [dependencies]
 solana-sdk = { workspace = true }
 solana-svm-transaction = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "bench_fee"
+harness = false

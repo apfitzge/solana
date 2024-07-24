@@ -6298,6 +6298,7 @@ dependencies = [
 name = "solana-fee"
 version = "2.1.0"
 dependencies = [
+ "criterion",
  "solana-sdk",
  "solana-svm-transaction",
 ]
