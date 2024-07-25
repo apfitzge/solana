@@ -45,6 +45,7 @@ pub mod legacy;
 mod non_bpf_modules {
     mod account_keys;
     mod address_loader;
+    pub(crate) mod duplicate_account_check;
     mod sanitized;
     mod versions;
 

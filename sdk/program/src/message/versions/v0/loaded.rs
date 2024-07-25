@@ -108,8 +108,7 @@ impl<'a> LoadedMessage<'a> {
 
     /// Returns true if any account keys are duplicates
     pub fn has_duplicates(&self) -> bool {
-        let mut uniq = HashSet::new();
-        self.account_keys().iter().any(|x| !uniq.insert(x))
+        crate::message::duplicate_account_check::has_duplicates(self.account_keys())
     }
 
     /// Returns true if the account at the specified index was requested to be

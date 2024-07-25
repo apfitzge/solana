@@ -6829,6 +6829,7 @@ dependencies = [
 name = "solana-program"
 version = "2.1.0"
 dependencies = [
+ "ahash 0.8.10",
  "anyhow",
  "arbitrary",
  "array-bytes",
