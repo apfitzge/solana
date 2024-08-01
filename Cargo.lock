@@ -7336,6 +7336,7 @@ dependencies = [
  "solana-compute-budget",
  "solana-program",
  "solana-sdk",
+ "solana-svm-transaction",
  "thiserror",
 ]
 

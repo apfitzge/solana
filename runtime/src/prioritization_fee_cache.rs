@@ -3,7 +3,7 @@ use {
     crossbeam_channel::{unbounded, Receiver, Sender},
     log::*,
     solana_measure::measure_us,
-    solana_runtime_transaction::instructions_processor::process_compute_budget_instructions,
+    solana_runtime_transaction::instructions_processor::legacy_process_compute_budget_instructions,
     solana_sdk::{
         clock::{BankId, Slot},
         pubkey::Pubkey,
@@ -202,7 +202,7 @@ impl PrioritizationFeeCache {
                     continue;
                 }
 
-                let compute_budget_limits = process_compute_budget_instructions(
+                let compute_budget_limits = legacy_process_compute_budget_instructions(
                     sanitized_transaction.message().program_instructions_iter(),
                 );
                 let account_locks = sanitized_transaction

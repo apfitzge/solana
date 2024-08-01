@@ -7,6 +7,7 @@ use {
         pubkey::Pubkey,
         transaction::TransactionError,
     },
+    solana_svm_transaction::instruction::SVMInstruction,
     std::num::NonZeroU32,
 };
 
@@ -16,7 +17,7 @@ use {
 /// If succeeded, the transaction's specific limits/requests (could be default)
 /// are retrieved and returned,
 pub fn process_compute_budget_instructions<'a>(
-    instructions: impl Iterator<Item = (&'a Pubkey, &'a CompiledInstruction)>,
+    instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)>,
 ) -> Result<ComputeBudgetLimits, TransactionError> {
     let mut num_non_compute_budget_instructions: u32 = 0;
     let mut updated_compute_unit_limit = None;
@@ -32,7 +33,7 @@ pub fn process_compute_budget_instructions<'a>(
             );
             let duplicate_instruction_error = TransactionError::DuplicateInstruction(i as u8);
 
-            match try_from_slice_unchecked(&instruction.data) {
+            match try_from_slice_unchecked(instruction.data) {
                 Ok(ComputeBudgetInstruction::RequestHeapFrame(bytes)) => {
                     if requested_heap_size.is_some() {
                         return Err(duplicate_instruction_error);
@@ -99,6 +100,20 @@ pub fn process_compute_budget_instructions<'a>(
     })
 }
 
+/// Processing compute_budget could be part of tx sanitizing, failed to process
+/// these instructions will drop the transaction eventually without execution,
+/// may as well fail it early.
+/// If succeeded, the transaction's specific limits/requests (could be default)
+/// are retrieved and returned,
+pub fn legacy_process_compute_budget_instructions<'a>(
+    instructions: impl Iterator<Item = (&'a Pubkey, &'a CompiledInstruction)>,
+) -> Result<ComputeBudgetLimits, TransactionError> {
+    process_compute_budget_instructions(
+        instructions
+            .map(|(program_id, instruction)| (program_id, SVMInstruction::from(instruction))),
+    )
+}
+
 fn sanitize_requested_heap_size(bytes: u32) -> bool {
     (MIN_HEAP_FRAME_BYTES..=MAX_HEAP_FRAME_BYTES).contains(&bytes) && bytes % 1024 == 0
 }
@@ -127,8 +142,9 @@ mod tests {
                 Message::new($instructions, Some(&payer_keypair.pubkey())),
                 Hash::default(),
             ));
-            let result =
-                process_compute_budget_instructions(tx.message().program_instructions_iter());
+            let result = legacy_process_compute_budget_instructions(
+                tx.message().program_instructions_iter(),
+            );
             assert_eq!($expected_result, result);
         };
     }
@@ -435,8 +451,9 @@ mod tests {
                 Hash::default(),
             ));
 
-        let result =
-            process_compute_budget_instructions(transaction.message().program_instructions_iter());
+        let result = legacy_process_compute_budget_instructions(
+            transaction.message().program_instructions_iter(),
+        );
 
         // assert process_instructions will be successful with default,
         // and the default compute_unit_limit is 2 times default: one for bpf ix, one for

@@ -93,7 +93,7 @@ use {
     solana_program_runtime::{
         invoke_context::BuiltinFunctionWithContext, loaded_programs::ProgramCacheEntry,
     },
-    solana_runtime_transaction::instructions_processor::process_compute_budget_instructions,
+    solana_runtime_transaction::instructions_processor::legacy_process_compute_budget_instructions,
     solana_sdk::{
         account::{
             create_account_shared_data_with_fields as create_account, from_account, Account,
@@ -3046,7 +3046,7 @@ impl Bank {
         lamports_per_signature: u64,
     ) -> u64 {
         let fee_budget_limits = FeeBudgetLimits::from(
-            process_compute_budget_instructions(message.program_instructions_iter())
+            legacy_process_compute_budget_instructions(message.program_instructions_iter())
                 .unwrap_or_default(),
         );
         solana_fee::calculate_fee(

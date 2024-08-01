@@ -2,7 +2,7 @@ use {
     super::packet_filter::PacketFilterFailure,
     solana_compute_budget::compute_budget_limits::ComputeBudgetLimits,
     solana_perf::packet::Packet,
-    solana_runtime_transaction::instructions_processor::process_compute_budget_instructions,
+    solana_runtime_transaction::instructions_processor::legacy_process_compute_budget_instructions,
     solana_sanitize::SanitizeError,
     solana_sdk::{
         hash::Hash,
@@ -61,7 +61,7 @@ impl ImmutableDeserializedPacket {
             mut compute_unit_price,
             compute_unit_limit,
             ..
-        } = process_compute_budget_instructions(
+        } = legacy_process_compute_budget_instructions(
             sanitized_transaction
                 .get_message()
                 .program_instructions_iter(),

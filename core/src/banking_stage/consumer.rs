@@ -19,7 +19,7 @@ use {
         bank::{Bank, LoadAndExecuteTransactionsOutput},
         transaction_batch::TransactionBatch,
     },
-    solana_runtime_transaction::instructions_processor::process_compute_budget_instructions,
+    solana_runtime_transaction::instructions_processor::legacy_process_compute_budget_instructions,
     solana_sdk::{
         clock::{Slot, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
         feature_set,
@@ -577,7 +577,7 @@ impl Consumer {
             .sanitized_transactions()
             .iter()
             .filter_map(|transaction| {
-                process_compute_budget_instructions(
+                legacy_process_compute_budget_instructions(
                     transaction.message().program_instructions_iter(),
                 )
                 .ok()
@@ -740,7 +740,7 @@ impl Consumer {
         error_counters: &mut TransactionErrorMetrics,
     ) -> Result<(), TransactionError> {
         let fee_payer = message.fee_payer();
-        let fee_budget_limits = FeeBudgetLimits::from(process_compute_budget_instructions(
+        let fee_budget_limits = FeeBudgetLimits::from(legacy_process_compute_budget_instructions(
             message.program_instructions_iter(),
         )?);
         let fee = solana_fee::calculate_fee(

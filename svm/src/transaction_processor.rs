@@ -33,7 +33,7 @@ use {
         },
         sysvar_cache::SysvarCache,
     },
-    solana_runtime_transaction::instructions_processor::process_compute_budget_instructions,
+    solana_runtime_transaction::instructions_processor::legacy_process_compute_budget_instructions,
     solana_sdk::{
         account::{AccountSharedData, ReadableAccount, PROGRAM_OWNERS},
         clock::{Epoch, Slot},
@@ -400,7 +400,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         rent_collector: &RentCollector,
         error_counters: &mut TransactionErrorMetrics,
     ) -> transaction::Result<ValidatedTransactionDetails> {
-        let compute_budget_limits = process_compute_budget_instructions(
+        let compute_budget_limits = legacy_process_compute_budget_instructions(
             message.program_instructions_iter(),
         )
         .map_err(|err| {
@@ -1801,7 +1801,7 @@ mod tests {
             &Hash::new_unique(),
         ));
         let compute_budget_limits =
-            process_compute_budget_instructions(message.program_instructions_iter()).unwrap();
+            legacy_process_compute_budget_instructions(message.program_instructions_iter()).unwrap();
         let fee_payer_address = message.fee_payer();
         let current_epoch = 42;
         let rent_collector = RentCollector {
@@ -1881,7 +1881,7 @@ mod tests {
             &Hash::new_unique(),
         ));
         let compute_budget_limits =
-            process_compute_budget_instructions(message.program_instructions_iter()).unwrap();
+            legacy_process_compute_budget_instructions(message.program_instructions_iter()).unwrap();
         let fee_payer_address = message.fee_payer();
         let mut rent_collector = RentCollector::default();
         rent_collector.rent.lamports_per_byte_year = 1_000_000;
@@ -2118,7 +2118,7 @@ mod tests {
             &Hash::new_unique(),
         ));
         let compute_budget_limits =
-            process_compute_budget_instructions(message.program_instructions_iter()).unwrap();
+            legacy_process_compute_budget_instructions(message.program_instructions_iter()).unwrap();
         let fee_payer_address = message.fee_payer();
         let min_balance = Rent::default().minimum_balance(nonce::State::size());
         let transaction_fee = lamports_per_signature;
