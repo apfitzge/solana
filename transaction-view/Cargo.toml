@@ -17,10 +17,15 @@ solana-sdk = { workspace = true }
 agave-transaction-view = { path = ".", features = ["dev-context-only-utils"] }
 bincode = { workspace = true }
 criterion = { workspace = true }
+iai = { workspace = true }
 
 [features]
 dev-context-only-utils = []
 
 [[bench]]
 name = "bytes"
+harness = false
+
+[[bench]]
+name = "bytes_iai"
 harness = false
