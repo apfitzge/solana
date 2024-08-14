@@ -10,6 +10,9 @@ use {
         perf_libs,
         recycler::Recycler,
     },
+    agave_transaction_view::{
+        message_header_meta::TransactionVersion, transaction_meta::TransactionMeta,
+    },
     rayon::{prelude::*, ThreadPool},
     solana_metrics::inc_new_counter_debug,
     solana_rayon_threadlimit::get_thread_count,
@@ -116,40 +119,82 @@ fn verify_packet(packet: &mut Packet, reject_non_vote: bool) -> bool {
         return false;
     }
 
-    let packet_offsets = get_packet_offsets(packet, 0, reject_non_vote);
-    let mut sig_start = packet_offsets.sig_start as usize;
-    let mut pubkey_start = packet_offsets.pubkey_start as usize;
-    let msg_start = packet_offsets.msg_start as usize;
+    let Some(packet_bytes) = packet.data(..) else {
+        return false;
+    };
+    // This performs some work that is not **strictly** necessary at this point
+    // in the processing pipeline. However, this work to validate packet
+    // structure is eventually necessary, and it is generally better to do it
+    // before we verify the signatures on invalid packets.
+    let Ok(transaction_meta) = TransactionMeta::try_new(packet_bytes) else {
+        return false;
+    };
 
-    if packet_offsets.sig_len == 0 {
+    // We need to additionally perform some basic checks on the number of
+    // signatures and the number of static account keys.
+    if transaction_meta.num_required_signatures() != transaction_meta.num_signatures()
+        || transaction_meta.num_static_account_keys() < transaction_meta.num_signatures()
+    {
         return false;
     }
 
-    if packet.meta().size <= msg_start {
+    if is_simple_vote_tx(packet_bytes, &transaction_meta) {
+        packet.meta_mut().flags |= PacketFlags::SIMPLE_VOTE_TX;
+    }
+    if reject_non_vote && !packet.meta().is_simple_vote_tx() {
         return false;
     }
 
-    for _ in 0..packet_offsets.sig_len {
-        let pubkey_end = pubkey_start.saturating_add(size_of::<Pubkey>());
-        let Some(sig_end) = sig_start.checked_add(size_of::<Signature>()) else {
-            return false;
-        };
-        let Some(Ok(signature)) = packet.data(sig_start..sig_end).map(Signature::try_from) else {
-            return false;
-        };
-        let Some(pubkey) = packet.data(pubkey_start..pubkey_end) else {
-            return false;
-        };
-        let Some(message) = packet.data(msg_start..) else {
-            return false;
-        };
-        if !signature.verify(pubkey, message) {
+    // This should never fail - but need to appease borrow-checker since we cannot
+    // mutate `Packet` in above `if` block.
+    let Some(packet_bytes) = packet.data(..) else {
+        return false;
+    };
+
+    // SAFETY: `packet_bytes` was used to populate `transaction_meta`.
+    let signatures = unsafe { transaction_meta.signatures(packet_bytes) };
+    let static_account_keys = unsafe { transaction_meta.static_account_keys(packet_bytes) };
+    let message_bytes = unsafe { transaction_meta.message_bytes(packet_bytes) };
+
+    for (signature, pubkey) in signatures.iter().zip(static_account_keys.iter()) {
+        if !signature.verify(pubkey.as_ref(), message_bytes) {
             return false;
         }
-        pubkey_start = pubkey_end;
-        sig_start = sig_end;
     }
+
     true
+}
+
+fn is_simple_vote_tx(packet_bytes: &[u8], transaction_meta: &TransactionMeta) -> bool {
+    // Vote could have 1 or 2 sigs; zero sig has already been excluded
+    if transaction_meta.num_signatures() > 2 {
+        return false;
+    }
+
+    // Simple vote should only be legacy message
+    if !matches!(transaction_meta.version(), TransactionVersion::Legacy) {
+        return false;
+    }
+
+    // skip if has more than 1 instruction
+    if transaction_meta.num_instructions() != 1 {
+        return false;
+    }
+
+    // SAFETY: `packet_bytes` was used to populate `transaction_meta`.
+    let static_account_keys = unsafe { transaction_meta.static_account_keys(packet_bytes) };
+    let mut instructions_iter = unsafe { transaction_meta.instructions_iter(packet_bytes) };
+
+    // SAFETY: we just checked that there is exactly one instruction
+    let instruction = instructions_iter.next().unwrap();
+
+    // This is actually an error, and we should discard the packet anyway.
+    let Some(program_id) = static_account_keys.get(usize::from(instruction.program_id_index))
+    else {
+        return false;
+    };
+
+    program_id == &solana_sdk::vote::program::id()
 }
 
 pub fn count_packets_in_batches(batches: &[PacketBatch]) -> usize {

@@ -155,6 +155,15 @@ impl TransactionMeta {
             index: 0,
         }
     }
+
+    /// Return slice of bytes that are in the `Message`.
+    /// This excludes signatures.
+    /// # Safety
+    /// - This function must be called with the same `bytes` slice that was
+    ///   used to create the `TransactionMeta` instance.
+    pub unsafe fn message_bytes<'a>(&self, bytes: &'a [u8]) -> &'a [u8] {
+        &bytes[usize::from(self.message_header.offset)..]
+    }
 }
 
 #[cfg(test)]

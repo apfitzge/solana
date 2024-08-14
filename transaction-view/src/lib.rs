@@ -9,7 +9,7 @@ mod address_table_lookup_meta;
 #[allow(dead_code)]
 mod instructions_meta;
 #[allow(dead_code)]
-mod message_header_meta;
+pub mod message_header_meta;
 pub mod result;
 #[allow(dead_code)]
 mod signature_meta;

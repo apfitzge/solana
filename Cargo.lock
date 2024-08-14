@@ -6798,6 +6798,7 @@ dependencies = [
 name = "solana-perf"
 version = "2.1.0"
 dependencies = [
+ "agave-transaction-view",
  "ahash 0.8.10",
  "assert_matches",
  "bincode",
