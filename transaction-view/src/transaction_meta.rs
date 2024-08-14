@@ -211,7 +211,7 @@ mod tests {
         },
     };
 
-    fn verify_transaction_view_meta(tx: &VersionedTransaction) {
+    fn verify_transaction_meta(tx: &VersionedTransaction) {
         let bytes = bincode::serialize(tx).unwrap();
         let meta = TransactionMeta::try_new(&bytes).unwrap();
 
@@ -321,22 +321,22 @@ mod tests {
 
     #[test]
     fn test_minimal_sized_transaction() {
-        verify_transaction_view_meta(&minimally_sized_transaction());
+        verify_transaction_meta(&minimally_sized_transaction());
     }
 
     #[test]
     fn test_simple_transfer() {
-        verify_transaction_view_meta(&simple_transfer());
+        verify_transaction_meta(&simple_transfer());
     }
 
     #[test]
     fn test_simple_transfer_v0() {
-        verify_transaction_view_meta(&simple_transfer_v0());
+        verify_transaction_meta(&simple_transfer_v0());
     }
 
     #[test]
     fn test_v0_with_lookup() {
-        verify_transaction_view_meta(&v0_with_lookup());
+        verify_transaction_meta(&v0_with_lookup());
     }
 
     #[test]
