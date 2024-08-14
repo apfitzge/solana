@@ -59,6 +59,11 @@ impl MessageHeaderMeta {
         let num_readonly_signed_accounts = read_byte(bytes, offset)?;
         let num_readonly_unsigned_accounts = read_byte(bytes, offset)?;
 
+        // there should be at least 1 RW fee-payer account.
+        if num_readonly_signed_accounts >= num_required_signatures {
+            return Err(TransactionParsingError);
+        }
+
         Ok(Self {
             offset: message_offset,
             version,

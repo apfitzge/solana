@@ -23,7 +23,7 @@ use {
         signature::Signature,
     },
     solana_short_vec::decode_shortu16_len,
-    std::{convert::TryFrom, mem::size_of},
+    std::mem::size_of,
 };
 
 // Representing key tKeYE4wtowRb8yRroZShTipE18YVnqwXjsSAoNsFU6g
@@ -735,7 +735,7 @@ mod tests {
         rand::{thread_rng, Rng},
         solana_sdk::{
             instruction::CompiledInstruction,
-            message::{Message, MessageHeader},
+            message::Message,
             signature::{Keypair, Signature, Signer},
             transaction::Transaction,
         },
@@ -842,50 +842,6 @@ mod tests {
         assert_eq!(packet_offsets.sig_len, 1);
     }
 
-    fn packet_from_num_sigs(required_num_sigs: u8, actual_num_sigs: usize) -> Packet {
-        let message = Message {
-            header: MessageHeader {
-                num_required_signatures: required_num_sigs,
-                num_readonly_signed_accounts: 12,
-                num_readonly_unsigned_accounts: 11,
-            },
-            account_keys: vec![],
-            recent_blockhash: Hash::default(),
-            instructions: vec![],
-        };
-        let mut tx = Transaction::new_unsigned(message);
-        tx.signatures = vec![Signature::default(); actual_num_sigs];
-        Packet::from_data(None, tx).unwrap()
-    }
-
-    #[test]
-    fn test_untrustworthy_sigs() {
-        let required_num_sigs = 14;
-        let actual_num_sigs = 5;
-
-        let packet = packet_from_num_sigs(required_num_sigs, actual_num_sigs);
-
-        let unsanitized_packet_offsets = sigverify::do_get_packet_offsets(&packet, 0);
-
-        assert_eq!(
-            unsanitized_packet_offsets,
-            Err(PacketError::MismatchSignatureLen)
-        );
-    }
-
-    #[test]
-    fn test_small_packet() {
-        let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
-
-        packet.buffer_mut()[0] = 0xff;
-        packet.buffer_mut()[1] = 0xff;
-        packet.meta_mut().size = 2;
-
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-        assert_eq!(res, Err(PacketError::InvalidLen));
-    }
-
     #[test]
     fn test_pubkey_too_small() {
         solana_logger::setup();
@@ -896,9 +852,6 @@ mod tests {
         tx.message.account_keys = vec![];
         tx.message.header.num_required_signatures = NUM_SIG as u8;
         let mut packet = Packet::from_data(None, tx).unwrap();
-
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-        assert_eq!(res, Err(PacketError::InvalidPubkeyLen));
 
         assert!(!verify_packet(&mut packet, false));
 
@@ -931,114 +884,12 @@ mod tests {
 
         let mut packet = Packet::from_data(None, tx).unwrap();
 
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-        assert_eq!(res, Err(PacketError::InvalidPubkeyLen));
-
         assert!(!verify_packet(&mut packet, false));
 
         packet.meta_mut().set_discard(false);
         let mut batches = generate_packet_batches(&packet, 1, 1);
         ed25519_verify(&mut batches);
         assert!(batches[0][0].meta().discard());
-    }
-
-    #[test]
-    fn test_large_sig_len() {
-        let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
-
-        // Make the signatures len huge
-        packet.buffer_mut()[0] = 0x7f;
-
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-        assert_eq!(res, Err(PacketError::InvalidSignatureLen));
-    }
-
-    #[test]
-    fn test_really_large_sig_len() {
-        let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
-
-        // Make the signatures len huge
-        packet.buffer_mut()[0] = 0xff;
-        packet.buffer_mut()[1] = 0xff;
-        packet.buffer_mut()[2] = 0xff;
-        packet.buffer_mut()[3] = 0xff;
-
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-        assert_eq!(res, Err(PacketError::InvalidShortVec));
-    }
-
-    #[test]
-    fn test_invalid_pubkey_len() {
-        let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
-
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-
-        // make pubkey len huge
-        packet.buffer_mut()[res.unwrap().pubkey_start as usize - 1] = 0x7f;
-
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-        assert_eq!(res, Err(PacketError::InvalidPubkeyLen));
-    }
-
-    #[test]
-    fn test_fee_payer_is_debitable() {
-        let message = Message {
-            header: MessageHeader {
-                num_required_signatures: 1,
-                num_readonly_signed_accounts: 1,
-                num_readonly_unsigned_accounts: 1,
-            },
-            account_keys: vec![],
-            recent_blockhash: Hash::default(),
-            instructions: vec![],
-        };
-        let mut tx = Transaction::new_unsigned(message);
-        tx.signatures = vec![Signature::default()];
-        let packet = Packet::from_data(None, tx).unwrap();
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-
-        assert_eq!(res, Err(PacketError::PayerNotWritable));
-    }
-
-    #[test]
-    fn test_unsupported_version() {
-        let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
-
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-
-        // set message version to 1
-        packet.buffer_mut()[res.unwrap().msg_start as usize] = MESSAGE_VERSION_PREFIX + 1;
-
-        let res = sigverify::do_get_packet_offsets(&packet, 0);
-        assert_eq!(res, Err(PacketError::UnsupportedVersion));
-    }
-
-    #[test]
-    fn test_versioned_message() {
-        let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
-
-        let mut legacy_offsets = sigverify::do_get_packet_offsets(&packet, 0).unwrap();
-
-        // set message version to 0
-        let msg_start = legacy_offsets.msg_start as usize;
-        let msg_bytes = packet.data(msg_start..).unwrap().to_vec();
-        packet.buffer_mut()[msg_start] = MESSAGE_VERSION_PREFIX;
-        packet.meta_mut().size += 1;
-        let msg_end = packet.meta().size;
-        packet.buffer_mut()[msg_start + 1..msg_end].copy_from_slice(&msg_bytes);
-
-        let offsets = sigverify::do_get_packet_offsets(&packet, 0).unwrap();
-        let expected_offsets = {
-            legacy_offsets.pubkey_start += 1;
-            legacy_offsets
-        };
-
-        assert_eq!(expected_offsets, offsets);
     }
 
     #[test]
@@ -1395,20 +1246,20 @@ mod tests {
         {
             let mut tx = test_tx();
             tx.message.instructions[0].data = vec![1, 2, 3];
-            let mut packet = Packet::from_data(None, tx).unwrap();
-            let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
-            check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0).ok();
-            assert!(!packet.meta().is_simple_vote_tx());
+            let packet = Packet::from_data(None, tx).unwrap();
+            let packet_bytes = packet.data(..).unwrap();
+            let transaction_meta = TransactionMeta::try_new(packet_bytes).unwrap();
+            assert!(!is_simple_vote_tx(packet_bytes, &transaction_meta));
         }
 
         // single legacy vote tx is
         {
             let mut tx = new_test_vote_tx(&mut rng);
             tx.message.instructions[0].data = vec![1, 2, 3];
-            let mut packet = Packet::from_data(None, tx).unwrap();
-            let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
-            check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0).ok();
-            assert!(packet.meta().is_simple_vote_tx());
+            let packet = Packet::from_data(None, tx).unwrap();
+            let packet_bytes = packet.data(..).unwrap();
+            let transaction_meta = TransactionMeta::try_new(packet_bytes).unwrap();
+            assert!(is_simple_vote_tx(packet_bytes, &transaction_meta));
         }
 
         // single versioned vote tx is not
@@ -1417,18 +1268,20 @@ mod tests {
             tx.message.instructions[0].data = vec![1, 2, 3];
             let mut packet = Packet::from_data(None, tx).unwrap();
 
-            // set messager version to v0
-            let mut packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
-            let msg_start = packet_offsets.msg_start as usize;
+            // set message version to v0
+            let msg_start = {
+                1 + // num signatures
+                core::mem::size_of::<Signature>() // signature
+            };
             let msg_bytes = packet.data(msg_start..).unwrap().to_vec();
             packet.buffer_mut()[msg_start] = MESSAGE_VERSION_PREFIX;
             packet.meta_mut().size += 1;
             let msg_end = packet.meta().size;
             packet.buffer_mut()[msg_start + 1..msg_end].copy_from_slice(&msg_bytes);
 
-            packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
-            check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0).ok();
-            assert!(!packet.meta().is_simple_vote_tx());
+            let packet_bytes = packet.data(..).unwrap();
+            let transaction_meta = TransactionMeta::try_new(packet_bytes).unwrap();
+            assert!(!is_simple_vote_tx(packet_bytes, &transaction_meta));
         }
 
         // multiple mixed tx is not
@@ -1446,10 +1299,10 @@ mod tests {
                     CompiledInstruction::new(4, &(), vec![0, 2]),
                 ],
             );
-            let mut packet = Packet::from_data(None, tx).unwrap();
-            let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
-            check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0).ok();
-            assert!(!packet.meta().is_simple_vote_tx());
+            let packet = Packet::from_data(None, tx).unwrap();
+            let packet_bytes = packet.data(..).unwrap();
+            let transaction_meta = TransactionMeta::try_new(packet_bytes).unwrap();
+            assert!(!is_simple_vote_tx(packet_bytes, &transaction_meta));
         }
 
         // single legacy vote tx with extra (invalid) signature is not
@@ -1458,13 +1311,10 @@ mod tests {
             tx.signatures.push(Signature::default());
             tx.message.header.num_required_signatures = 3;
             tx.message.instructions[0].data = vec![1, 2, 3];
-            let mut packet = Packet::from_data(None, tx).unwrap();
-            let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
-            assert_eq!(
-                Err(PacketError::InvalidSignatureLen),
-                check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0)
-            );
-            assert!(!packet.meta().is_simple_vote_tx());
+            let packet = Packet::from_data(None, tx).unwrap();
+            let packet_bytes = packet.data(..).unwrap();
+            let transaction_meta = TransactionMeta::try_new(packet_bytes).unwrap();
+            assert!(!is_simple_vote_tx(packet_bytes, &transaction_meta));
         }
     }
 
@@ -1481,13 +1331,12 @@ mod tests {
             let tx = new_test_vote_tx(&mut rng);
             batch.push(Packet::from_data(None, tx).unwrap());
             batch.iter_mut().enumerate().for_each(|(index, packet)| {
-                let packet_offsets = do_get_packet_offsets(packet, current_offset).unwrap();
-                check_for_simple_vote_transaction(packet, &packet_offsets, current_offset).ok();
-                if index == 1 {
-                    assert!(packet.meta().is_simple_vote_tx());
-                } else {
-                    assert!(!packet.meta().is_simple_vote_tx());
-                }
+                let packet_data = packet.data(..).unwrap();
+                let transaction_meta = TransactionMeta::try_new(packet_data).unwrap();
+                assert_eq!(
+                    is_simple_vote_tx(packet_data, &transaction_meta),
+                    index == 1
+                );
 
                 current_offset = current_offset.saturating_add(size_of::<Packet>());
             });
@@ -1501,9 +1350,12 @@ mod tests {
             batch.push(Packet::from_data(None, test_tx()).unwrap());
             // versioned vote tx
             let tx = new_test_vote_tx(&mut rng);
+            let msg_start = {
+                1 + // num signatures
+                core::mem::size_of::<Signature>() * tx.signatures.len() // signatures
+            };
             let mut packet = Packet::from_data(None, tx).unwrap();
-            let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
-            let msg_start = packet_offsets.msg_start as usize;
+
             let msg_bytes = packet.data(msg_start..).unwrap().to_vec();
             packet.buffer_mut()[msg_start] = MESSAGE_VERSION_PREFIX;
             packet.meta_mut().size += 1;
@@ -1512,9 +1364,9 @@ mod tests {
             batch.push(packet);
 
             batch.iter_mut().for_each(|packet| {
-                let packet_offsets = do_get_packet_offsets(packet, current_offset).unwrap();
-                check_for_simple_vote_transaction(packet, &packet_offsets, current_offset).ok();
-                assert!(!packet.meta().is_simple_vote_tx());
+                let packet_bytes = packet.data(..).unwrap();
+                let transaction_meta = TransactionMeta::try_new(packet_bytes).unwrap();
+                assert!(!is_simple_vote_tx(packet_bytes, &transaction_meta));
 
                 current_offset = current_offset.saturating_add(size_of::<Packet>());
             });
