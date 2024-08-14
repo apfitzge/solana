@@ -1,12 +1,12 @@
 use {
     crate::{
-        bytes::{
-            advance_offset_for_array, advance_offset_for_type, check_remaining,
-            optimized_read_compressed_u16, read_byte,
-        },
-        result::Result,
+        bytes::{advance_offset_for_array, advance_offset_for_type, check_remaining, read_byte},
+        result::{Result, TransactionParsingError},
     },
-    solana_sdk::{hash::Hash, packet::PACKET_DATA_SIZE, pubkey::Pubkey, signature::Signature},
+    solana_sdk::{
+        hash::Hash, packet::PACKET_DATA_SIZE, pubkey::Pubkey, signature::Signature,
+        transaction::MAX_TX_ACCOUNT_LOCKS,
+    },
 };
 
 // Each ATL has at least a Pubkey, one byte for the number of write indexes,
@@ -86,13 +86,27 @@ impl AddressTableLookupMeta {
             // Advance offset for address of the lookup table.
             advance_offset_for_type::<Pubkey>(bytes, offset)?;
 
+            // The fee-payer account is always a static account, so the maximum
+            // number of accounts that can be loaded via ATL is
+            // `MAX_TX_ACCOUNT_LOCKS - 1`.
+            const MAX_ACCOUNT_PER_ATL: u8 = (MAX_TX_ACCOUNT_LOCKS - 1) as u8;
+            // Maximum number of accounts should be represented by a single byte,
+            // thus the MSB should not be set.
+            const _: () = assert!(MAX_ACCOUNT_PER_ATL & 0b1000_0000 == 0);
+
             // Read the number of write indexes, and then update the offset.
-            let num_accounts = optimized_read_compressed_u16(bytes, offset)?;
-            advance_offset_for_array::<u8>(bytes, offset, num_accounts)?;
+            let num_write_accounts = read_byte(bytes, offset)?;
+            if num_write_accounts > MAX_ACCOUNT_PER_ATL {
+                return Err(TransactionParsingError);
+            }
+            advance_offset_for_array::<u8>(bytes, offset, u16::from(num_write_accounts))?;
 
             // Read the number of read indexes, and then update the offset.
-            let data_len = optimized_read_compressed_u16(bytes, offset)?;
-            advance_offset_for_array::<u8>(bytes, offset, data_len)?
+            let num_read_accounts = read_byte(bytes, offset)?;
+            if num_read_accounts > MAX_ACCOUNT_PER_ATL {
+                return Err(TransactionParsingError);
+            }
+            advance_offset_for_array::<u8>(bytes, offset, u16::from(num_read_accounts))?
         }
 
         Ok(Self {
