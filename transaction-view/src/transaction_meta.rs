@@ -173,14 +173,14 @@ impl TransactionMeta {
     /// This does **not** check if the index is valid.
     pub fn signature_offset(&self, signature_index: u32) -> u32 {
         u32::from(self.signature.offset)
-            + signature_index * (core::mem::size_of::<Signature>() as u32)
+            .wrapping_add(signature_index.wrapping_mul(core::mem::size_of::<Signature>() as u32))
     }
 
     /// Get the offset to a static account key at specific index.
     /// This does **not** check if the index is valid.
     pub fn static_account_key_offset(&self, account_index: u32) -> u32 {
         u32::from(self.static_account_keys.offset)
-            + account_index * (core::mem::size_of::<Pubkey>() as u32)
+            .wrapping_add(account_index.wrapping_mul(core::mem::size_of::<Pubkey>() as u32))
     }
 
     /// Get the offset to the message.
