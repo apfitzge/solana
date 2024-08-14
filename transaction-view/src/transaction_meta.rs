@@ -166,6 +166,37 @@ impl TransactionMeta {
     }
 }
 
+// Functionality needed to support the generating of offset vectors for GPU
+// implementation of sigverify.
+impl TransactionMeta {
+    /// Get the offset to a signature at specific index.
+    /// This does **not** check if the index is valid.
+    pub fn signature_offset(&self, signature_index: u32) -> u32 {
+        u32::from(self.signature.offset)
+            + signature_index * (core::mem::size_of::<Signature>() as u32)
+    }
+
+    /// Get the offset to a static account key at specific index.
+    /// This does **not** check if the index is valid.
+    pub fn static_account_key_offset(&self, account_index: u32) -> u32 {
+        u32::from(self.static_account_keys.offset)
+            + account_index * (core::mem::size_of::<Pubkey>() as u32)
+    }
+
+    /// Get the offset to the message.
+    pub fn message_offset(&self) -> u32 {
+        u32::from(self.message_header.offset)
+    }
+
+    /// Get the length in bytes of the message.
+    /// # Safety
+    /// - This function must be called with the same `bytes` slice that was
+    ///   used to create the `TransactionMeta` instance.
+    pub unsafe fn message_length(&self, packet_bytes: &[u8]) -> u32 {
+        (packet_bytes.len() as u32).wrapping_sub(u32::from(self.message_header.offset))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
