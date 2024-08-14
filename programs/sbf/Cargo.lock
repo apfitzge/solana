@@ -74,6 +74,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-transaction-view"
+version = "2.1.0"
+dependencies = [
+ "solana-sdk",
+ "solana-svm-transaction",
+]
+
+[[package]]
 name = "agave-validator"
 version = "2.1.0"
 dependencies = [
@@ -5249,6 +5257,7 @@ checksum = "8b8a731ed60e89177c8a7ab05fe0f1511cedd3e70e773f288f9de33a9cfdc21e"
 name = "solana-perf"
 version = "2.1.0"
 dependencies = [
+ "agave-transaction-view",
  "ahash 0.8.10",
  "bincode",
  "bv",
