@@ -498,7 +498,6 @@ mod tests {
             sigverify::{self},
             test_tx::{new_test_vote_tx, test_multisig_tx, test_tx},
         },
-        bincode::{deserialize, serialize},
         curve25519_dalek::{edwards::CompressedEdwardsY, scalar::Scalar},
         rand::{thread_rng, Rng},
         solana_sdk::{
@@ -513,14 +512,6 @@ mod tests {
             sync::atomic::{AtomicU64, Ordering},
         },
     };
-
-    const SIG_OFFSET: usize = 1;
-
-    pub fn memfind<A: Eq>(a: &[A], b: &[A]) -> Option<usize> {
-        assert!(a.len() >= b.len());
-        let end = a.len() - b.len() + 1;
-        (0..end).find(|&i| a[i..i + b.len()] == b[..])
-    }
 
     #[test]
     fn test_copy_return_values() {
@@ -575,15 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn test_layout() {
-        let tx = test_tx();
-        let tx_bytes = serialize(&tx).unwrap();
-        let packet = serialize(&tx).unwrap();
-        assert_matches!(memfind(&packet, &tx_bytes), Some(0));
-        assert_matches!(memfind(&packet, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]), None);
-    }
-
-    #[test]
     fn test_pubkey_too_small() {
         solana_logger::setup();
         let mut tx = test_tx();
@@ -631,26 +613,6 @@ mod tests {
         let mut batches = generate_packet_batches(&packet, 1, 1);
         ed25519_verify(&mut batches);
         assert!(batches[0][0].meta().discard());
-    }
-
-    #[test]
-    fn test_system_transaction_data_layout() {
-        let mut tx0 = test_tx();
-        tx0.message.instructions[0].data = vec![1, 2, 3];
-        let message0a = tx0.message_data();
-        let tx_bytes = serialize(&tx0).unwrap();
-        assert!(tx_bytes.len() <= PACKET_DATA_SIZE);
-        assert_eq!(
-            memfind(&tx_bytes, tx0.signatures[0].as_ref()),
-            Some(SIG_OFFSET)
-        );
-        let tx1 = deserialize(&tx_bytes).unwrap();
-        assert_eq!(tx0, tx1);
-        assert_eq!(tx1.message().instructions[0].data, vec![1, 2, 3]);
-
-        tx0.message.instructions[0].data = vec![1, 2, 4];
-        let message0b = tx0.message_data();
-        assert_ne!(message0a, message0b);
     }
 
     fn generate_packet_batches_random_size(
