@@ -120,4 +120,15 @@ mod tests {
         assert_eq!(header.num_readonly_signed_accounts, 1);
         assert_eq!(header.num_readonly_unsigned_accounts, 2);
     }
+
+    #[test]
+    fn test_no_rw_fee_payer() {
+        let bytes = [1, 1, 1];
+        let mut offset = 0;
+        assert!(MessageHeaderMeta::try_new(&bytes, &mut offset).is_err());
+
+        let bytes = [MESSAGE_VERSION_PREFIX, 1, 1, 1];
+        let mut offset = 0;
+        assert!(MessageHeaderMeta::try_new(&bytes, &mut offset).is_err());
+    }
 }
