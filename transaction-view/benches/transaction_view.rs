@@ -1,5 +1,7 @@
 use {
-    agave_transaction_view::transaction_meta::TransactionMeta,
+    agave_transaction_view::{
+        transaction_meta::TransactionMeta, transaction_view::TransactionView,
+    },
     criterion::{
         black_box, criterion_group, criterion_main, measurement::Measurement, BenchmarkGroup,
         Criterion, Throughput,
@@ -11,12 +13,14 @@ use {
             v0::{self, MessageAddressTableLookup},
             Message, MessageHeader, VersionedMessage,
         },
+        packet::Packet,
         pubkey::Pubkey,
         signature::Keypair,
         signer::Signer,
         system_instruction,
         transaction::VersionedTransaction,
     },
+    std::sync::Arc,
 };
 
 const NUM_TRANSACTIONS: usize = 1024;
@@ -46,6 +50,37 @@ fn bench_transactions_parsing(
         c.iter(|| {
             for bytes in serialized_transactions.iter() {
                 let _ = TransactionMeta::try_new(black_box(bytes)).unwrap();
+            }
+        });
+    });
+
+    // New Transaction Parsing taking Packet ownership
+    let packets: Vec<_> = serialized_transactions
+        .iter()
+        .map(|bytes| {
+            let mut packet = Packet::default();
+            packet.meta_mut().size = bytes.len();
+            packet.buffer_mut()[..bytes.len()].copy_from_slice(bytes);
+            packet
+        })
+        .collect();
+    group.bench_function("TransactionView<Packet>", |c| {
+        c.iter(|| {
+            for packet in packets.iter() {
+                let _ = TransactionView::try_new(black_box(packet.clone())).unwrap();
+            }
+        });
+    });
+
+    // New Transaction Parsing taking Arc<[u8]> ownership
+    let arc_packets: Vec<_> = serialized_transactions
+        .iter()
+        .map(|bytes| Arc::<[u8]>::from(bytes.clone().into_boxed_slice()))
+        .collect();
+    group.bench_function("TransactionView<Arc<[u8]>>", |c| {
+        c.iter(|| {
+            for arc_packet in arc_packets.iter() {
+                let _ = TransactionView::try_new(black_box(arc_packet.clone())).unwrap();
             }
         });
     });
