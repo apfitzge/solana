@@ -931,18 +931,21 @@ mod tests {
         {
             let mut tx = new_test_vote_tx(&mut rng);
             tx.message.instructions[0].data = vec![1, 2, 3];
+
+            let msg_start = {
+                1 + // num signatures
+                tx.signatures.len() * core::mem::size_of::<Signature>() // signatures
+            };
+
             let mut packet = Packet::from_data(None, tx).unwrap();
 
             // set message version to v0
-            let msg_start = {
-                1 + // num signatures
-                core::mem::size_of::<Signature>() // signature
-            };
             let msg_bytes = packet.data(msg_start..).unwrap().to_vec();
             packet.buffer_mut()[msg_start] = MESSAGE_VERSION_PREFIX;
-            packet.meta_mut().size += 1;
-            let msg_end = packet.meta().size;
+            let msg_end = packet.meta().size + 1;
             packet.buffer_mut()[msg_start + 1..msg_end].copy_from_slice(&msg_bytes);
+            packet.meta_mut().size += 2; // 1 byte for version, 1 byte for num ATLs
+            packet.buffer_mut()[msg_end] = 0; // num ATLs
 
             let packet_bytes = packet.data(..).unwrap();
             let transaction_meta = TransactionMeta::try_new(packet_bytes).unwrap();
@@ -1023,9 +1026,10 @@ mod tests {
 
             let msg_bytes = packet.data(msg_start..).unwrap().to_vec();
             packet.buffer_mut()[msg_start] = MESSAGE_VERSION_PREFIX;
-            packet.meta_mut().size += 1;
-            let msg_end = packet.meta().size;
+            let msg_end = packet.meta().size + 1;
+            packet.meta_mut().size += 2; // 1 byte for version, 1 byte for num ATLs
             packet.buffer_mut()[msg_start + 1..msg_end].copy_from_slice(&msg_bytes);
+            packet.buffer_mut()[msg_end] = 0; // num ATLs
             batch.push(packet);
 
             batch.iter_mut().for_each(|packet| {
