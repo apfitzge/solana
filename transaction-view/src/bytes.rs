@@ -128,6 +128,35 @@ pub fn advance_offset_for_type<T: Sized>(bytes: &[u8], offset: &mut usize) -> Re
     Ok(())
 }
 
+/// Return a reference to the next slice of `T` in the buffer, checking bounds
+/// and advancing the offset.
+/// If the buffer is too short, return Err.
+///
+/// Assumptions:
+/// 1. The current offset is not greater than `bytes.len()`.
+/// 2. The size of `T` is small enough such that a usize will not overflow if
+///   given the maximum array size (u16::MAX).
+#[inline(always)]
+pub fn read_array<'a, T: Sized>(bytes: &'a [u8], offset: &mut usize, len: u16) -> Result<&'a [T]> {
+    let current_ptr = bytes.as_ptr().wrapping_add(*offset);
+    advance_offset_for_array::<T>(bytes, offset, len)?;
+    Ok(unsafe { core::slice::from_raw_parts(current_ptr as *const T, len as usize) })
+}
+
+/// Return a reference to the next `T` in the buffer, checking bounds and
+/// advancing the offset.
+/// If the buffer is too short, return Err.
+///
+/// Assumptions:
+/// 1. The current offset is not greater than `bytes.len()`.
+/// 2. The size of `T` is small enough such that a usize will not overflow.
+#[inline(always)]
+pub fn read_type<'a, T: Sized>(bytes: &'a [u8], offset: &mut usize) -> Result<&'a T> {
+    let current_ptr = bytes.as_ptr().wrapping_add(*offset);
+    advance_offset_for_type::<T>(bytes, offset)?;
+    Ok(unsafe { &*(current_ptr as *const T) })
+}
+
 #[cfg(test)]
 mod tests {
     use {

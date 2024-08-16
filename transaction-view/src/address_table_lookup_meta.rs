@@ -2,11 +2,12 @@ use {
     crate::{
         bytes::{
             advance_offset_for_array, advance_offset_for_type, check_remaining,
-            optimized_read_compressed_u16, read_byte,
+            optimized_read_compressed_u16, read_array, read_byte, read_type,
         },
         result::Result,
     },
     solana_sdk::{hash::Hash, packet::PACKET_DATA_SIZE, pubkey::Pubkey, signature::Signature},
+    solana_svm_transaction::message_address_table_lookup::SVMMessageAddressTableLookup,
 };
 
 // Each ATL has at least a Pubkey, one byte for the number of write indexes,
@@ -100,6 +101,55 @@ impl AddressTableLookupMeta {
             num_address_table_lookup: num_address_table_lookups,
             offset: address_table_lookups_offset,
         })
+    }
+}
+
+pub struct AddressTableLookupIterator<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) offset: usize,
+    pub(crate) num_address_table_lookup: u8,
+    pub(crate) index: u8,
+}
+
+impl<'a> Iterator for AddressTableLookupIterator<'a> {
+    type Item = SVMMessageAddressTableLookup<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.num_address_table_lookup {
+            // Each ATL has 3 pieces:
+            // 1. Address (Pubkey)
+            // 2. write indexes ([u8])
+            // 3. read indexes ([u8])
+
+            // Advance offset for address of the lookup table.
+            let account_key = read_type::<Pubkey>(self.bytes, &mut self.offset).ok()?;
+
+            // Read the number of write indexes, and then update the offset.
+            let num_write_accounts =
+                optimized_read_compressed_u16(self.bytes, &mut self.offset).ok()?;
+            let writable_indexes =
+                read_array::<u8>(self.bytes, &mut self.offset, num_write_accounts).ok()?;
+
+            // Read the number of read indexes, and then update the offset.
+            let num_read_accounts =
+                optimized_read_compressed_u16(self.bytes, &mut self.offset).ok()?;
+            let readonly_indexes =
+                read_array::<u8>(self.bytes, &mut self.offset, num_read_accounts).ok()?;
+
+            Some(SVMMessageAddressTableLookup {
+                account_key,
+                writable_indexes,
+                readonly_indexes,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl ExactSizeIterator for AddressTableLookupIterator<'_> {
+    fn len(&self) -> usize {
+        usize::from(self.num_address_table_lookup.wrapping_sub(self.index))
     }
 }
 

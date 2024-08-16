@@ -1,6 +1,6 @@
 use {
     crate::{
-        address_table_lookup_meta::AddressTableLookupMeta,
+        address_table_lookup_meta::{AddressTableLookupIterator, AddressTableLookupMeta},
         bytes::advance_offset_for_type,
         instructions_meta::{InstructionsIterator, InstructionsMeta},
         message_header_meta::{MessageHeaderMeta, TransactionVersion},
@@ -152,6 +152,22 @@ impl TransactionMeta {
             bytes,
             offset: usize::from(self.instructions.offset),
             num_instructions: self.instructions.num_instructions,
+            index: 0,
+        }
+    }
+
+    /// Return an iterator over the address table lookups in the transaction.
+    /// # Safety
+    /// - This function must be called with the same `bytes` slice that was
+    ///   used to create the `TransactionMeta` instance.
+    pub unsafe fn address_table_lookup_iter<'a>(
+        &self,
+        bytes: &'a [u8],
+    ) -> AddressTableLookupIterator<'a> {
+        AddressTableLookupIterator {
+            bytes,
+            offset: usize::from(self.address_table_lookup.offset),
+            num_address_table_lookup: self.address_table_lookup.num_address_table_lookup,
             index: 0,
         }
     }
@@ -406,6 +422,19 @@ mod tests {
     }
 
     #[test]
+    fn test_instructions_iter_empty() {
+        let tx = minimally_sized_transaction();
+        let bytes = bincode::serialize(&tx).unwrap();
+        let meta = TransactionMeta::try_new(&bytes).unwrap();
+
+        // SAFETY: `bytes` is the same slice used to create `meta`.
+        unsafe {
+            let mut iter = meta.instructions_iter(&bytes);
+            assert!(iter.next().is_none());
+        }
+    }
+
+    #[test]
     fn test_instructions_iter() {
         let tx = simple_transfer();
         let bytes = bincode::serialize(&tx).unwrap();
@@ -420,6 +449,45 @@ mod tests {
             assert_eq!(
                 ix.data,
                 &bincode::serialize(&SystemInstruction::Transfer { lamports: 1 }).unwrap()
+            );
+            assert!(iter.next().is_none());
+        }
+    }
+
+    #[test]
+    fn test_address_table_lookup_iter_empty() {
+        let tx = simple_transfer();
+        let bytes = bincode::serialize(&tx).unwrap();
+        let meta = TransactionMeta::try_new(&bytes).unwrap();
+
+        // SAFETY: `bytes` is the same slice used to create `meta`.
+        unsafe {
+            let mut iter = meta.address_table_lookup_iter(&bytes);
+            assert!(iter.next().is_none());
+        }
+    }
+
+    #[test]
+    fn test_address_table_lookup_iter() {
+        let tx = v0_with_lookup();
+        let bytes = bincode::serialize(&tx).unwrap();
+        let meta = TransactionMeta::try_new(&bytes).unwrap();
+
+        // SAFETY: `bytes` is the same slice used to create `meta`.
+        unsafe {
+            let mut iter = meta.address_table_lookup_iter(&bytes);
+            let lookup = iter.next().unwrap();
+            assert_eq!(
+                lookup.account_key,
+                &tx.message.address_table_lookups().unwrap()[0].account_key
+            );
+            assert_eq!(
+                lookup.writable_indexes,
+                tx.message.address_table_lookups().unwrap()[0].writable_indexes
+            );
+            assert_eq!(
+                lookup.readonly_indexes,
+                tx.message.address_table_lookups().unwrap()[0].readonly_indexes
             );
             assert!(iter.next().is_none());
         }

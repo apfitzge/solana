@@ -1,7 +1,8 @@
 use {
     crate::{
         bytes::{
-            advance_offset_for_array, check_remaining, optimized_read_compressed_u16, read_byte,
+            advance_offset_for_array, check_remaining, optimized_read_compressed_u16, read_array,
+            read_byte,
         },
         result::Result,
     },
@@ -93,26 +94,14 @@ impl<'a> Iterator for InstructionsIterator<'a> {
             // Read the number of account indexes, and then update the offset
             // to skip over the account indexes.
             let num_accounts = optimized_read_compressed_u16(self.bytes, &mut self.offset).ok()?;
-            // SAFETY: Only returned after we check that there are enough bytes.
-            let accounts = unsafe {
-                core::slice::from_raw_parts(
-                    self.bytes.as_ptr().add(self.offset),
-                    usize::from(num_accounts),
-                )
-            };
-            advance_offset_for_array::<u8>(self.bytes, &mut self.offset, num_accounts).ok()?;
+            let accounts = read_array::<u8>(self.bytes, &mut self.offset, num_accounts).ok()?;
 
             // Read the length of the data, and then update the offset to skip
             // over the data.
             let data_len = optimized_read_compressed_u16(self.bytes, &mut self.offset).ok()?;
-            // SAFETY: Only returned after we check that there are enough bytes.
-            let data = unsafe {
-                core::slice::from_raw_parts(
-                    self.bytes.as_ptr().add(self.offset),
-                    usize::from(data_len),
-                )
-            };
-            advance_offset_for_array::<u8>(self.bytes, &mut self.offset, data_len).ok()?;
+            let data = read_array::<u8>(self.bytes, &mut self.offset, data_len).ok()?;
+
+            // Update the index to point to the next instruction.
             self.index = self.index.wrapping_add(1);
 
             Some(SVMInstruction {
