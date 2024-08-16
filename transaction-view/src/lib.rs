@@ -11,6 +11,7 @@ mod instructions_meta;
 #[allow(dead_code)]
 mod message_header_meta;
 pub mod result;
+pub mod sanitize;
 #[allow(dead_code)]
 mod signature_meta;
 #[allow(dead_code)]

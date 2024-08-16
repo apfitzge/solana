@@ -69,6 +69,20 @@ impl InstructionsMeta {
             offset: instructions_offset,
         })
     }
+
+    /// Return an iterator over the instructions in the transaction.
+    /// # Safety
+    /// - This function must be called with the same `bytes` slice that was
+    ///   used to create the `TransactionMeta` instance.
+    #[inline]
+    pub(crate) unsafe fn instructions_iter<'a>(&self, bytes: &'a [u8]) -> InstructionsIterator<'a> {
+        InstructionsIterator {
+            bytes,
+            offset: usize::from(self.offset),
+            num_instructions: self.num_instructions,
+            index: 0,
+        }
+    }
 }
 
 pub struct InstructionsIterator<'a> {

@@ -4,7 +4,7 @@ use {
             advance_offset_for_array, advance_offset_for_type, check_remaining,
             optimized_read_compressed_u16, read_array, read_byte, read_type,
         },
-        result::Result,
+        result::{Result, TransactionParsingError},
     },
     solana_sdk::{hash::Hash, packet::PACKET_DATA_SIZE, pubkey::Pubkey, signature::Signature},
     solana_svm_transaction::message_address_table_lookup::SVMMessageAddressTableLookup,
@@ -50,6 +50,11 @@ pub struct AddressTableLookupMeta {
     pub(crate) num_address_table_lookup: u8,
     /// The offset to the first address table lookup in the transaction.
     pub(crate) offset: u16,
+
+    /// The total number of writable looked up accounts in the transaction.
+    pub(crate) total_num_writable_accounts: u8,
+    /// The total number of readonly looked up accounts in the transaction.
+    pub(crate) total_num_readonly_accounts: u8,
 }
 
 impl AddressTableLookupMeta {
@@ -60,6 +65,14 @@ impl AddressTableLookupMeta {
     /// but will not cache data related to these ATLs.
     #[inline(always)]
     pub fn try_new(bytes: &[u8], offset: &mut usize) -> Result<Self> {
+        // The maximum allowed number of indexes in a single ATL is 255.
+        const MAX_LOOKUP_ACCOUNTS: u16 = 255;
+        // We do not need to check for overflows on our additions if the
+        // maximum number of ATLs * `MAX_LOOKUP_ACCOUNTS` is less than a
+        // u16::MAX.
+        // Since we have both read and write indexes, we multiply by 2.
+        const _: () = assert!(2 * MAX_ATLS_PER_PACKET as u16 * MAX_LOOKUP_ACCOUNTS < u16::MAX);
+
         // Maximum number of ATLs should be represented by a single byte,
         // thus the MSB should not be set.
         const _: () = assert!(MAX_ATLS_PER_PACKET & 0b1000_0000 == 0);
@@ -79,6 +92,8 @@ impl AddressTableLookupMeta {
         // The ATLs do not have a fixed size. So we must iterate over
         // each ATL to find the total size of the ATLs in the packet,
         // and check for any malformed ATLs or buffer overflows.
+        let mut total_num_writable_accounts: u16 = 0;
+        let mut total_num_readonly_accounts: u16 = 0;
         for _index in 0..num_address_table_lookups {
             // Each ATL has 3 pieces:
             // 1. Address (Pubkey)
@@ -90,16 +105,40 @@ impl AddressTableLookupMeta {
 
             // Read the number of write indexes, and then update the offset.
             let num_write_accounts = optimized_read_compressed_u16(bytes, offset)?;
+            if num_write_accounts > MAX_LOOKUP_ACCOUNTS {
+                return Err(TransactionParsingError);
+            }
+            total_num_writable_accounts =
+                total_num_writable_accounts.wrapping_add(num_write_accounts);
             advance_offset_for_array::<u8>(bytes, offset, num_write_accounts)?;
 
             // Read the number of read indexes, and then update the offset.
             let num_read_accounts = optimized_read_compressed_u16(bytes, offset)?;
-            advance_offset_for_array::<u8>(bytes, offset, num_read_accounts)?
+            if num_read_accounts > MAX_LOOKUP_ACCOUNTS {
+                return Err(TransactionParsingError);
+            }
+            total_num_readonly_accounts =
+                total_num_readonly_accounts.wrapping_add(num_read_accounts);
+            advance_offset_for_array::<u8>(bytes, offset, num_read_accounts)?;
+
+            // Each ATL must have at least one account.
+            if num_write_accounts == 0 && num_read_accounts == 0 {
+                return Err(TransactionParsingError);
+            }
+        }
+
+        // This guarantees that each is less than MAX_LOOKUP_ACCOUNTS.
+        if total_num_writable_accounts.wrapping_add(total_num_readonly_accounts)
+            > MAX_LOOKUP_ACCOUNTS
+        {
+            return Err(TransactionParsingError);
         }
 
         Ok(Self {
             num_address_table_lookup: num_address_table_lookups,
             offset: address_table_lookups_offset,
+            total_num_writable_accounts: total_num_writable_accounts as u8,
+            total_num_readonly_accounts: total_num_readonly_accounts as u8,
         })
     }
 }
