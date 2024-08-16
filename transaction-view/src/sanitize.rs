@@ -43,6 +43,10 @@ pub unsafe fn sanitize_transaction_meta(
     for address_table_lookup in transaction_meta.address_table_lookup_iter(bytes) {
         sanitize_address_table_lookup_initial_pass(address_table_lookup)?;
     }
+    sanitize_address_table_lookup_meta_final(
+        &transaction_meta.static_account_keys,
+        &transaction_meta.address_table_lookup,
+    )?;
 
     // Do final instructions pass.
     sanitize_instruction_final_pass(
@@ -64,6 +68,7 @@ pub unsafe fn sanitize_transaction_meta(
 /// 2. Each signature has a corresponding static account key.
 /// 3. The signing area and read-only non-signing area do not overlap.
 /// 4. There should be at least one RW fee-payer account.
+#[inline(always)]
 pub(crate) fn sanitize_pre_instruction_meta(
     signature_meta: &SignatureMeta,
     message_header_meta: &MessageHeaderMeta,
@@ -143,8 +148,8 @@ pub(crate) fn sanitize_address_table_lookup_initial_pass(
 
 #[inline(always)]
 pub(crate) fn sanitize_address_table_lookup_meta_final(
-    address_table_lookup_meta: &AddressTableLookupMeta,
     static_account_keys_meta: &StaticAccountKeysMeta,
+    address_table_lookup_meta: &AddressTableLookupMeta,
 ) -> Result<()> {
     // We checked during initial parsing that the number of lookup accounts is less than 255.
     // We need to check that the total number of read-only accounts is less than 256.
@@ -164,6 +169,7 @@ pub(crate) fn sanitize_address_table_lookup_meta_final(
 /// # Safety
 /// - This function must be called with the same `bytes` slice that was
 ///  used to create the meta instances.
+#[inline(always)]
 pub(crate) unsafe fn sanitize_instruction_final_pass(
     bytes: &[u8],
     message_header_meta: &MessageHeaderMeta,

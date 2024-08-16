@@ -46,6 +46,8 @@ impl TransactionMeta {
             TransactionVersion::Legacy => AddressTableLookupMeta {
                 num_address_table_lookup: 0,
                 offset: 0,
+                total_num_writable_accounts: 0,
+                total_num_readonly_accounts: 0,
             },
             TransactionVersion::V0 => AddressTableLookupMeta::try_new(bytes, &mut offset)?,
         };

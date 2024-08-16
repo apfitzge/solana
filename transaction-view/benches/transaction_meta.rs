@@ -1,5 +1,7 @@
 use {
-    agave_transaction_view::transaction_meta::TransactionMeta,
+    agave_transaction_view::{
+        sanitize::sanitize_transaction_meta, transaction_meta::TransactionMeta,
+    },
     criterion::{
         black_box, criterion_group, criterion_main, measurement::Measurement, BenchmarkGroup,
         Criterion, Throughput,
@@ -46,6 +48,16 @@ fn bench_transactions_parsing(
         c.iter(|| {
             for bytes in serialized_transactions.iter() {
                 let _ = TransactionMeta::try_new(black_box(bytes)).unwrap();
+            }
+        });
+    });
+
+    // New Transaction Parsing - separated sanitization
+    group.bench_function("TransactionMeta (separate sanitize)", |c| {
+        c.iter(|| {
+            for bytes in serialized_transactions.iter() {
+                let transaction_meta = TransactionMeta::try_new(black_box(bytes)).unwrap();
+                unsafe { sanitize_transaction_meta(bytes, &transaction_meta).unwrap() }
             }
         });
     });
