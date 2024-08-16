@@ -30,15 +30,6 @@ pub unsafe fn sanitize_transaction_meta(
         &transaction_meta.static_account_keys,
     )?;
 
-    // Loop over instructions to do the initial pass.
-    for instruction in transaction_meta.instructions_iter(bytes) {
-        sanitize_instruction_initial_pass(
-            instruction,
-            &transaction_meta.message_header,
-            &transaction_meta.static_account_keys,
-        )?;
-    }
-
     // Loop over address table lookups to do the initial pass.
     for address_table_lookup in transaction_meta.address_table_lookup_iter(bytes) {
         sanitize_address_table_lookup_initial_pass(address_table_lookup)?;
@@ -49,7 +40,7 @@ pub unsafe fn sanitize_transaction_meta(
     )?;
 
     // Do final instructions pass.
-    sanitize_instruction_final_pass(
+    sanitize_instruction_final_pass::<true>(
         bytes,
         &transaction_meta.message_header,
         &transaction_meta.static_account_keys,
@@ -112,18 +103,18 @@ pub(crate) fn sanitize_pre_instruction_meta(
 #[inline(always)]
 pub(crate) fn sanitize_instruction_initial_pass(
     instruction: SVMInstruction,
-    message_header_meta: &MessageHeaderMeta,
-    static_account_keys_meta: &StaticAccountKeysMeta,
+    version: TransactionVersion,
+    num_static_accounts: u8,
 ) -> Result<()> {
-    if instruction.program_id_index >= static_account_keys_meta.num_static_accounts {
+    if instruction.program_id_index >= num_static_accounts {
         return Err(TransactionParsingError);
     }
 
-    if matches!(message_header_meta.version, TransactionVersion::Legacy) {
+    if matches!(version, TransactionVersion::Legacy) {
         if instruction
             .accounts
             .iter()
-            .any(|account_index| *account_index >= static_account_keys_meta.num_static_accounts)
+            .any(|account_index| *account_index >= num_static_accounts)
         {
             return Err(TransactionParsingError);
         }
@@ -170,7 +161,7 @@ pub(crate) fn sanitize_address_table_lookup_meta_final(
 /// - This function must be called with the same `bytes` slice that was
 ///  used to create the meta instances.
 #[inline(always)]
-pub(crate) unsafe fn sanitize_instruction_final_pass(
+pub(crate) unsafe fn sanitize_instruction_final_pass<const DO_FIRST_PASS: bool>(
     bytes: &[u8],
     message_header_meta: &MessageHeaderMeta,
     static_account_keys_meta: &StaticAccountKeysMeta,
@@ -190,6 +181,13 @@ pub(crate) unsafe fn sanitize_instruction_final_pass(
 
     // Check that the account indexes are within bounds.
     for instruction in instructions_meta.instructions_iter(bytes) {
+        if DO_FIRST_PASS {
+            sanitize_instruction_initial_pass(
+                instruction.clone(),
+                message_header_meta.version,
+                static_account_keys_meta.num_static_accounts,
+            )?;
+        }
         if instruction
             .accounts
             .iter()

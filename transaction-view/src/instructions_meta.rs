@@ -1,10 +1,9 @@
 use {
     crate::{
-        bytes::{
-            advance_offset_for_array, check_remaining, optimized_read_compressed_u16, read_array,
-            read_byte,
-        },
+        bytes::{check_remaining, optimized_read_compressed_u16, read_array, read_byte},
+        message_header_meta::TransactionVersion,
         result::Result,
+        sanitize::sanitize_instruction_initial_pass,
     },
     solana_svm_transaction::instruction::SVMInstruction,
 };
@@ -26,7 +25,12 @@ impl InstructionsMeta {
     /// instruction data is well-formed, but will not cache data related to
     /// these instructions.
     #[inline(always)]
-    pub fn try_new(bytes: &[u8], offset: &mut usize) -> Result<Self> {
+    pub fn try_new<const SANITIZE: bool>(
+        bytes: &[u8],
+        offset: &mut usize,
+        version: TransactionVersion,
+        num_static_accounts: u8,
+    ) -> Result<Self> {
         // Read the number of instructions at the current offset.
         // Each instruction needs at least 3 bytes, so do a sanity check here to
         // ensure we have enough bytes to read the number of instructions.
@@ -51,17 +55,26 @@ impl InstructionsMeta {
             // 3. Data ([u8])
 
             // Read the program ID index.
-            let _program_id_index = read_byte(bytes, offset)?;
+            let program_id_index = read_byte(bytes, offset)?;
 
             // Read the number of account indexes, and then update the offset
             // to skip over the account indexes.
             let num_accounts = optimized_read_compressed_u16(bytes, offset)?;
-            advance_offset_for_array::<u8>(bytes, offset, num_accounts)?;
+            let accounts = read_array::<u8>(bytes, offset, num_accounts)?;
 
             // Read the length of the data, and then update the offset to skip
             // over the data.
             let data_len = optimized_read_compressed_u16(bytes, offset)?;
-            advance_offset_for_array::<u8>(bytes, offset, data_len)?
+            let data = read_array::<u8>(bytes, offset, data_len)?;
+
+            let instruction = SVMInstruction {
+                program_id_index,
+                accounts,
+                data,
+            };
+            if SANITIZE {
+                sanitize_instruction_initial_pass(instruction, version, num_static_accounts)?;
+            }
         }
 
         Ok(Self {
@@ -146,7 +159,9 @@ mod tests {
     fn test_zero_instructions() {
         let bytes = bincode::serialize(&ShortVec(Vec::<CompiledInstruction>::new())).unwrap();
         let mut offset = 0;
-        let instructions_meta = InstructionsMeta::try_new(&bytes, &mut offset).unwrap();
+        let instructions_meta =
+            InstructionsMeta::try_new(&bytes, &mut offset, TransactionVersion::Legacy, u8::MAX)
+                .unwrap();
 
         assert_eq!(instructions_meta.num_instructions, 0);
         assert_eq!(instructions_meta.offset, 1);
@@ -164,7 +179,13 @@ mod tests {
         // modify the number of instructions to be too high
         bytes[0] = 0x02;
         let mut offset = 0;
-        assert!(InstructionsMeta::try_new(&bytes, &mut offset).is_err());
+        assert!(InstructionsMeta::try_new(
+            &bytes,
+            &mut offset,
+            TransactionVersion::Legacy,
+            u8::MAX
+        )
+        .is_err());
     }
 
     #[test]
@@ -176,7 +197,9 @@ mod tests {
         }]))
         .unwrap();
         let mut offset = 0;
-        let instructions_meta = InstructionsMeta::try_new(&bytes, &mut offset).unwrap();
+        let instructions_meta =
+            InstructionsMeta::try_new(&bytes, &mut offset, TransactionVersion::Legacy, u8::MAX)
+                .unwrap();
         assert_eq!(instructions_meta.num_instructions, 1);
         assert_eq!(instructions_meta.offset, 1);
         assert_eq!(offset, bytes.len());
@@ -198,7 +221,9 @@ mod tests {
         ]))
         .unwrap();
         let mut offset = 0;
-        let instructions_meta = InstructionsMeta::try_new(&bytes, &mut offset).unwrap();
+        let instructions_meta =
+            InstructionsMeta::try_new(&bytes, &mut offset, TransactionVersion::Legacy, u8::MAX)
+                .unwrap();
         assert_eq!(instructions_meta.num_instructions, 2);
         assert_eq!(instructions_meta.offset, 1);
         assert_eq!(offset, bytes.len());
@@ -217,7 +242,13 @@ mod tests {
         bytes[2] = 127;
 
         let mut offset = 0;
-        assert!(InstructionsMeta::try_new(&bytes, &mut offset).is_err());
+        assert!(InstructionsMeta::try_new(
+            &bytes,
+            &mut offset,
+            TransactionVersion::Legacy,
+            u8::MAX
+        )
+        .is_err());
     }
 
     #[test]
@@ -233,6 +264,12 @@ mod tests {
         bytes[6] = 127;
 
         let mut offset = 0;
-        assert!(InstructionsMeta::try_new(&bytes, &mut offset).is_err());
+        assert!(InstructionsMeta::try_new(
+            &bytes,
+            &mut offset,
+            TransactionVersion::Legacy,
+            u8::MAX
+        )
+        .is_err());
     }
 }

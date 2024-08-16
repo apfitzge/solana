@@ -5,6 +5,10 @@ use {
         instructions_meta::{InstructionsIterator, InstructionsMeta},
         message_header_meta::{MessageHeaderMeta, TransactionVersion},
         result::{Result, TransactionParsingError},
+        sanitize::{
+            sanitize_address_table_lookup_meta_final, sanitize_instruction_final_pass,
+            sanitize_pre_instruction_meta,
+        },
         signature_meta::SignatureMeta,
         static_account_keys_meta::StaticAccountKeysMeta,
     },
@@ -30,10 +34,30 @@ impl TransactionMeta {
     /// Parse a serialized transaction and verify basic structure.
     /// The `bytes` parameter must have no trailing data.
     pub fn try_new(bytes: &[u8]) -> Result<Self> {
+        Self::_try_new::<false>(bytes)
+    }
+
+    /// Parse a serialized transaction, verify basic structure, and do basic
+    /// sanitization checks.
+    /// The `bytes` parameter must have no trailing data.
+    pub fn try_new_sanitized(bytes: &[u8]) -> Result<Self> {
+        Self::_try_new::<true>(bytes)
+    }
+
+    // Internal function to construct a `TransactionMeta` instance.
+    // SANITIZE - If true, perform additional sanitization checks at the same
+    //            time as initial parsing when possible.
+    pub fn _try_new<const SANITIZE: bool>(bytes: &[u8]) -> Result<Self> {
         let mut offset = 0;
         let signature = SignatureMeta::try_new(bytes, &mut offset)?;
         let message_header = MessageHeaderMeta::try_new(bytes, &mut offset)?;
         let static_account_keys = StaticAccountKeysMeta::try_new(bytes, &mut offset)?;
+
+        // Before parsing instructions, which can be expensive if there are
+        // many, check if we pass basic pre-instruction parsing checks.
+        if SANITIZE {
+            sanitize_pre_instruction_meta(&signature, &message_header, &static_account_keys)?;
+        }
 
         // The recent blockhash is the first account key after the static
         // account keys. The recent blockhash is always present in a valid
@@ -41,7 +65,12 @@ impl TransactionMeta {
         let recent_blockhash_offset = offset as u16;
         advance_offset_for_type::<Hash>(bytes, &mut offset)?;
 
-        let instructions = InstructionsMeta::try_new(bytes, &mut offset)?;
+        let instructions = InstructionsMeta::try_new::<SANITIZE>(
+            bytes,
+            &mut offset,
+            message_header.version,
+            static_account_keys.num_static_accounts,
+        )?;
         let address_table_lookup = match message_header.version {
             TransactionVersion::Legacy => AddressTableLookupMeta {
                 num_address_table_lookup: 0,
@@ -55,6 +84,21 @@ impl TransactionMeta {
         // Verify that the entire transaction was parsed.
         if offset != bytes.len() {
             return Err(TransactionParsingError);
+        }
+
+        // Do final sanitization checks.
+        if SANITIZE {
+            sanitize_address_table_lookup_meta_final(&static_account_keys, &address_table_lookup)?;
+            // SAFETY: `bytes` is the same slice used to create the meta instances.
+            unsafe {
+                sanitize_instruction_final_pass::<false>(
+                    bytes,
+                    &message_header,
+                    &static_account_keys,
+                    &instructions,
+                    &address_table_lookup,
+                )?;
+            };
         }
 
         Ok(Self {

@@ -61,6 +61,15 @@ fn bench_transactions_parsing(
             }
         });
     });
+
+    // New Transaction Parsing - inline sanitization
+    group.bench_function("TransactionMeta (inline sanitize)", |c| {
+        c.iter(|| {
+            for bytes in serialized_transactions.iter() {
+                let _ = TransactionMeta::try_new_sanitized(black_box(bytes)).unwrap();
+            }
+        });
+    });
 }
 
 fn minimum_sized_transactions() -> Vec<VersionedTransaction> {
