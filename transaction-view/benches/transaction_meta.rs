@@ -555,23 +555,23 @@ fn bench_transactions_parsing(
 ) {
     let serialized_transactions = serialize_transactions(transactions);
 
-    // // Legacy Transaction Parsing
-    // group.bench_function("VersionedTransaction", |c| {
-    //     c.iter(|| {
-    //         for bytes in serialized_transactions.iter() {
-    //             let _ = bincode::deserialize::<VersionedTransaction>(black_box(bytes)).unwrap();
-    //         }
-    //     });
-    // });
+    // Legacy Transaction Parsing
+    group.bench_function("VersionedTransaction", |c| {
+        c.iter(|| {
+            for bytes in serialized_transactions.iter() {
+                let _ = bincode::deserialize::<VersionedTransaction>(black_box(bytes)).unwrap();
+            }
+        });
+    });
 
-    // // New Transaction Parsing
-    // group.bench_function("TransactionMeta", |c| {
-    //     c.iter(|| {
-    //         for bytes in serialized_transactions.iter() {
-    //             let _ = TransactionMeta::try_new(black_box(bytes)).unwrap();
-    //         }
-    //     });
-    // });
+    // New Transaction Parsing
+    group.bench_function("TransactionMeta", |c| {
+        c.iter(|| {
+            for bytes in serialized_transactions.iter() {
+                let _ = TransactionMeta::try_new(black_box(bytes)).unwrap();
+            }
+        });
+    });
 
     // // New Transaction Parsing - separated sanitization
     // group.bench_function("TransactionMeta (separate sanitize)", |c| {
