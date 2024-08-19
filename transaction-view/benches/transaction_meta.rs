@@ -1,6 +1,6 @@
 use {
     agave_transaction_view::{
-        bytes::{advance_offset_for_array, advance_offset_for_type, read_byte},
+        bytes::{advance_offset_for_array, advance_offset_for_type, read_array, read_byte},
         instructions_meta::InstructionsMeta,
         message_header_meta::{MessageHeaderMeta, TransactionVersion},
         result::TransactionParsingError,
@@ -466,15 +466,11 @@ fn parse_oob_transaction(bytes: &[u8]) -> Result<OOBTransactionMeta, Transaction
     }
     assert_eq!(offset % 2, 0, "instruction alignment check");
     let instructions_offset = offset as u16;
-    advance_offset_for_array::<CompiledInstructionCounts>(
-        bytes,
-        &mut offset,
-        u16::from(instructions_len),
-    )?;
+    let ixs = read_array::<CompiledInstructionCounts>(bytes, &mut offset, instructions_len as u16)?;
 
     // ATLs
-    let (atls_len, atls_offset) = match header_meta.version {
-        TransactionVersion::Legacy => (0, 0),
+    let (atls, atls_len, atls_offset): (&[ATLCounts], u8, u16) = match header_meta.version {
+        TransactionVersion::Legacy => (&[], 0, 0),
         TransactionVersion::V0 => {
             let atls_len = read_byte(bytes, &mut offset)?;
             if offset % 2 != 0 {
@@ -482,20 +478,16 @@ fn parse_oob_transaction(bytes: &[u8]) -> Result<OOBTransactionMeta, Transaction
             }
             let atls_offset = offset as u16;
             assert_eq!(offset % 2, 0, "atl alignment check");
-            advance_offset_for_array::<ATLCounts>(bytes, &mut offset, u16::from(atls_len))?;
-            (atls_len, atls_offset)
+            (
+                read_array::<ATLCounts>(bytes, &mut offset, atls_len as u16)?,
+                atls_len,
+                atls_offset,
+            )
         }
     };
 
     // Trailing offset data
-    let instruction_counts_slice = unsafe {
-        core::slice::from_raw_parts::<CompiledInstructionCounts>(
-            bytes.as_ptr().add(usize::from(instructions_offset))
-                as *const CompiledInstructionCounts,
-            instructions_len as usize,
-        )
-    };
-    for ix in instruction_counts_slice {
+    for ix in ixs {
         advance_offset_for_array::<u8>(bytes, &mut offset, u16::from(ix.num_accounts))?;
         advance_offset_for_array::<u8>(bytes, &mut offset, u16::from(ix.data_len))?;
     }
@@ -503,15 +495,7 @@ fn parse_oob_transaction(bytes: &[u8]) -> Result<OOBTransactionMeta, Transaction
     match header_meta.version {
         TransactionVersion::Legacy => {}
         TransactionVersion::V0 => {
-            let atl_counts_slice = unsafe {
-                core::slice::from_raw_parts::<ATLCounts>(
-                    bytes.as_ptr().add(usize::from(atls_offset)) as *const ATLCounts,
-                    atls_len as usize,
-                )
-            };
-            let mut count = 0;
-            for atl in atl_counts_slice {
-                count += 1;
+            for atl in atls {
                 advance_offset_for_array::<u8>(
                     bytes,
                     &mut offset,
