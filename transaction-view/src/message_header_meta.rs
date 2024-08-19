@@ -16,20 +16,20 @@ pub enum TransactionVersion {
 }
 
 /// Meta data for accessing message header fields in a transaction view.
-pub(crate) struct MessageHeaderMeta {
+pub struct MessageHeaderMeta {
     /// The offset to the first byte of the message in the transaction packet.
-    pub(crate) offset: u16,
+    pub offset: u16,
     /// The version of the transaction.
-    pub(crate) version: TransactionVersion,
+    pub version: TransactionVersion,
     /// The number of signatures required for this message to be considered
     /// valid.
-    pub(crate) num_required_signatures: u8,
+    pub num_required_signatures: u8,
     /// The last `num_readonly_signed_accounts` of the signed keys are
     /// read-only.
-    pub(crate) num_readonly_signed_accounts: u8,
+    pub num_readonly_signed_accounts: u8,
     /// The last `num_readonly_unsigned_accounts` of the unsigned keys are
     /// read-only accounts.
-    pub(crate) num_readonly_unsigned_accounts: u8,
+    pub num_readonly_unsigned_accounts: u8,
 }
 
 impl MessageHeaderMeta {

@@ -1,7 +1,13 @@
 use {
     agave_transaction_view::{
-        instructions_meta::InstructionsMeta, message_header_meta::TransactionVersion,
-        sanitize::sanitize_transaction_meta, transaction_meta::TransactionMeta,
+        bytes::{advance_offset_for_array, advance_offset_for_type, read_byte},
+        instructions_meta::InstructionsMeta,
+        message_header_meta::{MessageHeaderMeta, TransactionVersion},
+        result::TransactionParsingError,
+        sanitize::sanitize_transaction_meta,
+        signature_meta::SignatureMeta,
+        static_account_keys_meta::StaticAccountKeysMeta,
+        transaction_meta::TransactionMeta,
     },
     criterion::{
         black_box, criterion_group, criterion_main, measurement::Measurement, BenchmarkGroup,
@@ -16,7 +22,7 @@ use {
         },
         pubkey::Pubkey,
         short_vec::ShortVec,
-        signature::Keypair,
+        signature::{Keypair, Signature},
         signer::Signer,
         system_instruction,
         transaction::VersionedTransaction,
@@ -166,52 +172,432 @@ fn bench_parse_instructions(
     });
 }
 
-const NUM_TRANSACTIONS: usize = 1024;
+// OOB Full transaction parsing
 
-fn serialize_transactions(transactions: Vec<VersionedTransaction>) -> Vec<Vec<u8>> {
+#[repr(C)]
+struct CompiledInstructionCounts {
+    num_accounts: u16,
+    data_len: u16,
+}
+
+#[repr(C)]
+struct ATLCounts {
+    account_key: Pubkey,
+    writable_indexes_len: u8,
+    readonly_indexes_len: u8,
+}
+
+fn oob_serialize_transaction(transaction: &VersionedTransaction) -> Vec<u8> {
+    let signatures_size = 1 + transaction.signatures.len() * core::mem::size_of::<Signature>();
+    let version_len = match transaction.message {
+        VersionedMessage::Legacy(_) => 0,
+        VersionedMessage::V0(_) => 1,
+    };
+    let message_header_size = core::mem::size_of::<MessageHeader>();
+    let account_keys_size =
+        1 + transaction.message.static_account_keys().len() * core::mem::size_of::<Pubkey>();
+    let recent_blockhash_size = core::mem::size_of::<Hash>();
+    let instruction_counts_slice_size = 1 + transaction.message.instructions().len()
+        * core::mem::size_of::<CompiledInstructionCounts>();
+    let atl_counts_slice_size = version_len
+        + transaction
+            .message
+            .address_table_lookups()
+            .map(|atl| atl.len())
+            .unwrap_or(0)
+            * core::mem::size_of::<ATLCounts>();
+
+    let serialized_instructions_size = transaction
+        .message
+        .instructions()
+        .iter()
+        .map(|ix| ix.accounts.len() + ix.data.len())
+        .sum::<usize>();
+    let serialized_atls_size = transaction
+        .message
+        .address_table_lookups()
+        .map(|atls| {
+            atls.iter()
+                .map(|atl| atl.writable_indexes.len() + atl.readonly_indexes.len())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+
+    // Instructions offset
+    let instructions_count_offset = signatures_size
+        + version_len
+        + message_header_size
+        + account_keys_size
+        + recent_blockhash_size
+        + 1;
+    let padded_instructions_count_offset =
+        instructions_count_offset + instructions_count_offset % 2;
+    assert!(padded_instructions_count_offset % 2 == 0, "alignment check");
+    let atl_count_offset = if version_len != 0 {
+        padded_instructions_count_offset + instruction_counts_slice_size
+    } else {
+        0
+    };
+    let padded_atl_count_offset = atl_count_offset + atl_count_offset % 2;
+    assert!(padded_atl_count_offset % 2 == 0, "alignment check");
+
+    let packet_size = signatures_size
+        + version_len
+        + message_header_size
+        + account_keys_size
+        + recent_blockhash_size
+        + instruction_counts_slice_size
+        + atl_counts_slice_size
+        + serialized_instructions_size
+        + serialized_atls_size
+        + (padded_instructions_count_offset - instructions_count_offset)
+        + (padded_atl_count_offset - atl_count_offset);
+    let mut buffer = Vec::from_iter((0..packet_size).map(|_| 0u8));
+
+    let mut offset = 0;
+    let mut trailing_offset = signatures_size
+        + version_len
+        + message_header_size
+        + account_keys_size
+        + recent_blockhash_size
+        + instruction_counts_slice_size
+        + atl_counts_slice_size
+        + (padded_instructions_count_offset - instructions_count_offset)
+        + (padded_atl_count_offset - atl_count_offset);
+    let trailing_offset_start = trailing_offset;
+
+    // Signatures
+    buffer[offset] = transaction.signatures.len() as u8;
+    offset += 1;
+
+    for signature in &transaction.signatures {
+        buffer[offset..offset + core::mem::size_of::<Signature>()]
+            .copy_from_slice(signature.as_ref());
+        offset += core::mem::size_of::<Signature>();
+    }
+    assert_eq!(offset, signatures_size, "signature offset check");
+
+    // Version
+    match transaction.message {
+        VersionedMessage::Legacy(_) => {}
+        VersionedMessage::V0(_) => {
+            buffer[offset] = 128;
+            offset += 1;
+        }
+    }
+
+    assert_eq!(
+        offset,
+        signatures_size + version_len,
+        "version offset check"
+    );
+
+    // Message Header
+    let message_header = transaction.message.header();
+    buffer[offset] = message_header.num_required_signatures;
+    offset += 1;
+    buffer[offset] = message_header.num_readonly_signed_accounts;
+    offset += 1;
+    buffer[offset] = message_header.num_readonly_unsigned_accounts;
+    offset += 1;
+
+    assert_eq!(
+        offset,
+        signatures_size + version_len + message_header_size,
+        "message header offset check"
+    );
+
+    // Account Keys
+    let account_keys = transaction.message.static_account_keys();
+    buffer[offset] = account_keys.len() as u8; // can only have up to 34 accounts, u8 is better!
+    offset += 1;
+
+    for account_key in account_keys {
+        buffer[offset..offset + core::mem::size_of::<Pubkey>()]
+            .copy_from_slice(account_key.as_ref());
+        offset += core::mem::size_of::<Pubkey>();
+    }
+
+    assert_eq!(
+        offset,
+        signatures_size + version_len + message_header_size + account_keys_size,
+        "account keys offset check"
+    );
+
+    // Recent Blockhash
+    buffer[offset..offset + core::mem::size_of::<Hash>()]
+        .copy_from_slice(transaction.message.recent_blockhash().as_ref());
+    offset += core::mem::size_of::<Hash>();
+
+    assert_eq!(
+        offset,
+        signatures_size
+            + version_len
+            + message_header_size
+            + account_keys_size
+            + recent_blockhash_size,
+        "recent blockhash offset check"
+    );
+
+    // Instructions
+    let instructions = transaction.message.instructions();
+    buffer[offset] = instructions.len() as u8; // assume SIMD-0160 is in place
+    offset += 1;
+
+    // Padding
+    if offset % 2 != 0 {
+        offset += 1;
+    }
+
+    assert_eq!(
+        offset, padded_instructions_count_offset,
+        "instruction count offset check"
+    );
+    for ix in instructions {
+        // Inline serialization of counts.
+        let accounts_len = ix.accounts.len() as u16;
+        let data_len = ix.data.len() as u16;
+        buffer[offset..offset + 2].copy_from_slice(&accounts_len.to_le_bytes());
+        offset += 2;
+        buffer[offset..offset + 2].copy_from_slice(&data_len.to_le_bytes());
+        offset += 2;
+
+        // Trailing serialization of variable length data.
+        buffer[trailing_offset..trailing_offset + ix.accounts.len()].copy_from_slice(&ix.accounts);
+        trailing_offset += ix.accounts.len();
+        buffer[trailing_offset..trailing_offset + ix.data.len()].copy_from_slice(&ix.data);
+        trailing_offset += ix.data.len();
+    }
+
+    assert_eq!(
+        offset,
+        padded_instructions_count_offset
+            + instructions.len() * core::mem::size_of::<CompiledInstructionCounts>(),
+        "instruction count offset check"
+    );
+    assert_eq!(
+        offset,
+        signatures_size
+            + version_len
+            + message_header_size
+            + account_keys_size
+            + recent_blockhash_size
+            + instruction_counts_slice_size
+            + (padded_instructions_count_offset - instructions_count_offset),
+    );
+
+    // ATLs
+    if version_len == 0 {
+        return buffer;
+    }
+
+    let atls = transaction.message.address_table_lookups().unwrap();
+    buffer[offset] = atls.len() as u8;
+    offset += 1;
+
+    // Padding
+    if offset % 2 != 0 {
+        offset += 1;
+    }
+
+    assert_eq!(offset, padded_atl_count_offset, "atl count offset check");
+
+    for atl in atls {
+        // Inline serialization of counts and Pubkey
+        buffer[offset..offset + core::mem::size_of::<Pubkey>()]
+            .copy_from_slice(atl.account_key.as_ref());
+        offset += core::mem::size_of::<Pubkey>();
+        buffer[offset] = atl.writable_indexes.len() as u8;
+        offset += 1;
+        buffer[offset] = atl.readonly_indexes.len() as u8;
+        offset += 1;
+
+        // Trailing serialization of variable length data.
+        buffer[trailing_offset..trailing_offset + atl.writable_indexes.len()]
+            .copy_from_slice(&atl.writable_indexes);
+        trailing_offset += atl.writable_indexes.len();
+        buffer[trailing_offset..trailing_offset + atl.readonly_indexes.len()]
+            .copy_from_slice(&atl.readonly_indexes);
+        trailing_offset += atl.readonly_indexes.len();
+    }
+
+    assert_eq!(
+        offset,
+        padded_atl_count_offset + atls.len() * core::mem::size_of::<ATLCounts>(),
+        "atl count offset check"
+    );
+    assert_eq!(offset, trailing_offset_start, "offset check");
+
+    buffer
+}
+
+fn serialize_transactions_oob(transactions: &[VersionedTransaction]) -> Vec<Vec<u8>> {
     transactions
         .into_iter()
-        .map(|transaction| bincode::serialize(&transaction).unwrap())
+        .map(|transaction| oob_serialize_transaction(transaction))
+        .collect()
+}
+
+struct OOBTransactionMeta {
+    signature: SignatureMeta,
+    header: MessageHeaderMeta,
+    account_keys: StaticAccountKeysMeta,
+    blockhash_offset: u16,
+
+    instructions_len: u8,
+    instruction_counts_offset: u16,
+
+    atls_len: u8,
+    atls_offset: u16,
+}
+
+fn parse_oob_transaction(bytes: &[u8]) -> Result<OOBTransactionMeta, TransactionParsingError> {
+    let mut offset = 0;
+    let signature_meta = SignatureMeta::try_new(bytes, &mut offset)?;
+    let header_meta = MessageHeaderMeta::try_new(bytes, &mut offset)?;
+    let account_keys_meta = StaticAccountKeysMeta::try_new(bytes, &mut offset)?;
+    let recent_block_hash_offset = offset as u16;
+    advance_offset_for_type::<Hash>(bytes, &mut offset)?;
+
+    // Instructions
+    let instructions_len = read_byte(bytes, &mut offset)?;
+    if offset % 2 != 0 {
+        offset += 1; // padding byte
+    }
+    assert_eq!(offset % 2, 0, "instruction alignment check");
+    let instructions_offset = offset as u16;
+    advance_offset_for_array::<CompiledInstructionCounts>(
+        bytes,
+        &mut offset,
+        u16::from(instructions_len),
+    )?;
+
+    // ATLs
+    let (atls_len, atls_offset) = match header_meta.version {
+        TransactionVersion::Legacy => (0, 0),
+        TransactionVersion::V0 => {
+            let atls_len = read_byte(bytes, &mut offset)?;
+            if offset % 2 != 0 {
+                offset += 1; // padding byte
+            }
+            let atls_offset = offset as u16;
+            assert_eq!(offset % 2, 0, "atl alignment check");
+            advance_offset_for_array::<ATLCounts>(bytes, &mut offset, u16::from(atls_len))?;
+            (atls_len, atls_offset)
+        }
+    };
+
+    // Trailing offset data
+    let instruction_counts_slice = unsafe {
+        core::slice::from_raw_parts::<CompiledInstructionCounts>(
+            bytes.as_ptr().add(usize::from(instructions_offset))
+                as *const CompiledInstructionCounts,
+            instructions_len as usize,
+        )
+    };
+    for ix in instruction_counts_slice {
+        advance_offset_for_array::<u8>(bytes, &mut offset, u16::from(ix.num_accounts))?;
+        advance_offset_for_array::<u8>(bytes, &mut offset, u16::from(ix.data_len))?;
+    }
+
+    match header_meta.version {
+        TransactionVersion::Legacy => {}
+        TransactionVersion::V0 => {
+            let atl_counts_slice = unsafe {
+                core::slice::from_raw_parts::<ATLCounts>(
+                    bytes.as_ptr().add(usize::from(atls_offset)) as *const ATLCounts,
+                    atls_len as usize,
+                )
+            };
+            let mut count = 0;
+            for atl in atl_counts_slice {
+                count += 1;
+                advance_offset_for_array::<u8>(
+                    bytes,
+                    &mut offset,
+                    u16::from(atl.writable_indexes_len),
+                )?;
+                advance_offset_for_array::<u8>(
+                    bytes,
+                    &mut offset,
+                    u16::from(atl.readonly_indexes_len),
+                )?;
+            }
+        }
+    }
+
+    assert_eq!(offset, bytes.len(), "offset check");
+
+    Ok(OOBTransactionMeta {
+        signature: signature_meta,
+        header: header_meta,
+        account_keys: account_keys_meta,
+        blockhash_offset: recent_block_hash_offset,
+        instructions_len,
+        instruction_counts_offset: instructions_offset,
+        atls_len,
+        atls_offset,
+    })
+}
+
+const NUM_TRANSACTIONS: usize = 1024;
+
+fn serialize_transactions(transactions: &[VersionedTransaction]) -> Vec<Vec<u8>> {
+    transactions
+        .into_iter()
+        .map(|transaction| bincode::serialize(transaction).unwrap())
         .collect()
 }
 
 fn bench_transactions_parsing(
     group: &mut BenchmarkGroup<impl Measurement>,
-    serialized_transactions: Vec<Vec<u8>>,
+    transactions: &[VersionedTransaction],
 ) {
-    // Legacy Transaction Parsing
-    group.bench_function("VersionedTransaction", |c| {
-        c.iter(|| {
-            for bytes in serialized_transactions.iter() {
-                let _ = bincode::deserialize::<VersionedTransaction>(black_box(bytes)).unwrap();
-            }
-        });
-    });
+    let serialized_transactions = serialize_transactions(transactions);
 
-    // New Transaction Parsing
-    group.bench_function("TransactionMeta", |c| {
-        c.iter(|| {
-            for bytes in serialized_transactions.iter() {
-                let _ = TransactionMeta::try_new(black_box(bytes)).unwrap();
-            }
-        });
-    });
+    // // Legacy Transaction Parsing
+    // group.bench_function("VersionedTransaction", |c| {
+    //     c.iter(|| {
+    //         for bytes in serialized_transactions.iter() {
+    //             let _ = bincode::deserialize::<VersionedTransaction>(black_box(bytes)).unwrap();
+    //         }
+    //     });
+    // });
 
-    // New Transaction Parsing - separated sanitization
-    group.bench_function("TransactionMeta (separate sanitize)", |c| {
-        c.iter(|| {
-            for bytes in serialized_transactions.iter() {
-                let transaction_meta = TransactionMeta::try_new(black_box(bytes)).unwrap();
-                unsafe { sanitize_transaction_meta(bytes, &transaction_meta).unwrap() }
-            }
-        });
-    });
+    // // New Transaction Parsing
+    // group.bench_function("TransactionMeta", |c| {
+    //     c.iter(|| {
+    //         for bytes in serialized_transactions.iter() {
+    //             let _ = TransactionMeta::try_new(black_box(bytes)).unwrap();
+    //         }
+    //     });
+    // });
 
-    // New Transaction Parsing - inline sanitization
-    group.bench_function("TransactionMeta (inline sanitize)", |c| {
+    // // New Transaction Parsing - separated sanitization
+    // group.bench_function("TransactionMeta (separate sanitize)", |c| {
+    //     c.iter(|| {
+    //         for bytes in serialized_transactions.iter() {
+    //             let transaction_meta = TransactionMeta::try_new(black_box(bytes)).unwrap();
+    //             unsafe { sanitize_transaction_meta(bytes, &transaction_meta).unwrap() }
+    //         }
+    //     });
+    // });
+
+    // // New Transaction Parsing - inline sanitization
+    // group.bench_function("TransactionMeta (inline sanitize)", |c| {
+    //     c.iter(|| {
+    //         for bytes in serialized_transactions.iter() {
+    //             let _ = TransactionMeta::try_new_sanitized(black_box(bytes)).unwrap();
+    //         }
+    //     });
+    // });
+
+    // New Transaction Parsing - OOB serialization
+    let oob_serialized_transactions = serialize_transactions_oob(transactions);
+    group.bench_function("OOBTransactionMeta", |c| {
         c.iter(|| {
-            for bytes in serialized_transactions.iter() {
-                let _ = TransactionMeta::try_new_sanitized(black_box(bytes)).unwrap();
+            for bytes in oob_serialized_transactions.iter() {
+                let _ = parse_oob_transaction(black_box(bytes)).unwrap();
             }
         });
     });
@@ -334,38 +720,38 @@ fn packed_atls() -> Vec<VersionedTransaction> {
 }
 
 fn bench_parse_min_sized_transactions(c: &mut Criterion) {
-    let serialized_transactions = serialize_transactions(minimum_sized_transactions());
+    let transactions = minimum_sized_transactions();
     let mut group = c.benchmark_group("min sized transactions");
-    group.throughput(Throughput::Elements(serialized_transactions.len() as u64));
-    bench_transactions_parsing(&mut group, serialized_transactions);
+    group.throughput(Throughput::Elements(transactions.len() as u64));
+    bench_transactions_parsing(&mut group, &transactions);
 }
 
 fn bench_parse_simple_transfers(c: &mut Criterion) {
-    let serialized_transactions = serialize_transactions(simple_transfers());
+    let transactions = simple_transfers();
     let mut group = c.benchmark_group("simple transfers");
-    group.throughput(Throughput::Elements(serialized_transactions.len() as u64));
-    bench_transactions_parsing(&mut group, serialized_transactions);
+    group.throughput(Throughput::Elements(transactions.len() as u64));
+    bench_transactions_parsing(&mut group, &transactions);
 }
 
 fn bench_parse_packed_transfers(c: &mut Criterion) {
-    let serialized_transactions = serialize_transactions(packed_transfers());
+    let transactions = packed_transfers();
     let mut group = c.benchmark_group("packed transfers");
-    group.throughput(Throughput::Elements(serialized_transactions.len() as u64));
-    bench_transactions_parsing(&mut group, serialized_transactions);
+    group.throughput(Throughput::Elements(transactions.len() as u64));
+    bench_transactions_parsing(&mut group, &transactions);
 }
 
-fn bench_parse_packed_noops(c: &mut Criterion) {
-    let serialized_transactions = serialize_transactions(packed_noops());
-    let mut group = c.benchmark_group("packed noops");
-    group.throughput(Throughput::Elements(serialized_transactions.len() as u64));
-    bench_transactions_parsing(&mut group, serialized_transactions);
-}
+// fn bench_parse_packed_noops(c: &mut Criterion) {
+//     let transactions = packed_noops();
+//     let mut group = c.benchmark_group("packed noops");
+//     group.throughput(Throughput::Elements(transactions.len() as u64));
+//     bench_transactions_parsing(&mut group, &transactions);
+// }
 
 fn bench_parse_packed_atls(c: &mut Criterion) {
-    let serialized_transactions = serialize_transactions(packed_atls());
+    let transactions = packed_atls();
     let mut group = c.benchmark_group("packed atls");
-    group.throughput(Throughput::Elements(serialized_transactions.len() as u64));
-    bench_transactions_parsing(&mut group, serialized_transactions);
+    group.throughput(Throughput::Elements(transactions.len() as u64));
+    bench_transactions_parsing(&mut group, &transactions);
 }
 
 fn bench_stuff(c: &mut Criterion) {
@@ -382,8 +768,7 @@ criterion_group!(
     bench_parse_min_sized_transactions,
     bench_parse_simple_transfers,
     bench_parse_packed_transfers,
-    bench_parse_packed_noops,
     bench_parse_packed_atls,
-    bench_stuff
+    // bench_stuff
 );
 criterion_main!(benches);

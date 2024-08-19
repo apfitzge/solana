@@ -17,18 +17,18 @@ const MAX_SIGNATURES_PER_PACKET: u8 =
     (PACKET_DATA_SIZE / (core::mem::size_of::<Signature>() + core::mem::size_of::<Pubkey>())) as u8;
 
 /// Meta data for accessing transaction-level signatures in a transaction view.
-pub(crate) struct SignatureMeta {
+pub struct SignatureMeta {
     /// The number of signatures in the transaction.
-    pub(crate) num_signatures: u8,
+    pub num_signatures: u8,
     /// Offset to the first signature in the transaction packet.
-    pub(crate) offset: u16,
+    pub offset: u16,
 }
 
 impl SignatureMeta {
     /// Get the number of signatures and the offset to the first signature in
     /// the transaction packet, starting at the given `offset`.
     #[inline(always)]
-    pub(crate) fn try_new(bytes: &[u8], offset: &mut usize) -> Result<Self> {
+    pub fn try_new(bytes: &[u8], offset: &mut usize) -> Result<Self> {
         // Maximum number of signatures should be represented by a single byte,
         // thus the MSB should not be set.
         const _: () = assert!(MAX_SIGNATURES_PER_PACKET & 0b1000_0000 == 0);
