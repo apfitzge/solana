@@ -112,6 +112,7 @@ dependencies = [
 name = "agave-geyser-plugin-interface"
 version = "2.1.0"
 dependencies = [
+ "agave-transaction-ffi",
  "log",
  "solana-sdk",
  "solana-transaction-status",
@@ -223,6 +224,10 @@ dependencies = [
 [[package]]
 name = "agave-transaction-ffi"
 version = "2.1.0"
+dependencies = [
+ "solana-sdk",
+ "solana-svm-transaction",
+]
 
 [[package]]
 name = "agave-transaction-view"
@@ -5528,6 +5533,7 @@ dependencies = [
 name = "solana-accounts-db"
 version = "2.1.0"
 dependencies = [
+ "agave-transaction-ffi",
  "ahash 0.8.10",
  "assert_matches",
  "bincode",
@@ -6477,6 +6483,7 @@ name = "solana-geyser-plugin-manager"
 version = "2.1.0"
 dependencies = [
  "agave-geyser-plugin-interface",
+ "agave-transaction-ffi",
  "bs58",
  "crossbeam-channel",
  "json5",

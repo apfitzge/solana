@@ -3,8 +3,10 @@
 /// In addition, the dynamic library must export a "C" function _create_plugin which
 /// creates the implementation of the plugin.
 use {
+    agave_transaction_ffi::{AccountKey, TransactionInterface},
     solana_sdk::{
         clock::{Slot, UnixTimestamp},
+        pubkey::Pubkey,
         signature::Signature,
         transaction::SanitizedTransaction,
     },
@@ -111,6 +113,54 @@ pub struct ReplicaAccountInfoV3<'a> {
     pub txn: Option<&'a SanitizedTransaction>,
 }
 
+/// A c-compatible version of ReplicaAccountInfoV3 that abstracts
+/// transaction type from the plugin.
+#[repr(C)]
+pub struct ReplicaAccountInfoV4<'a> {
+    /// The Pubkey for the account
+    pub pubkey: AccountKey,
+    /// The lamports for the account
+    pub lamports: u64,
+    /// The Pubkey of the owner program account
+    pub owner: AccountKey,
+    /// This account's data contains a loaded program (and is now read-only)
+    pub executable: bool,
+    /// The epoch at which this account will next owe rent
+    pub rent_epoch: u64,
+    /// The number of bytes in the account data
+    pub data_length: usize,
+    /// The data held in this account
+    pub data_ptr: *const u8,
+    /// A global monotonically increasing atomic number, which can be used
+    /// to tell the order of the account update. For example, when an
+    /// account is updated in the same slot multiple times, the update
+    /// with higher write_version should supersede the one with lower
+    /// write_version.
+    pub write_version: u64,
+    /// Interface to transaction causing this account modification
+    pub txn: Option<&'a TransactionInterface<'a>>,
+
+    /// Marker to ensure lifetime of `pubkey` and `owner`
+    /// are respected.
+    pub _lifetime: core::marker::PhantomData<&'a ()>,
+}
+
+// Convenience methods for ReplicaAccountInfoV4 on the Rust
+// side to avoid having to deal with raw pointers.
+impl<'a> ReplicaAccountInfoV4<'a> {
+    pub fn pubkey(&self) -> &'a [u8] {
+        unsafe { std::slice::from_raw_parts(self.pubkey, core::mem::size_of::<Pubkey>()) }
+    }
+
+    pub fn owner(&self) -> &'a [u8] {
+        unsafe { std::slice::from_raw_parts(self.owner, core::mem::size_of::<Pubkey>()) }
+    }
+
+    pub fn data(&self) -> &'a [u8] {
+        unsafe { std::slice::from_raw_parts(self.data_ptr, self.data_length) }
+    }
+}
+
 /// A wrapper to future-proof ReplicaAccountInfo handling.
 /// If there were a change to the structure of ReplicaAccountInfo,
 /// there would be new enum entry for the newer version, forcing
@@ -120,6 +170,7 @@ pub enum ReplicaAccountInfoVersions<'a> {
     V0_0_1(&'a ReplicaAccountInfo<'a>),
     V0_0_2(&'a ReplicaAccountInfoV2<'a>),
     V0_0_3(&'a ReplicaAccountInfoV3<'a>),
+    V0_0_4(&'a ReplicaAccountInfoV4<'a>),
 }
 
 /// Information about a transaction

@@ -1,8 +1,7 @@
 use {
     crate::account_storage::meta::StoredAccountMeta,
-    solana_sdk::{
-        account::AccountSharedData, clock::Slot, pubkey::Pubkey, transaction::SanitizedTransaction,
-    },
+    agave_transaction_ffi::TransactionInterface,
+    solana_sdk::{account::AccountSharedData, clock::Slot, pubkey::Pubkey},
     std::sync::Arc,
 };
 
@@ -12,7 +11,7 @@ pub trait AccountsUpdateNotifierInterface: std::fmt::Debug {
         &self,
         slot: Slot,
         account: &AccountSharedData,
-        txn: &Option<&SanitizedTransaction>,
+        txn: Option<&TransactionInterface>,
         pubkey: &Pubkey,
         write_version: u64,
     );

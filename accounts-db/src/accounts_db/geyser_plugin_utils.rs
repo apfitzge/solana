@@ -1,10 +1,10 @@
 use {
     crate::{account_storage::meta::StoredAccountMeta, accounts_db::AccountsDb},
+    agave_transaction_ffi::create_interface::create_transaction_interface,
     solana_measure::measure::Measure,
     solana_metrics::*,
-    solana_sdk::{
-        account::AccountSharedData, clock::Slot, pubkey::Pubkey, transaction::SanitizedTransaction,
-    },
+    solana_sdk::{account::AccountSharedData, clock::Slot, pubkey::Pubkey},
+    solana_svm_transaction::svm_transaction::SVMTransaction,
     std::collections::{HashMap, HashSet},
 };
 
@@ -61,7 +61,7 @@ impl AccountsDb {
         &self,
         slot: Slot,
         account: &AccountSharedData,
-        txn: &Option<&SanitizedTransaction>,
+        txn: &Option<&impl SVMTransaction>,
         pubkey: &Pubkey,
         write_version_producer: &mut P,
     ) where
@@ -71,7 +71,7 @@ impl AccountsDb {
             accounts_update_notifier.notify_account_update(
                 slot,
                 account,
-                txn,
+                txn.map(|txn| create_transaction_interface(txn)).as_ref(),
                 pubkey,
                 write_version_producer.next().unwrap(),
             );
@@ -172,12 +172,12 @@ pub mod tests {
                 AccountsUpdateNotifier, AccountsUpdateNotifierInterface,
             },
         },
+        agave_transaction_ffi::TransactionInterface,
         dashmap::DashMap,
         solana_sdk::{
             account::{AccountSharedData, ReadableAccount},
             clock::Slot,
             pubkey::Pubkey,
-            transaction::SanitizedTransaction,
         },
         std::sync::{
             atomic::{AtomicBool, Ordering},
@@ -203,7 +203,7 @@ pub mod tests {
             &self,
             slot: Slot,
             account: &AccountSharedData,
-            _txn: &Option<&SanitizedTransaction>,
+            _txn: Option<&TransactionInterface>,
             pubkey: &Pubkey,
             _write_version: u64,
         ) {

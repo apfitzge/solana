@@ -1,9 +1,5 @@
-//! Module to provide easy construction of C-compatible interfaces for
-//! interacting with transactions from valid transaction references.
-//!
-
 use {
-    agave_transaction_ffi::{
+    crate::{
         AccountCallback, Instruction, InstructionCallback, TransactionInterface, TransactionPtr,
     },
     solana_svm_transaction::svm_transaction::SVMTransaction,
@@ -13,10 +9,9 @@ use {
 /// `TransactionInterface` that can be used to interact with the transaction in
 /// C-compatible code. This interface is only valid for the lifetime of the
 /// transaction reference, which cannot be guaranteed by this function interface.
-#[allow(dead_code)]
-pub unsafe fn create_transaction_interface<Tx: SVMTransaction>(
-    transaction: &Tx,
-) -> TransactionInterface {
+pub fn create_transaction_interface<'a, Tx: SVMTransaction>(
+    transaction: &'a Tx,
+) -> TransactionInterface<'a> {
     extern "C" fn num_signatures<Tx: SVMTransaction>(transaction_ptr: TransactionPtr) -> usize {
         let transaction = unsafe { &*(transaction_ptr as *const Tx) };
         transaction.signatures().len()
@@ -137,6 +132,7 @@ pub unsafe fn create_transaction_interface<Tx: SVMTransaction>(
         is_signer_fn: is_signer::<Tx>,
         is_invoked_fn: is_invoked::<Tx>,
         iter_accounts_fn: iter_accounts::<Tx>,
+        _lifetime: core::marker::PhantomData::<&'a ()>,
     }
 }
 
@@ -160,8 +156,7 @@ mod tests {
                 Hash::default(),
             ));
 
-        // SAFETY: The interface is valid for as long as the transaction reference is valid.
-        let interface = unsafe { create_transaction_interface(&simple_transfer) };
+        let interface = create_transaction_interface(&simple_transfer);
 
         // Verify signature len and address are the same.
         let signatures = simple_transfer.signatures();

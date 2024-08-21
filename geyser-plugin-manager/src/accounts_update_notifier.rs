@@ -2,8 +2,9 @@
 use {
     crate::geyser_plugin_manager::GeyserPluginManager,
     agave_geyser_plugin_interface::geyser_plugin_interface::{
-        ReplicaAccountInfoV3, ReplicaAccountInfoVersions,
+        ReplicaAccountInfoV4, ReplicaAccountInfoVersions,
     },
+    agave_transaction_ffi::TransactionInterface,
     log::*,
     solana_accounts_db::{
         account_storage::meta::StoredAccountMeta,
@@ -15,7 +16,6 @@ use {
         account::{AccountSharedData, ReadableAccount},
         clock::Slot,
         pubkey::Pubkey,
-        transaction::SanitizedTransaction,
     },
     std::sync::{Arc, RwLock},
 };
@@ -29,7 +29,7 @@ impl AccountsUpdateNotifierInterface for AccountsUpdateNotifierImpl {
         &self,
         slot: Slot,
         account: &AccountSharedData,
-        txn: &Option<&SanitizedTransaction>,
+        txn: Option<&TransactionInterface>,
         pubkey: &Pubkey,
         write_version: u64,
     ) {
@@ -104,26 +104,28 @@ impl AccountsUpdateNotifierImpl {
     fn accountinfo_from_shared_account_data<'a>(
         &self,
         account: &'a AccountSharedData,
-        txn: &'a Option<&'a SanitizedTransaction>,
+        txn: Option<&'a TransactionInterface<'a>>,
         pubkey: &'a Pubkey,
         write_version: u64,
-    ) -> ReplicaAccountInfoV3<'a> {
-        ReplicaAccountInfoV3 {
-            pubkey: pubkey.as_ref(),
+    ) -> ReplicaAccountInfoV4<'a> {
+        ReplicaAccountInfoV4 {
+            pubkey: pubkey.as_ref().as_ptr(),
             lamports: account.lamports(),
-            owner: account.owner().as_ref(),
+            owner: account.owner().as_ref().as_ptr(),
             executable: account.executable(),
             rent_epoch: account.rent_epoch(),
-            data: account.data(),
+            data_length: account.data().len(),
+            data_ptr: account.data().as_ptr(),
             write_version,
-            txn: *txn,
+            txn,
+            _lifetime: core::marker::PhantomData::<&'a ()>,
         }
     }
 
     fn accountinfo_from_stored_account_meta<'a>(
         &self,
         stored_account_meta: &'a StoredAccountMeta,
-    ) -> ReplicaAccountInfoV3<'a> {
+    ) -> ReplicaAccountInfoV4<'a> {
         // We do not need to rely on the specific write_version read from the append vec.
         // So, overwrite the write_version with something that works.
         // There is already only entry per pubkey.
@@ -131,21 +133,23 @@ impl AccountsUpdateNotifierImpl {
         // so it doesn't matter what value it gets here.
         // Passing 0 for everyone's write_version is sufficiently correct.
         let write_version = 0;
-        ReplicaAccountInfoV3 {
-            pubkey: stored_account_meta.pubkey().as_ref(),
+        ReplicaAccountInfoV4 {
+            pubkey: stored_account_meta.pubkey().as_ref().as_ptr(),
             lamports: stored_account_meta.lamports(),
-            owner: stored_account_meta.owner().as_ref(),
+            owner: stored_account_meta.owner().as_ref().as_ptr(),
             executable: stored_account_meta.executable(),
             rent_epoch: stored_account_meta.rent_epoch(),
-            data: stored_account_meta.data(),
+            data_length: stored_account_meta.data().len(),
+            data_ptr: stored_account_meta.data().as_ptr(),
             write_version,
             txn: None,
+            _lifetime: core::marker::PhantomData::<&'a ()>,
         }
     }
 
     fn notify_plugins_of_account_update(
         &self,
-        account: ReplicaAccountInfoV3,
+        account: ReplicaAccountInfoV4,
         slot: Slot,
         is_startup: bool,
     ) {
@@ -158,14 +162,14 @@ impl AccountsUpdateNotifierImpl {
         for plugin in plugin_manager.plugins.iter() {
             let mut measure = Measure::start("geyser-plugin-update-account");
             match plugin.update_account(
-                ReplicaAccountInfoVersions::V0_0_3(&account),
+                ReplicaAccountInfoVersions::V0_0_4(&account),
                 slot,
                 is_startup,
             ) {
                 Err(err) => {
                     error!(
                         "Failed to update account {} at slot {}, error: {} to plugin {}",
-                        bs58::encode(account.pubkey).into_string(),
+                        bs58::encode(account.pubkey()).into_string(),
                         slot,
                         err,
                         plugin.name()
@@ -174,7 +178,8 @@ impl AccountsUpdateNotifierImpl {
                 Ok(_) => {
                     trace!(
                         "Successfully updated account {} at slot {} to plugin {}",
-                        bs58::encode(account.pubkey).into_string(),
+                        // SAFETY: The pubkey is valid for lifetime of `account`.
+                        bs58::encode(account.pubkey()).into_string(),
                         slot,
                         plugin.name()
                     );

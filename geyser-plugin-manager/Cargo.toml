@@ -11,6 +11,7 @@ edition = { workspace = true }
 
 [dependencies]
 agave-geyser-plugin-interface = { workspace = true }
+agave-transaction-ffi = { workspace = true }
 bs58 = { workspace = true }
 crossbeam-channel = { workspace = true }
 json5 = { workspace = true }

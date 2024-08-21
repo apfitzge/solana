@@ -1,3 +1,5 @@
+pub mod create_interface;
+
 /// The account key is a 32-byte array that represents a public key.
 pub type AccountKey = *const u8;
 
@@ -160,7 +162,7 @@ pub type TransactionIterAccountsFn =
 /// modify or create them.
 /// The actual transaction type is opaque to the plugin and this interface.
 #[repr(C)]
-pub struct TransactionInterface {
+pub struct TransactionInterface<'a> {
     /// A pointer to the transaction.
     pub transaction_ptr: TransactionPtr,
     /// Returns the number of signatures in this transaction.
@@ -208,4 +210,7 @@ pub struct TransactionInterface {
     /// are no more account keys.
     /// See [`TransactionIterAccountsFn`].
     pub iter_accounts_fn: TransactionIterAccountsFn,
+
+    /// A marker to ensure respect of the transaction lifetime.
+    pub(crate) _lifetime: core::marker::PhantomData<&'a ()>,
 }
