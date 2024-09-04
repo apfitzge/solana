@@ -3259,10 +3259,10 @@ impl Bank {
     }
 
     /// Prepare a locked transaction batch from a list of sanitized transactions.
-    pub fn prepare_sanitized_batch<'a, 'b>(
+    pub fn prepare_sanitized_batch<'a, 'b, Tx: SVMMessage>(
         &'a self,
-        txs: &'b [SanitizedTransaction],
-    ) -> TransactionBatch<'a, 'b, SanitizedTransaction> {
+        txs: &'b [Tx],
+    ) -> TransactionBatch<'a, 'b, Tx> {
         let tx_account_lock_limit = self.get_transaction_account_lock_limit();
         let lock_results = self
             .rc
@@ -3273,11 +3273,11 @@ impl Bank {
 
     /// Prepare a locked transaction batch from a list of sanitized transactions, and their cost
     /// limited packing status
-    pub fn prepare_sanitized_batch_with_results<'a, 'b>(
+    pub fn prepare_sanitized_batch_with_results<'a, 'b, Tx: SVMMessage>(
         &'a self,
-        transactions: &'b [SanitizedTransaction],
+        transactions: &'b [Tx],
         transaction_results: impl Iterator<Item = Result<()>>,
-    ) -> TransactionBatch<'a, 'b, SanitizedTransaction> {
+    ) -> TransactionBatch<'a, 'b, Tx> {
         // this lock_results could be: Ok, AccountInUse, WouldExceedBlockMaxLimit or WouldExceedAccountMaxLimit
         let tx_account_lock_limit = self.get_transaction_account_lock_limit();
         let lock_results = self.rc.accounts.lock_accounts_with_results(
@@ -3289,13 +3289,12 @@ impl Bank {
     }
 
     /// Prepare a transaction batch from a single transaction without locking accounts
-    pub fn prepare_unlocked_batch_from_single_tx<'a>(
+    pub fn prepare_unlocked_batch_from_single_tx<'a, Tx: SVMMessage>(
         &'a self,
-        transaction: &'a SanitizedTransaction,
-    ) -> TransactionBatch<'_, '_, SanitizedTransaction> {
+        transaction: &'a Tx,
+    ) -> TransactionBatch<'_, '_, Tx> {
         let tx_account_lock_limit = self.get_transaction_account_lock_limit();
-        let lock_result =
-            validate_account_locks(transaction.message().account_keys(), tx_account_lock_limit);
+        let lock_result = validate_account_locks(transaction.account_keys(), tx_account_lock_limit);
         let mut batch = TransactionBatch::new(
             vec![lock_result],
             self,
@@ -3308,7 +3307,7 @@ impl Bank {
     /// Run transactions against a frozen bank without committing the results
     pub fn simulate_transaction(
         &self,
-        transaction: &SanitizedTransaction,
+        transaction: &impl SVMTransactionAdapter,
         enable_cpi_recording: bool,
     ) -> TransactionSimulationResult {
         assert!(self.is_frozen(), "simulation bank must be frozen");
@@ -3320,10 +3319,10 @@ impl Bank {
     /// is frozen, enabling use in single-Bank test frameworks
     pub fn simulate_transaction_unchecked(
         &self,
-        transaction: &SanitizedTransaction,
+        transaction: &impl SVMTransactionAdapter,
         enable_cpi_recording: bool,
     ) -> TransactionSimulationResult {
-        let account_keys = transaction.message().account_keys();
+        let account_keys = transaction.account_keys();
         let number_of_accounts = account_keys.len();
         let account_overrides = self.get_account_overrides_for_simulation(&account_keys);
         let batch = self.prepare_unlocked_batch_from_single_tx(transaction);
@@ -4724,7 +4723,7 @@ impl Bank {
     #[must_use]
     fn process_transaction_batch(
         &self,
-        batch: &TransactionBatch<SanitizedTransaction>,
+        batch: &TransactionBatch<impl SVMTransactionAdapter>,
     ) -> Vec<Result<()>> {
         self.load_execute_and_commit_transactions(
             batch,
