@@ -3467,7 +3467,7 @@ impl Bank {
 
     pub fn load_and_execute_transactions(
         &self,
-        batch: &TransactionBatch<SanitizedTransaction>,
+        batch: &TransactionBatch<impl SVMTransactionAdapter>,
         max_age: usize,
         timings: &mut ExecuteTimings,
         error_counters: &mut TransactionErrorMetrics,
@@ -3525,7 +3525,7 @@ impl Bank {
             .zip(sanitized_txs)
         {
             if let Some(debug_keys) = &self.transaction_debug_keys {
-                for key in tx.message().account_keys().iter() {
+                for key in tx.account_keys().iter() {
                     if debug_keys.contains(key) {
                         let result = processing_result.flattened_result();
                         info!("slot: {} result: {:?} tx: {:?}", self.slot, result, tx);
@@ -3538,8 +3538,8 @@ impl Bank {
                 // Signature count must be accumulated only if the transaction
                 // is processed, otherwise a mismatched count between banking
                 // and replay could occur
-                processed_counts.signature_count +=
-                    u64::from(tx.message().header().num_required_signatures);
+                processed_counts.signature_count += u64::try_from(tx.signatures().len())
+                    .expect("signature count cannot overflow u64");
                 processed_counts.processed_transactions_count += 1;
 
                 if !tx.is_simple_vote_transaction() {
