@@ -56,6 +56,7 @@ use {
         },
         stakes::{InvalidCacheEntryReason, Stakes, StakesCache, StakesEnum},
         status_cache::{SlotDelta, StatusCache},
+        svm_transaction_adapter::SVMTransactionAdapter,
         transaction_batch::{OwnedOrBorrowed, TransactionBatch},
     },
     byteorder::{ByteOrder, LittleEndian},
@@ -3567,7 +3568,7 @@ impl Bank {
 
     fn collect_logs(
         &self,
-        transactions: &[SanitizedTransaction],
+        transactions: &[impl SVMTransactionAdapter],
         processing_results: &[TransactionProcessingResult],
     ) {
         let transaction_log_collector_config =
@@ -3610,7 +3611,7 @@ impl Bank {
 
     fn collect_transaction_logs(
         transaction_log_collector_config: &TransactionLogCollectorConfig,
-        transaction: &SanitizedTransaction,
+        transaction: &impl SVMTransactionAdapter,
         execution_details: &TransactionExecutionDetails,
     ) -> Option<(TransactionLogInfo, Vec<Pubkey>)> {
         // Skip log collection if no log messages were recorded
@@ -3621,7 +3622,7 @@ impl Bank {
             .mentioned_addresses
             .is_empty()
         {
-            for key in transaction.message().account_keys().iter() {
+            for key in transaction.account_keys().iter() {
                 if transaction_log_collector_config
                     .mentioned_addresses
                     .contains(key)
