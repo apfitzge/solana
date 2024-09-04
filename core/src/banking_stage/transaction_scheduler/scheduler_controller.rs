@@ -228,8 +228,12 @@ impl SchedulerController {
     ) {
         let lock_results = vec![Ok(()); transactions.len()];
         let mut error_counters = TransactionErrorMetrics::default();
-        let check_results =
-            bank.check_transactions(transactions, &lock_results, max_age, &mut error_counters);
+        let check_results = bank.check_transactions::<SanitizedTransaction>(
+            transactions,
+            &lock_results,
+            max_age,
+            &mut error_counters,
+        );
 
         let fee_check_results: Vec<_> = check_results
             .into_iter()
@@ -390,7 +394,7 @@ impl SchedulerController {
                 })
                 .collect();
 
-            let check_results = bank.check_transactions(
+            let check_results = bank.check_transactions::<SanitizedTransaction>(
                 &sanitized_txs,
                 &lock_results,
                 MAX_PROCESSING_AGE,

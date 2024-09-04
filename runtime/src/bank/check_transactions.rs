@@ -1,5 +1,6 @@
 use {
     super::{Bank, BankStatusCache},
+    crate::svm_transaction_adapter::SVMTransactionAdapter,
     solana_accounts_db::blockhash_queue::BlockhashQueue,
     solana_perf::perf_libs,
     solana_program::program_utils::limited_deserialize,
@@ -13,7 +14,7 @@ use {
         pubkey::Pubkey,
         system_instruction::SystemInstruction,
         system_program,
-        transaction::{Result as TransactionResult, SanitizedTransaction, TransactionError},
+        transaction::{Result as TransactionResult, TransactionError},
     },
     solana_svm::{
         account_loader::{CheckedTransactionDetails, TransactionCheckResult},
@@ -28,7 +29,7 @@ impl Bank {
     /// Checks a batch of sanitized transactions again bank for age and status
     pub fn check_transactions_with_forwarding_delay(
         &self,
-        transactions: &[SanitizedTransaction],
+        transactions: &[impl SVMTransactionAdapter],
         filter: &[TransactionResult<()>],
         forward_transactions_to_leader_at_slot_offset: u64,
     ) -> Vec<TransactionCheckResult> {
@@ -55,9 +56,9 @@ impl Bank {
         )
     }
 
-    pub fn check_transactions(
+    pub fn check_transactions<Tx: SVMTransactionAdapter>(
         &self,
-        sanitized_txs: &[impl core::borrow::Borrow<SanitizedTransaction>],
+        sanitized_txs: &[impl core::borrow::Borrow<Tx>],
         lock_results: &[TransactionResult<()>],
         max_age: usize,
         error_counters: &mut TransactionErrorMetrics,
@@ -66,9 +67,9 @@ impl Bank {
         self.check_status_cache(sanitized_txs, lock_results, error_counters)
     }
 
-    fn check_age(
+    fn check_age<Tx: SVMMessage>(
         &self,
-        sanitized_txs: &[impl core::borrow::Borrow<SanitizedTransaction>],
+        sanitized_txs: &[impl core::borrow::Borrow<Tx>],
         lock_results: &[TransactionResult<()>],
         max_age: usize,
         error_counters: &mut TransactionErrorMetrics,
@@ -95,20 +96,20 @@ impl Bank {
 
     fn check_transaction_age(
         &self,
-        tx: &SanitizedTransaction,
+        tx: &impl SVMMessage,
         max_age: usize,
         next_durable_nonce: &DurableNonce,
         hash_queue: &BlockhashQueue,
         error_counters: &mut TransactionErrorMetrics,
     ) -> TransactionCheckResult {
-        let recent_blockhash = tx.message().recent_blockhash();
+        let recent_blockhash = tx.recent_blockhash();
         if let Some(hash_info) = hash_queue.get_hash_info_if_valid(recent_blockhash, max_age) {
             Ok(CheckedTransactionDetails {
                 nonce: None,
                 lamports_per_signature: hash_info.lamports_per_signature(),
             })
         } else if let Some((nonce, nonce_data)) =
-            self.check_and_load_message_nonce_account(tx.message(), next_durable_nonce)
+            self.check_and_load_message_nonce_account(tx, next_durable_nonce)
         {
             Ok(CheckedTransactionDetails {
                 nonce: Some(nonce),
@@ -151,9 +152,9 @@ impl Bank {
         Some((NonceInfo::new(*nonce_address, nonce_account), nonce_data))
     }
 
-    fn check_status_cache(
+    fn check_status_cache<Tx: SVMTransactionAdapter>(
         &self,
-        sanitized_txs: &[impl core::borrow::Borrow<SanitizedTransaction>],
+        sanitized_txs: &[impl core::borrow::Borrow<Tx>],
         lock_results: Vec<TransactionCheckResult>,
         error_counters: &mut TransactionErrorMetrics,
     ) -> Vec<TransactionCheckResult> {
@@ -177,11 +178,11 @@ impl Bank {
 
     fn is_transaction_already_processed(
         &self,
-        sanitized_tx: &SanitizedTransaction,
+        sanitized_tx: &impl SVMTransactionAdapter,
         status_cache: &BankStatusCache,
     ) -> bool {
         let key = sanitized_tx.message_hash();
-        let transaction_blockhash = sanitized_tx.message().recent_blockhash();
+        let transaction_blockhash = sanitized_tx.recent_blockhash();
         status_cache
             .get_status(key, transaction_blockhash, &self.ancestors)
             .is_some()
