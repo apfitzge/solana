@@ -1,4 +1,5 @@
 use {
+    core::borrow::Borrow,
     solana_sdk::{
         hash::Hash,
         transaction::{SanitizedTransaction, VersionedTransaction},
@@ -17,8 +18,8 @@ use {
 /// necessary conversions when the interfaces forcing old transaction types
 /// are invoked.
 pub trait SVMTransactionAdapter: SVMTransaction {
-    /// Convert to a `SanitizedTransaction`.
-    fn to_sanitized_transaction(&self) -> SanitizedTransaction;
+    /// Convert to something that can be borrowed as a `SanitizedTransaction`.
+    fn to_sanitized_transaction(&self) -> impl Borrow<SanitizedTransaction>;
     /// Convert to a `VersionedTransaction`.
     fn to_versioned_transaction(&self) -> VersionedTransaction;
 
@@ -31,8 +32,8 @@ pub trait SVMTransactionAdapter: SVMTransaction {
 }
 
 impl SVMTransactionAdapter for SanitizedTransaction {
-    fn to_sanitized_transaction(&self) -> SanitizedTransaction {
-        self.clone()
+    fn to_sanitized_transaction(&self) -> impl Borrow<SanitizedTransaction> {
+        self
     }
 
     fn to_versioned_transaction(&self) -> VersionedTransaction {
