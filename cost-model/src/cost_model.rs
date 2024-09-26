@@ -18,7 +18,6 @@ use {
         borsh1::try_from_slice_unchecked,
         compute_budget::{self, ComputeBudgetInstruction},
         fee::FeeStructure,
-        instruction::CompiledInstruction,
         message::TransactionSignatureDetails,
         program_utils::limited_deserialize,
         pubkey::Pubkey,
@@ -30,7 +29,7 @@ use {
         system_program,
         transaction::SanitizedTransaction,
     },
-    solana_svm_transaction::svm_message::SVMMessage,
+    solana_svm_transaction::{instruction::SVMInstruction, svm_message::SVMMessage},
 };
 
 pub struct CostModel;
@@ -267,10 +266,10 @@ impl CostModel {
 
     fn calculate_account_data_size_on_instruction(
         program_id: &Pubkey,
-        instruction: &CompiledInstruction,
+        instruction: &SVMInstruction,
     ) -> SystemProgramAccountAllocation {
         if program_id == &system_program::id() {
-            if let Ok(instruction) = limited_deserialize(&instruction.data) {
+            if let Ok(instruction) = limited_deserialize(instruction.data) {
                 Self::calculate_account_data_size_on_deserialized_system_instruction(instruction)
             } else {
                 SystemProgramAccountAllocation::Failed
@@ -282,10 +281,10 @@ impl CostModel {
 
     /// eventually, potentially determine account data size of all writable accounts
     /// at the moment, calculate account data size of account creation
-    fn calculate_allocated_accounts_data_size(transaction: &SanitizedTransaction) -> u64 {
+    fn calculate_allocated_accounts_data_size(transaction: &impl SVMMessage) -> u64 {
         let mut tx_attempted_allocation_size: u64 = 0;
-        for (program_id, instruction) in transaction.message().program_instructions_iter() {
-            match Self::calculate_account_data_size_on_instruction(program_id, instruction) {
+        for (program_id, instruction) in transaction.program_instructions_iter() {
+            match Self::calculate_account_data_size_on_instruction(program_id, &instruction) {
                 SystemProgramAccountAllocation::Failed => {
                     // If any system program instructions can be statically
                     // determined to fail, no allocations will actually be
