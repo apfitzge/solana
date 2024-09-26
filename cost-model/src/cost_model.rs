@@ -129,8 +129,7 @@ impl CostModel {
             );
     }
 
-    fn get_writable_accounts(transaction: &SanitizedTransaction) -> Vec<Pubkey> {
-        let message = transaction.message();
+    fn get_writable_accounts(message: &impl SVMMessage) -> Vec<Pubkey> {
         message
             .account_keys()
             .iter()
