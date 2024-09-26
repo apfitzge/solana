@@ -231,14 +231,9 @@ impl CostModel {
         tx_cost.data_bytes_cost = data_bytes_len_total / INSTRUCTION_DATA_BYTES_COST;
     }
 
-    fn get_instructions_data_cost(
-        tx_cost: &mut UsageCostDetails,
-        transaction: &SanitizedTransaction,
-    ) {
+    fn get_instructions_data_cost(tx_cost: &mut UsageCostDetails, transaction: &impl SVMMessage) {
         let ix_data_bytes_len_total: u64 = transaction
-            .message()
-            .instructions()
-            .iter()
+            .instructions_iter()
             .map(|instruction| instruction.data.len() as u64)
             .sum();
 
