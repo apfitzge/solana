@@ -19,6 +19,7 @@ use {
         compute_budget::{self, ComputeBudgetInstruction},
         fee::FeeStructure,
         instruction::CompiledInstruction,
+        message::TransactionSignatureDetails,
         program_utils::limited_deserialize,
         pubkey::Pubkey,
         saturating_add_assign,
@@ -53,7 +54,11 @@ impl CostModel {
         } else {
             let mut tx_cost = UsageCostDetails::new_with_default_capacity();
 
-            Self::get_signature_cost(&mut tx_cost, transaction, feature_set);
+            Self::get_signature_cost(
+                &mut tx_cost,
+                &transaction.message().get_signature_details(),
+                feature_set,
+            );
             Self::get_write_lock_cost(&mut tx_cost, transaction, feature_set);
             Self::get_transaction_cost(&mut tx_cost, transaction, feature_set);
             tx_cost.allocated_accounts_data_size =
@@ -79,7 +84,11 @@ impl CostModel {
         } else {
             let mut tx_cost = UsageCostDetails::new_with_default_capacity();
 
-            Self::get_signature_cost(&mut tx_cost, transaction, feature_set);
+            Self::get_signature_cost(
+                &mut tx_cost,
+                &transaction.message().get_signature_details(),
+                feature_set,
+            );
             Self::get_write_lock_cost(&mut tx_cost, transaction, feature_set);
             Self::get_instructions_data_cost(&mut tx_cost, transaction);
             tx_cost.allocated_accounts_data_size =
@@ -97,10 +106,9 @@ impl CostModel {
 
     fn get_signature_cost(
         tx_cost: &mut UsageCostDetails,
-        transaction: &SanitizedTransaction,
+        signatures_count_detail: &TransactionSignatureDetails,
         feature_set: &FeatureSet,
     ) {
-        let signatures_count_detail = transaction.message().get_signature_details();
         tx_cost.num_transaction_signatures = signatures_count_detail.num_transaction_signatures();
         tx_cost.num_secp256k1_instruction_signatures =
             signatures_count_detail.num_secp256k1_instruction_signatures();
