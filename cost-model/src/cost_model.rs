@@ -154,13 +154,13 @@ impl CostModel {
 
     fn get_write_lock_cost(
         tx_cost: &mut UsageCostDetails,
-        transaction: &SanitizedTransaction,
+        transaction: &impl SVMMessage,
         feature_set: &FeatureSet,
     ) {
         tx_cost.writable_accounts = Self::get_writable_accounts(transaction);
         let num_write_locks =
             if feature_set.is_active(&feature_set::cost_model_requested_write_lock_cost::id()) {
-                transaction.message().num_write_locks()
+                transaction.num_write_locks()
             } else {
                 tx_cost.writable_accounts.len() as u64
             };
