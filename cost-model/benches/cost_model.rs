@@ -53,7 +53,15 @@ fn bench_cost_model(bencher: &mut Bencher) {
 
     bencher.iter(|| {
         for transaction in &transactions {
-            let _ = CostModel::calculate_cost(test::black_box(transaction), &feature_set);
+            let transaction = test::black_box(transaction);
+            let is_simple_vote_transaction = transaction.is_simple_vote_transaction();
+            let signature_count_detail = transaction.message().get_signature_details();
+            let _ = CostModel::calculate_cost(
+                transaction,
+                is_simple_vote_transaction,
+                &signature_count_detail,
+                &feature_set,
+            );
         }
     });
 }
@@ -71,7 +79,15 @@ fn bench_cost_model_requested_write_locks(bencher: &mut Bencher) {
 
     bencher.iter(|| {
         for transaction in &transactions {
-            let _ = CostModel::calculate_cost(test::black_box(transaction), &feature_set);
+            let transaction = test::black_box(transaction);
+            let is_simple_vote_transaction = transaction.is_simple_vote_transaction();
+            let signature_count_detail = transaction.message().get_signature_details();
+            let _ = CostModel::calculate_cost(
+                transaction,
+                is_simple_vote_transaction,
+                &signature_count_detail,
+                &feature_set,
+            );
         }
     });
 }

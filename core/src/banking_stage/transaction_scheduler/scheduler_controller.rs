@@ -637,7 +637,16 @@ impl<T: LikeClusterInfo> SchedulerController<T> {
         fee_budget_limits: &FeeBudgetLimits,
         bank: &Bank,
     ) -> (u64, u64) {
-        let cost = CostModel::calculate_cost(transaction, &bank.feature_set).sum();
+        let is_simple_vote_tx = transaction.is_simple_vote_transaction();
+        let signature_count_detail = transaction.message().get_signature_details();
+
+        let cost = CostModel::calculate_cost(
+            transaction,
+            is_simple_vote_tx,
+            &signature_count_detail,
+            &bank.feature_set,
+        )
+        .sum();
         let reward = bank.calculate_reward_for_transaction(transaction, fee_budget_limits);
 
         // We need a multiplier here to avoid rounding down too aggressively.

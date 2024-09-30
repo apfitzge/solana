@@ -75,7 +75,18 @@ impl QosService {
         let mut compute_cost_time = Measure::start("compute_cost_time");
         let txs_costs: Vec<_> = transactions
             .zip(pre_results)
-            .map(|(tx, pre_result)| pre_result.map(|()| CostModel::calculate_cost(tx, feature_set)))
+            .map(|(tx, pre_result)| {
+                pre_result.map(|()| {
+                    let is_simple_vote_tx = tx.is_simple_vote_transaction();
+                    let signature_count_details = tx.message().get_signature_details();
+                    CostModel::calculate_cost(
+                        tx,
+                        is_simple_vote_tx,
+                        &signature_count_details,
+                        feature_set,
+                    )
+                })
+            })
             .collect();
         compute_cost_time.stop();
         self.metrics
@@ -654,9 +665,17 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, cost)| {
+                let is_simple_vote_transaction = txs[index].is_simple_vote_transaction();
+                let signature_count_details = txs[index].message().get_signature_details();
                 assert_eq!(
                     cost.as_ref().unwrap().sum(),
-                    CostModel::calculate_cost(&txs[index], &FeatureSet::all_enabled()).sum()
+                    CostModel::calculate_cost(
+                        &txs[index],
+                        is_simple_vote_transaction,
+                        &signature_count_details,
+                        &FeatureSet::all_enabled()
+                    )
+                    .sum()
                 );
             })
             .collect_vec();
@@ -682,9 +701,30 @@ mod tests {
                 None,
             ),
         );
-        let transfer_tx_cost =
-            CostModel::calculate_cost(&transfer_tx, &FeatureSet::all_enabled()).sum();
-        let vote_tx_cost = CostModel::calculate_cost(&vote_tx, &FeatureSet::all_enabled()).sum();
+
+        let transfer_tx_cost = {
+            let is_simple_vote_transaction = transfer_tx.is_simple_vote_transaction();
+            let signature_count_detail = transfer_tx.message().get_signature_details();
+            CostModel::calculate_cost(
+                &transfer_tx,
+                is_simple_vote_transaction,
+                &signature_count_detail,
+                &FeatureSet::all_enabled(),
+            )
+            .sum()
+        };
+        let vote_tx_cost = {
+            let is_simple_vote_transaction = vote_tx.is_simple_vote_transaction();
+            let signature_count_detail = vote_tx.message().get_signature_details();
+
+            CostModel::calculate_cost(
+                &vote_tx,
+                is_simple_vote_transaction,
+                &signature_count_detail,
+                &FeatureSet::all_enabled(),
+            )
+            .sum()
+        };
 
         // make a vec of txs
         let txs = vec![transfer_tx.clone(), vote_tx.clone(), transfer_tx, vote_tx];

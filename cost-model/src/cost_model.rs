@@ -27,7 +27,6 @@ use {
             MAX_PERMITTED_DATA_LENGTH,
         },
         system_program,
-        transaction::SanitizedTransaction,
     },
     solana_svm_transaction::{instruction::SVMInstruction, svm_message::SVMMessage},
 };
@@ -43,21 +42,19 @@ enum SystemProgramAccountAllocation {
 
 impl CostModel {
     pub fn calculate_cost(
-        transaction: &SanitizedTransaction,
+        transaction: &impl SVMMessage,
+        is_simple_vote_transaction: bool,
+        signatures_count_detail: &TransactionSignatureDetails,
         feature_set: &FeatureSet,
     ) -> TransactionCost {
-        if transaction.is_simple_vote_transaction() {
+        if is_simple_vote_transaction {
             TransactionCost::SimpleVote {
                 writable_accounts: Self::get_writable_accounts(transaction),
             }
         } else {
             let mut tx_cost = UsageCostDetails::new_with_default_capacity();
 
-            Self::get_signature_cost(
-                &mut tx_cost,
-                &transaction.message().get_signature_details(),
-                feature_set,
-            );
+            Self::get_signature_cost(&mut tx_cost, signatures_count_detail, feature_set);
             Self::get_write_lock_cost(&mut tx_cost, transaction, feature_set);
             Self::get_transaction_cost(&mut tx_cost, transaction, feature_set);
             tx_cost.allocated_accounts_data_size =
@@ -71,23 +68,21 @@ impl CostModel {
     // Calculate executed transaction CU cost, with actual execution and loaded accounts size
     // costs.
     pub fn calculate_cost_for_executed_transaction(
-        transaction: &SanitizedTransaction,
+        transaction: &impl SVMMessage,
+        is_simple_vote_transaction: bool,
+        signatures_count_detail: &TransactionSignatureDetails,
         actual_programs_execution_cost: u64,
         actual_loaded_accounts_data_size_bytes: u32,
         feature_set: &FeatureSet,
     ) -> TransactionCost {
-        if transaction.is_simple_vote_transaction() {
+        if is_simple_vote_transaction {
             TransactionCost::SimpleVote {
                 writable_accounts: Self::get_writable_accounts(transaction),
             }
         } else {
             let mut tx_cost = UsageCostDetails::new_with_default_capacity();
 
-            Self::get_signature_cost(
-                &mut tx_cost,
-                &transaction.message().get_signature_details(),
-                feature_set,
-            );
+            Self::get_signature_cost(&mut tx_cost, signatures_count_detail, feature_set);
             Self::get_write_lock_cost(&mut tx_cost, transaction, feature_set);
             Self::get_instructions_data_cost(&mut tx_cost, transaction);
             tx_cost.allocated_accounts_data_size =
@@ -329,7 +324,7 @@ mod tests {
             signature::{Keypair, Signer},
             system_instruction::{self},
             system_program, system_transaction,
-            transaction::Transaction,
+            transaction::{SanitizedTransaction, Transaction},
         },
     };
 
@@ -577,18 +572,29 @@ mod tests {
         let simple_transaction = SanitizedTransaction::from_transaction_for_tests(
             system_transaction::transfer(&mint_keypair, &system_program::id(), 2, start_hash),
         );
+        let is_simple_vote_transaction = simple_transaction.is_simple_vote_transaction();
+        let signatures_count_detail = simple_transaction.message().get_signature_details();
 
         // Feature not enabled - write lock is demoted and does not count towards cost
         {
-            let tx_cost = CostModel::calculate_cost(&simple_transaction, &FeatureSet::default());
+            let tx_cost = CostModel::calculate_cost(
+                &simple_transaction,
+                is_simple_vote_transaction,
+                &signatures_count_detail,
+                &FeatureSet::default(),
+            );
             assert_eq!(WRITE_LOCK_UNITS, tx_cost.write_lock_cost());
             assert_eq!(1, tx_cost.writable_accounts().len());
         }
 
         // Feature enabled - write lock is demoted but still counts towards cost
         {
-            let tx_cost =
-                CostModel::calculate_cost(&simple_transaction, &FeatureSet::all_enabled());
+            let tx_cost = CostModel::calculate_cost(
+                &simple_transaction,
+                is_simple_vote_transaction,
+                &signatures_count_detail,
+                &FeatureSet::all_enabled(),
+            );
             assert_eq!(2 * WRITE_LOCK_UNITS, tx_cost.write_lock_cost());
             assert_eq!(1, tx_cost.writable_accounts().len());
         }
@@ -755,8 +761,15 @@ mod tests {
                 instructions,
             ),
         );
+        let is_simple_vote_transaction = tx.is_simple_vote_transaction();
+        let signatures_count_detail = tx.message().get_signature_details();
 
-        let tx_cost = CostModel::calculate_cost(&tx, &FeatureSet::all_enabled());
+        let tx_cost = CostModel::calculate_cost(
+            &tx,
+            is_simple_vote_transaction,
+            &signatures_count_detail,
+            &FeatureSet::all_enabled(),
+        );
         assert_eq!(2 + 2, tx_cost.writable_accounts().len());
         assert_eq!(signer1.pubkey(), tx_cost.writable_accounts()[0]);
         assert_eq!(signer2.pubkey(), tx_cost.writable_accounts()[1]);
@@ -773,6 +786,8 @@ mod tests {
             2,
             start_hash,
         ));
+        let is_simple_vote_transaction = tx.is_simple_vote_transaction();
+        let signatures_count_detail = tx.message().get_signature_details();
 
         let expected_account_cost = WRITE_LOCK_UNITS * 2;
         let expected_execution_cost = BUILTIN_INSTRUCTION_COSTS
@@ -785,7 +800,12 @@ mod tests {
                 / ACCOUNT_DATA_COST_PAGE_SIZE
                 * DEFAULT_PAGE_COST;
 
-        let tx_cost = CostModel::calculate_cost(&tx, &FeatureSet::all_enabled());
+        let tx_cost = CostModel::calculate_cost(
+            &tx,
+            is_simple_vote_transaction,
+            &signatures_count_detail,
+            &FeatureSet::all_enabled(),
+        );
         assert_eq!(expected_account_cost, tx_cost.write_lock_cost());
         assert_eq!(*expected_execution_cost, tx_cost.programs_execution_cost());
         assert_eq!(2, tx_cost.writable_accounts().len());
@@ -810,6 +830,8 @@ mod tests {
                 &[&mint_keypair],
                 start_hash,
             ));
+        let is_simple_vote_transaction = tx.is_simple_vote_transaction();
+        let signatures_count_detail = tx.message().get_signature_details();
 
         let feature_set = FeatureSet::all_enabled();
         let expected_account_cost = WRITE_LOCK_UNITS * 2;
@@ -821,7 +843,12 @@ mod tests {
                 .unwrap();
         let expected_loaded_accounts_data_size_cost = (data_limit as u64) / (32 * 1024) * 8;
 
-        let tx_cost = CostModel::calculate_cost(&tx, &feature_set);
+        let tx_cost = CostModel::calculate_cost(
+            &tx,
+            is_simple_vote_transaction,
+            &signatures_count_detail,
+            &feature_set,
+        );
         assert_eq!(expected_account_cost, tx_cost.write_lock_cost());
         assert_eq!(expected_execution_cost, tx_cost.programs_execution_cost());
         assert_eq!(2, tx_cost.writable_accounts().len());
@@ -874,6 +901,7 @@ mod tests {
                 &[&mint_keypair],
                 start_hash,
             ));
+
         // transaction has one builtin instruction, and one ComputeBudget::compute_unit_limit
         let expected_cost = *BUILTIN_INSTRUCTION_COSTS
             .get(&solana_system_program::id())

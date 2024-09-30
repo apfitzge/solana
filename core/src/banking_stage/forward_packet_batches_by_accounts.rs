@@ -109,7 +109,14 @@ impl ForwardPacketBatchesByAccounts {
         immutable_packet: Arc<ImmutableDeserializedPacket>,
         feature_set: &FeatureSet,
     ) -> bool {
-        let tx_cost = CostModel::calculate_cost(sanitized_transaction, feature_set);
+        let is_simple_vote_tx = sanitized_transaction.is_simple_vote_transaction();
+        let signature_count_detail = sanitized_transaction.message().get_signature_details();
+        let tx_cost = CostModel::calculate_cost(
+            sanitized_transaction,
+            is_simple_vote_tx,
+            &signature_count_detail,
+            feature_set,
+        );
 
         if let Ok(updated_costs) = self.cost_tracker.try_add(&tx_cost) {
             let batch_index = self.get_batch_index_by_updated_costs(&tx_cost, &updated_costs);
@@ -195,7 +202,14 @@ mod tests {
         ));
         let sanitized_transaction =
             SanitizedTransaction::from_transaction_for_tests(transaction.clone());
-        let tx_cost = CostModel::calculate_cost(&sanitized_transaction, &FeatureSet::all_enabled());
+        let is_simple_vote_transaction = sanitized_transaction.is_simple_vote_transaction();
+        let signature_count_detail = sanitized_transaction.message().get_signature_details();
+        let tx_cost = CostModel::calculate_cost(
+            &sanitized_transaction,
+            is_simple_vote_transaction,
+            &signature_count_detail,
+            &FeatureSet::all_enabled(),
+        );
         let cost = tx_cost.sum();
         let deserialized_packet =
             DeserializedPacket::new(Packet::from_data(None, transaction).unwrap()).unwrap();

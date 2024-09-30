@@ -234,8 +234,12 @@ fn check_block_cost_limits(
         .zip(sanitized_transactions)
         .filter_map(|(commit_result, tx)| {
             if let Ok(committed_tx) = commit_result {
+                let is_simple_vote_transaction = tx.is_simple_vote_transaction();
+                let signature_count_detail = tx.message().get_signature_details();
                 Some(CostModel::calculate_cost_for_executed_transaction(
                     tx,
+                    is_simple_vote_transaction,
+                    &signature_count_detail,
                     committed_tx.executed_units,
                     committed_tx.loaded_account_stats.loaded_accounts_data_size,
                     &bank.feature_set,
@@ -485,7 +489,14 @@ fn rebatch_and_execute_batches(
     let tx_costs = sanitized_txs
         .iter()
         .map(|tx| {
-            let tx_cost = CostModel::calculate_cost(tx, &bank.feature_set);
+            let is_simple_vote_tx = tx.is_simple_vote_transaction();
+            let signature_count_details = tx.message().get_signature_details();
+            let tx_cost = CostModel::calculate_cost(
+                tx,
+                is_simple_vote_tx,
+                &signature_count_details,
+                &bank.feature_set,
+            );
             let cost = tx_cost.sum();
             minimal_tx_cost = std::cmp::min(minimal_tx_cost, cost);
             total_cost = total_cost.saturating_add(cost);
@@ -5085,7 +5096,14 @@ pub mod tests {
             1,
             genesis_config.hash(),
         ));
-        let mut tx_cost = CostModel::calculate_cost(&tx, &bank.feature_set);
+        let is_simple_vote_tx = tx.is_simple_vote_transaction();
+        let signature_count_detail = tx.message().get_signature_details();
+        let mut tx_cost = CostModel::calculate_cost(
+            &tx,
+            is_simple_vote_tx,
+            &signature_count_detail,
+            &bank.feature_set,
+        );
         let actual_execution_cu = 1;
         let actual_loaded_accounts_data_size = 64 * 1024;
         let TransactionCost::Transaction(ref mut usage_cost_details) = tx_cost else {

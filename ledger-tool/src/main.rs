@@ -487,7 +487,14 @@ fn compute_slot_cost(
             .for_each(|transaction| {
                 num_programs += transaction.message().instructions().len();
 
-                let tx_cost = CostModel::calculate_cost(&transaction, &feature_set);
+                let is_simple_vote_transaction = transaction.is_simple_vote_transaction();
+                let signature_count_detail = transaction.message().get_signature_details();
+                let tx_cost = CostModel::calculate_cost(
+                    &transaction,
+                    is_simple_vote_transaction,
+                    &signature_count_detail,
+                    &feature_set,
+                );
                 let result = cost_tracker.try_add(&tx_cost);
                 if result.is_err() {
                     println!(

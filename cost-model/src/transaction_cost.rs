@@ -236,7 +236,7 @@ mod tests {
         .unwrap();
 
         // create a identical sanitized transaction, but identified as non-vote
-        let none_vote_transaction = SanitizedTransaction::try_create(
+        let non_vote_transaction = SanitizedTransaction::try_create(
             VersionedTransaction::from(transaction),
             MessageHash::Compute,
             Some(false),
@@ -250,11 +250,20 @@ mod tests {
         // expected non-vote tx cost would include default loaded accounts size cost (16384) additionally
         let expected_none_vote_cost = 20543;
 
-        let vote_cost = CostModel::calculate_cost(&vote_transaction, &FeatureSet::all_enabled());
-        let none_vote_cost =
-            CostModel::calculate_cost(&none_vote_transaction, &FeatureSet::all_enabled());
+        let vote_cost = CostModel::calculate_cost(
+            &vote_transaction,
+            vote_transaction.is_simple_vote_transaction(),
+            &vote_transaction.message().get_signature_details(),
+            &FeatureSet::all_enabled(),
+        );
+        let non_vote_cost = CostModel::calculate_cost(
+            &non_vote_transaction,
+            non_vote_transaction.is_simple_vote_transaction(),
+            &non_vote_transaction.message().get_signature_details(),
+            &FeatureSet::all_enabled(),
+        );
 
         assert_eq!(expected_vote_cost, vote_cost.sum());
-        assert_eq!(expected_none_vote_cost, none_vote_cost.sum());
+        assert_eq!(expected_none_vote_cost, non_vote_cost.sum());
     }
 }

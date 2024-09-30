@@ -1577,7 +1577,14 @@ mod tests {
                         }
                     };
 
-                let mut cost = CostModel::calculate_cost(&transactions[0], &bank.feature_set);
+                let is_simple_vote_transaction = transactions[0].is_simple_vote_transaction();
+                let signature_count_detail = transactions[0].message().get_signature_details();
+                let mut cost = CostModel::calculate_cost(
+                    &transactions[0],
+                    is_simple_vote_transaction,
+                    &signature_count_detail,
+                    &bank.feature_set,
+                );
                 if let TransactionCost::Transaction(ref mut usage_cost) = cost {
                     usage_cost.programs_execution_cost = actual_programs_execution_cost;
                     usage_cost.loaded_accounts_data_size_cost =
