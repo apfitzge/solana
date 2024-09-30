@@ -3,6 +3,7 @@
 
 use {
     solana_core::validator::BlockProductionMethod,
+    solana_perf::packet::to_arc_packet_batches,
     solana_vote_program::{vote_state::TowerSync, vote_transaction::new_tower_sync_transaction},
 };
 
@@ -34,10 +35,7 @@ use {
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
         get_tmp_ledger_path_auto_delete,
     },
-    solana_perf::{
-        packet::{to_packet_batches, Packet},
-        test_tx::test_tx,
-    },
+    solana_perf::{packet::Packet, test_tx::test_tx},
     solana_poh::poh_recorder::{create_test_recorder, WorkingBankEntry},
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
@@ -266,11 +264,11 @@ fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
         assert!(r.is_ok(), "sanity parallel execution");
     }
     bank.clear_signatures();
-    let verified: Vec<_> = to_packet_batches(&transactions, PACKETS_PER_BATCH);
+    let verified: Vec<_> = to_arc_packet_batches(&transactions, PACKETS_PER_BATCH);
     let vote_packets = vote_txs.map(|vote_txs| {
-        let mut packet_batches = to_packet_batches(&vote_txs, PACKETS_PER_BATCH);
+        let mut packet_batches = to_arc_packet_batches(&vote_txs, PACKETS_PER_BATCH);
         for batch in packet_batches.iter_mut() {
-            for packet in batch.iter_mut() {
+            for packet in Arc::make_mut(batch).iter_mut() {
                 packet.meta_mut().set_simple_vote(true);
             }
         }

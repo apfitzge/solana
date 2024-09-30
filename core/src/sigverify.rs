@@ -14,6 +14,7 @@ use {
     },
     solana_perf::{cuda_runtime::PinnedVec, packet::PacketBatch, recycler::Recycler, sigverify},
     solana_sdk::{packet::Packet, saturating_add_assign},
+    std::sync::Arc,
 };
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
@@ -128,7 +129,7 @@ impl SigVerifier for TransactionSigVerifier {
     ) -> Result<(), SigVerifyServiceError<Self::SendType>> {
         let tracer_packet_stats_to_send = std::mem::take(&mut self.tracer_packet_stats);
         self.packet_sender.send(BankingPacketBatch::new((
-            packet_batches,
+            packet_batches.into_iter().map(Arc::new).collect(),
             Some(tracer_packet_stats_to_send),
         )))?;
         Ok(())

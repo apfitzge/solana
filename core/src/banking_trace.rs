@@ -20,7 +20,7 @@ use {
     thiserror::Error,
 };
 
-pub type BankingPacketBatch = Arc<(Vec<PacketBatch>, Option<SigverifyTracerPacketStats>)>;
+pub type BankingPacketBatch = Arc<(Vec<Arc<PacketBatch>>, Option<SigverifyTracerPacketStats>)>;
 pub type BankingPacketSender = TracedSender;
 pub type BankingPacketReceiver = Receiver<BankingPacketBatch>;
 pub type TracerThreadResult = Result<(), TraceError>;
@@ -373,12 +373,12 @@ impl TracedSender {
 pub mod for_test {
     use {
         super::*,
-        solana_perf::{packet::to_packet_batches, test_tx::test_tx},
+        solana_perf::{packet::to_arc_packet_batches, test_tx::test_tx},
         tempfile::TempDir,
     };
 
     pub fn sample_packet_batch() -> BankingPacketBatch {
-        BankingPacketBatch::new((to_packet_batches(&vec![test_tx(); 4], 10), None))
+        BankingPacketBatch::new((to_arc_packet_batches(&vec![test_tx(); 4], 10), None))
     }
 
     pub fn drop_and_clean_temp_dir_unless_suppressed(temp_dir: TempDir) {
