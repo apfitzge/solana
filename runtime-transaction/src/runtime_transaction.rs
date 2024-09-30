@@ -116,6 +116,34 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
 }
 
 impl RuntimeTransaction<SanitizedTransaction> {
+    pub fn try_from_sanitized_transaction(transaction: SanitizedTransaction) -> Result<Self> {
+        let message_hash = *transaction.message_hash();
+        let is_simple_vote_tx = transaction.is_simple_vote_transaction();
+        let precompile_signature_details =
+            get_precompile_signature_details(transaction.program_instructions_iter());
+        let signature_details = TransactionSignatureDetails::new(
+            transaction.signatures().len() as u64,
+            precompile_signature_details.num_secp256k1_instruction_signatures,
+            precompile_signature_details.num_ed25519_instruction_signatures,
+        );
+        let compute_budget_instruction_details =
+            ComputeBudgetInstructionDetails::try_from(transaction.program_instructions_iter())?;
+
+        let mut tx = Self {
+            transaction,
+            meta: TransactionMeta {
+                message_hash,
+                is_simple_vote_tx,
+                signature_details,
+                compute_budget_instruction_details,
+            },
+        };
+
+        tx.load_dynamic_metadata()?;
+
+        Ok(tx)
+    }
+
     pub fn try_from(
         statically_loaded_runtime_tx: RuntimeTransaction<SanitizedVersionedTransaction>,
         address_loader: impl AddressLoader,
