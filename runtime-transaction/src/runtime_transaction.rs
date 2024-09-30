@@ -33,7 +33,7 @@ use {
     std::collections::HashSet,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RuntimeTransaction<T> {
     transaction: T,
     // transaction meta is a collection of fields, it is updated
