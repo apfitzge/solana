@@ -2,14 +2,6 @@
 #![feature(test)]
 
 use {
-    solana_core::validator::BlockProductionMethod,
-    solana_perf::packet::to_arc_packet_batches,
-    solana_vote_program::{vote_state::TowerSync, vote_transaction::new_tower_sync_transaction},
-};
-
-extern crate test;
-
-use {
     crossbeam_channel::{unbounded, Receiver},
     log::*,
     rand::{thread_rng, Rng},
@@ -26,6 +18,7 @@ use {
             BankingStage, BankingStageStats,
         },
         banking_trace::{BankingPacketBatch, BankingTracer},
+        validator::BlockProductionMethod,
     },
     solana_entry::entry::{next_hash, Entry},
     solana_gossip::cluster_info::{ClusterInfo, Node},
@@ -35,7 +28,10 @@ use {
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
         get_tmp_ledger_path_auto_delete,
     },
-    solana_perf::{packet::Packet, test_tx::test_tx},
+    solana_perf::{
+        packet::{to_arc_packet_batches, Packet},
+        test_tx::test_tx,
+    },
     solana_poh::poh_recorder::{create_test_recorder, WorkingBankEntry},
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
@@ -51,6 +47,7 @@ use {
         transaction::{Transaction, VersionedTransaction},
     },
     solana_streamer::socket::SocketAddrSpace,
+    solana_vote_program::{vote_state::TowerSync, vote_transaction::new_tower_sync_transaction},
     std::{
         iter::repeat_with,
         sync::{atomic::Ordering, Arc},
@@ -58,6 +55,8 @@ use {
     },
     test::Bencher,
 };
+
+extern crate test;
 
 fn check_txs(receiver: &Arc<Receiver<WorkingBankEntry>>, ref_tx_count: usize) {
     let mut total = 0;
