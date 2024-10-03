@@ -12,7 +12,7 @@ use {
     solana_sdk::{hash::Hash, pubkey::Pubkey, signature::Signature},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct TransactionFrame {
     /// Signature framing data.
     signature: SignatureFrame,
