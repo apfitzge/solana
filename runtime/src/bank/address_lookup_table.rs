@@ -39,7 +39,7 @@ impl AddressLoader for &Bank {
 
 impl Bank {
     /// Load addresses from an iterator of `SVMMessageAddressTableLookup`,
-    /// additionally returning the deactivation slot
+    /// additionally returning the minimum deactivation slot across all referenced ALTs
     pub fn load_addresses_from_ref<'a>(
         &self,
         address_table_lookups: impl Iterator<Item = SVMMessageAddressTableLookup<'a>>,

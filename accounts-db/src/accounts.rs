@@ -82,7 +82,7 @@ impl Accounts {
     }
 
     /// Return loaded addresses and the deactivation slot.
-    /// If no tables are de-activating, the deactivation slot is `u64::MAX`.
+    /// If the table hasn't been deactivated, the deactivation slot is `u64::MAX`.
     pub fn load_lookup_table_addresses(
         &self,
         ancestors: &Ancestors,
