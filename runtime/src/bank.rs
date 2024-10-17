@@ -6991,7 +6991,7 @@ impl Bank {
         account_indexes: AccountSecondaryIndexes,
         shrink_ratio: AccountShrinkThreshold,
     ) -> Self {
-        Self::new_with_paths(
+        let mut bank = Self::new_with_paths(
             genesis_config,
             runtime_config,
             paths,
@@ -7006,7 +7006,20 @@ impl Bank {
             Arc::default(),
             None,
             None,
-        )
+        );
+
+        // Many tests rely on the fact that transaction fees
+        // are zero.
+        // This was previously handled by the `FeeRateGovernor`
+        // in the `genesis_config`, but that is no longer the case.
+        // However, for testing, we can set the fee structure to
+        // result in zero base fees for all transactions IF the
+        // lamports_per_signature is zero on the `FeeRateGovernor`.
+        if genesis_config.fee_rate_governor.lamports_per_signature == 0 {
+            bank.set_fee_structure(FeeStructure::zero_fees());
+        }
+
+        bank
     }
 
     pub fn new_for_benches(genesis_config: &GenesisConfig) -> Self {
@@ -7129,8 +7142,8 @@ impl Bank {
         &self.transaction_processor
     }
 
-    pub fn set_fee_structure(&mut self, fee_structure: &FeeStructure) {
-        self.fee_structure = fee_structure.clone();
+    pub fn set_fee_structure(&mut self, fee_structure: FeeStructure) {
+        self.fee_structure = fee_structure;
     }
 
     pub fn load_program(
