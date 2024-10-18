@@ -270,8 +270,6 @@ pub struct SchedulerTimingMetricsInner {
     pub clear_time_us: u64,
     /// Time spent cleaning expired or processed transactions from the container.
     pub clean_time_us: u64,
-    /// Time spent forwarding transactions.
-    pub forward_time_us: u64,
     /// Time spent receiving completed transactions.
     pub receive_completed_time_us: u64,
 }
@@ -313,7 +311,6 @@ impl SchedulerTimingMetricsInner {
             ("schedule_time_us", self.schedule_time_us, i64),
             ("clear_time_us", self.clear_time_us, i64),
             ("clean_time_us", self.clean_time_us, i64),
-            ("forward_time_us", self.forward_time_us, i64),
             (
                 "receive_completed_time_us",
                 self.receive_completed_time_us,
@@ -334,7 +331,6 @@ impl SchedulerTimingMetricsInner {
         self.schedule_time_us = 0;
         self.clear_time_us = 0;
         self.clean_time_us = 0;
-        self.forward_time_us = 0;
         self.receive_completed_time_us = 0;
     }
 }
