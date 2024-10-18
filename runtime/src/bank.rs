@@ -1120,7 +1120,11 @@ impl Bank {
         // However, for testing, we can set the fee structure to
         // result in zero base fees for all transactions IF the
         // lamports_per_signature is zero on the `FeeRateGovernor`.
-        if genesis_config.fee_rate_governor.lamports_per_signature == 0 {
+        if genesis_config
+            .fee_rate_governor
+            .target_lamports_per_signature
+            == 0
+        {
             bank.fee_structure = FeeStructure::zero_fees();
         }
 
