@@ -1113,6 +1113,17 @@ impl Bank {
         #[cfg(feature = "dev-context-only-utils")]
         bank.process_genesis_config(genesis_config, collector_id_for_tests, genesis_hash);
 
+        // Many tests (including local-cluster tests) rely on the fact
+        // that transaction fees are zero.
+        // This was previously handled by the `FeeRateGovernor`
+        // in the `genesis_config`, but that is no longer the case.
+        // However, for testing, we can set the fee structure to
+        // result in zero base fees for all transactions IF the
+        // lamports_per_signature is zero on the `FeeRateGovernor`.
+        if genesis_config.fee_rate_governor.lamports_per_signature == 0 {
+            bank.set_fee_structure(FeeStructure::zero_fees());
+        }
+
         bank.finish_init(
             genesis_config,
             additional_builtins,
@@ -6991,7 +7002,7 @@ impl Bank {
         account_indexes: AccountSecondaryIndexes,
         shrink_ratio: AccountShrinkThreshold,
     ) -> Self {
-        let mut bank = Self::new_with_paths(
+        Self::new_with_paths(
             genesis_config,
             runtime_config,
             paths,
@@ -7006,20 +7017,7 @@ impl Bank {
             Arc::default(),
             None,
             None,
-        );
-
-        // Many tests rely on the fact that transaction fees
-        // are zero.
-        // This was previously handled by the `FeeRateGovernor`
-        // in the `genesis_config`, but that is no longer the case.
-        // However, for testing, we can set the fee structure to
-        // result in zero base fees for all transactions IF the
-        // lamports_per_signature is zero on the `FeeRateGovernor`.
-        if genesis_config.fee_rate_governor.lamports_per_signature == 0 {
-            bank.set_fee_structure(FeeStructure::zero_fees());
-        }
-
-        bank
+        )
     }
 
     pub fn new_for_benches(genesis_config: &GenesisConfig) -> Self {
