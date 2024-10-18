@@ -651,7 +651,7 @@ impl BankingStage {
                     .increment_consume_buffered_packets_us(consume_buffered_packets_us);
             }
             BufferedPacketsDecision::Forward => {
-                // todo!("drop all packets");
+                unprocessed_transaction_storage.clear();
                 // Take metrics action after forwarding packets to include forwarded
                 // metrics into current slot
                 slot_metrics_tracker.apply_action(metrics_action);

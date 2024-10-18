@@ -377,6 +377,15 @@ impl UnprocessedTransactionStorage {
         }
     }
 
+    pub fn clear(&mut self) {
+        match self {
+            Self::LocalTransactionStorage(transaction_storage) => {
+                transaction_storage.unprocessed_packet_batches.clear()
+            }
+            Self::VoteStorage(_vote_storage) => {}
+        }
+    }
+
     pub(crate) fn cache_epoch_boundary_info(&mut self, bank: &Bank) {
         match self {
             Self::LocalTransactionStorage(_) => (),
