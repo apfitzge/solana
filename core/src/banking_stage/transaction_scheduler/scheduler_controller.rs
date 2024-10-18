@@ -398,7 +398,6 @@ impl SchedulerController {
         const CHUNK_SIZE: usize = 128;
         let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
 
-        let mut arc_packets = ArrayVec::<_, CHUNK_SIZE>::new();
         let mut transactions = ArrayVec::<_, CHUNK_SIZE>::new();
         let mut max_ages = ArrayVec::<_, CHUNK_SIZE>::new();
         let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
@@ -432,8 +431,7 @@ impl SchedulerController {
                         })
                         .ok()
                 })
-                .for_each(|(packet, tx, deactivation_slot, fee_budget_limits)| {
-                    arc_packets.push(packet);
+                .for_each(|(_packet, tx, deactivation_slot, fee_budget_limits)| {
                     transactions.push(tx);
                     max_ages.push(calculate_max_age(
                         last_slot_in_epoch,
@@ -443,12 +441,7 @@ impl SchedulerController {
                     fee_budget_limits_vec.push(fee_budget_limits);
                 });
 
-            let check_results: Vec<
-                Result<
-                    solana_svm::account_loader::CheckedTransactionDetails,
-                    solana_sdk::transaction::TransactionError,
-                >,
-            > = working_bank.check_transactions(
+            let check_results = working_bank.check_transactions(
                 &transactions,
                 &lock_results[..transactions.len()],
                 MAX_PROCESSING_AGE,
