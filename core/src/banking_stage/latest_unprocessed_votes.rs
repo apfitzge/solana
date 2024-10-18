@@ -441,22 +441,6 @@ impl LatestUnprocessedVotes {
             .unwrap_or(false)
     }
 
-    /// Sometimes we forward and hold the packets, sometimes we forward and clear.
-    /// This also clears all gossip votes since by definition they have been forwarded
-    pub fn clear_forwarded_packets(&self) {
-        self.latest_vote_per_vote_pubkey
-            .read()
-            .unwrap()
-            .values()
-            .filter(|lock| lock.read().unwrap().is_forwarded())
-            .for_each(|lock| {
-                let mut vote = lock.write().unwrap();
-                if vote.is_forwarded() && vote.take_vote().is_some() {
-                    self.num_unprocessed_votes.fetch_sub(1, Ordering::Relaxed);
-                }
-            });
-    }
-
     pub(super) fn should_deprecate_legacy_vote_ixs(&self) -> bool {
         self.deprecate_legacy_vote_ixs.load(Ordering::Relaxed)
     }
