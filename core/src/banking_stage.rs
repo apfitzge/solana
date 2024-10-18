@@ -462,6 +462,7 @@ impl BankingStage {
                     committer.clone(),
                     transaction_recorder.clone(),
                     log_messages_bytes_limit,
+                    bank_forks.clone(),
                     unprocessed_transaction_storage,
                 )
             })
@@ -516,6 +517,7 @@ impl BankingStage {
                 committer.clone(),
                 transaction_recorder.clone(),
                 log_messages_bytes_limit,
+                bank_forks.clone(),
                 UnprocessedTransactionStorage::new_vote_storage(
                     latest_unprocessed_votes.clone(),
                     vote_source,
@@ -590,6 +592,7 @@ impl BankingStage {
         committer: Committer,
         transaction_recorder: TransactionRecorder,
         log_messages_bytes_limit: Option<usize>,
+        bank_forks: Arc<RwLock<BankForks>>,
         unprocessed_transaction_storage: UnprocessedTransactionStorage,
     ) -> JoinHandle<()> {
         let mut packet_receiver = PacketReceiver::new(id, packet_receiver);
@@ -607,6 +610,7 @@ impl BankingStage {
                     &mut packet_receiver,
                     &decision_maker,
                     &consumer,
+                    &bank_forks,
                     id,
                     unprocessed_transaction_storage,
                 )
@@ -669,6 +673,7 @@ impl BankingStage {
         packet_receiver: &mut PacketReceiver,
         decision_maker: &DecisionMaker,
         consumer: &Consumer,
+        bank_forks: &RwLock<BankForks>,
         id: u32,
         mut unprocessed_transaction_storage: UnprocessedTransactionStorage,
     ) {
@@ -695,6 +700,11 @@ impl BankingStage {
             }
 
             tracer_packet_stats.report(1000);
+
+            if !unprocessed_transaction_storage.should_not_process() {
+                unprocessed_transaction_storage
+                    .cache_epoch_boundary_info(&bank_forks.read().unwrap().working_bank());
+            }
 
             match packet_receiver.receive_and_buffer_packets(
                 &mut unprocessed_transaction_storage,
