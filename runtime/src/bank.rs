@@ -1718,6 +1718,21 @@ impl Bank {
             cache_for_accounts_lt_hash: RwLock::new(AHashMap::new()),
         };
 
+        // Many tests (including local-cluster tests) rely on the fact
+        // that transaction fees are zero.
+        // This was previously handled by the `FeeRateGovernor`
+        // in the `genesis_config`, but that is no longer the case.
+        // However, for testing, we can set the fee structure to
+        // result in zero base fees for all transactions IF the
+        // lamports_per_signature is zero on the `FeeRateGovernor`.
+        if genesis_config
+            .fee_rate_governor
+            .target_lamports_per_signature
+            == 0
+        {
+            bank.fee_structure = FeeStructure::zero_fees();
+        }
+
         bank.transaction_processor =
             TransactionBatchProcessor::new_uninitialized(bank.slot, bank.epoch);
 
