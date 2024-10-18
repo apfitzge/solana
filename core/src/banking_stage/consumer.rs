@@ -115,6 +115,9 @@ impl Consumer {
         banking_stage_stats: &BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) {
+        // Cache epoch info if necessary.
+        unprocessed_transaction_storage.cache_epoch_boundary_info(&bank_start.working_bank);
+
         let mut rebuffered_packet_count = 0;
         let mut consumed_buffered_packets_count = 0;
         let mut proc_start = Measure::start("consume_buffered_process");
