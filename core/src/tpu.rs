@@ -72,7 +72,7 @@ pub struct Tpu {
     sigverify_stage: SigVerifyStage,
     vote_sigverify_stage: SigVerifyStage,
     banking_stage: BankingStage,
-    forwarding_stage: ForwardingStage,
+    forwarding_stage: thread::JoinHandle<()>,
     cluster_info_vote_listener: ClusterInfoVoteListener,
     broadcast_stage: BroadcastStage,
     tpu_quic_t: thread::JoinHandle<()>,
@@ -258,7 +258,12 @@ impl Tpu {
             enable_block_production_forwarding,
         );
 
-        let forwarding_stage = ForwardingStage::new(forward_stage_receiver);
+        let forwarding_stage = ForwardingStage::spawn(
+            forward_stage_receiver,
+            poh_recorder.clone(),
+            cluster_info.clone(),
+            connection_cache.clone(),
+        );
 
         let (entry_receiver, tpu_entry_notifier) =
             if let Some(entry_notification_sender) = entry_notification_sender {
