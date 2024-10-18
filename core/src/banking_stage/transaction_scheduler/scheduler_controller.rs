@@ -459,14 +459,12 @@ impl SchedulerController {
             let mut post_transaction_check_count: usize = 0;
             let mut num_dropped_on_capacity: usize = 0;
             let mut num_buffered: usize = 0;
-            for ((((packet, transaction), max_age), fee_budget_limits), _check_result) in
-                arc_packets
-                    .drain(..)
-                    .zip(transactions.drain(..))
-                    .zip(max_ages.drain(..))
-                    .zip(fee_budget_limits_vec.drain(..))
-                    .zip(check_results)
-                    .filter(|(_, check_result)| check_result.is_ok())
+            for (((transaction, max_age), fee_budget_limits), _check_result) in transactions
+                .drain(..)
+                .zip(max_ages.drain(..))
+                .zip(fee_budget_limits_vec.drain(..))
+                .zip(check_results)
+                .filter(|(_, check_result)| check_result.is_ok())
             {
                 saturating_add_assign!(post_transaction_check_count, 1);
                 let transaction_id = self.transaction_id_generator.next();
@@ -484,7 +482,6 @@ impl SchedulerController {
                 if self.container.insert_new_transaction(
                     transaction_id,
                     transaction_ttl,
-                    packet,
                     priority,
                     cost,
                 ) {

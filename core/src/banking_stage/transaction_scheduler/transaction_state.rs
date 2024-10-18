@@ -1,9 +1,5 @@
 use {
-    crate::banking_stage::{
-        immutable_deserialized_packet::ImmutableDeserializedPacket, scheduler_messages::MaxAge,
-    },
-    solana_sdk::transaction::SanitizedTransaction,
-    std::sync::Arc,
+    crate::banking_stage::scheduler_messages::MaxAge, solana_sdk::transaction::SanitizedTransaction,
 };
 
 /// Simple wrapper type to tie a sanitized transaction to max age slot.
@@ -36,38 +32,22 @@ pub(crate) enum TransactionState {
     /// The transaction is available for scheduling.
     Unprocessed {
         transaction_ttl: SanitizedTransactionTTL,
-        packet: Arc<ImmutableDeserializedPacket>,
         priority: u64,
         cost: u64,
-        should_forward: bool,
     },
     /// The transaction is currently scheduled or being processed.
-    Pending {
-        packet: Arc<ImmutableDeserializedPacket>,
-        priority: u64,
-        cost: u64,
-        should_forward: bool,
-    },
+    Pending { priority: u64, cost: u64 },
     /// Only used during transition.
     Transitioning,
 }
 
 impl TransactionState {
     /// Creates a new `TransactionState` in the `Unprocessed` state.
-    pub(crate) fn new(
-        transaction_ttl: SanitizedTransactionTTL,
-        packet: Arc<ImmutableDeserializedPacket>,
-        priority: u64,
-        cost: u64,
-    ) -> Self {
-        let should_forward = !packet.original_packet().meta().forwarded()
-            && packet.original_packet().meta().is_from_staked_node();
+    pub(crate) fn new(transaction_ttl: SanitizedTransactionTTL, priority: u64, cost: u64) -> Self {
         Self::Unprocessed {
             transaction_ttl,
-            packet,
             priority,
             cost,
-            should_forward,
         }
     }
 
@@ -102,17 +82,10 @@ impl TransactionState {
         match self.take() {
             TransactionState::Unprocessed {
                 transaction_ttl,
-                packet,
                 priority,
                 cost,
-                should_forward: forwarded,
             } => {
-                *self = TransactionState::Pending {
-                    packet,
-                    priority,
-                    cost,
-                    should_forward: forwarded,
-                };
+                *self = TransactionState::Pending { priority, cost };
                 transaction_ttl
             }
             TransactionState::Pending { .. } => {
@@ -131,18 +104,11 @@ impl TransactionState {
     pub(crate) fn transition_to_unprocessed(&mut self, transaction_ttl: SanitizedTransactionTTL) {
         match self.take() {
             TransactionState::Unprocessed { .. } => panic!("already unprocessed"),
-            TransactionState::Pending {
-                packet,
-                priority,
-                cost,
-                should_forward: forwarded,
-            } => {
+            TransactionState::Pending { priority, cost } => {
                 *self = Self::Unprocessed {
                     transaction_ttl,
-                    packet,
                     priority,
                     cost,
-                    should_forward: forwarded,
                 }
             }
             Self::Transitioning => unreachable!(),
@@ -176,8 +142,7 @@ mod tests {
         super::*,
         solana_sdk::{
             clock::Slot, compute_budget::ComputeBudgetInstruction, hash::Hash, message::Message,
-            packet::Packet, signature::Keypair, signer::Signer, system_instruction,
-            transaction::Transaction,
+            signature::Keypair, signer::Signer, system_instruction, transaction::Transaction,
         },
     };
 
@@ -194,9 +159,6 @@ mod tests {
         let message = Message::new(&ixs, Some(&from_keypair.pubkey()));
         let tx = Transaction::new(&[&from_keypair], message, Hash::default());
 
-        let packet = Arc::new(
-            ImmutableDeserializedPacket::new(Packet::from_data(None, tx.clone()).unwrap()).unwrap(),
-        );
         let transaction_ttl = SanitizedTransactionTTL {
             transaction: SanitizedTransaction::from_transaction_for_tests(tx),
             max_age: MaxAge {
@@ -205,12 +167,7 @@ mod tests {
             },
         };
         const TEST_TRANSACTION_COST: u64 = 5000;
-        TransactionState::new(
-            transaction_ttl,
-            packet,
-            compute_unit_price,
-            TEST_TRANSACTION_COST,
-        )
+        TransactionState::new(transaction_ttl, compute_unit_price, TEST_TRANSACTION_COST)
     }
 
     #[test]
