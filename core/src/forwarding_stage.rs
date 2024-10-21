@@ -34,18 +34,27 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
         cluster_info: T,
         connection_cache: Arc<ConnectionCache>,
     ) -> JoinHandle<()> {
-        let forwarding_stage = Self {
+        let forwarding_stage = Self::new(receiver, poh_recorder, cluster_info, connection_cache);
+        Builder::new()
+            .name("solFwdStage".to_string())
+            .spawn(move || forwarding_stage.run())
+            .unwrap()
+    }
+
+    fn new(
+        receiver: Receiver<(BankingPacketBatch, bool)>,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+        cluster_info: T,
+        connection_cache: Arc<ConnectionCache>,
+    ) -> Self {
+        Self {
             receiver,
             poh_recorder,
             cluster_info,
             connection_cache,
             data_budget: DataBudget::default(),
             udp_socket: UdpSocket::bind("0.0.0.0:0").unwrap(),
-        };
-        Builder::new()
-            .name("solFwdStage".to_string())
-            .spawn(move || forwarding_stage.run())
-            .unwrap()
+        }
     }
 
     fn run(self) {
@@ -57,24 +66,31 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
             };
 
             self.update_data_budget();
+            self.forward_batch(packet_batches, tpu_vote_batch, addr);
+        }
+    }
 
-            let filtered_packets = packet_batches
-                .0
-                .iter()
-                .flat_map(|batch| batch.iter())
-                .filter(|p| !p.meta().forwarded())
-                .filter(|p| p.meta().is_from_staked_node())
-                .filter(|p| self.data_budget.take(p.meta().size))
-                .filter_map(|p| p.data(..).map(|data| data.to_vec()));
+    fn forward_batch(
+        &self,
+        packet_batches: BankingPacketBatch,
+        tpu_vote_batch: bool,
+        addr: SocketAddr,
+    ) {
+        let filtered_packets = packet_batches
+            .0
+            .iter()
+            .flat_map(|batch| batch.iter())
+            .filter(|p| !p.meta().forwarded())
+            .filter(|p| p.meta().is_from_staked_node())
+            .filter(|p| self.data_budget.take(p.meta().size))
+            .filter_map(|p| p.data(..).map(|data| data.to_vec()));
 
-            if tpu_vote_batch {
-                // The vote must be forwarded using only UDP.
-                let pkts: Vec<_> = filtered_packets.into_iter().zip(repeat(addr)).collect();
-                let _ = batch_send(&self.udp_socket, &pkts);
-            } else {
-                let conn = self.connection_cache.get_connection(&addr);
-                let _ = conn.send_data_batch_async(filtered_packets.collect::<Vec<_>>());
-            }
+        if tpu_vote_batch {
+            let pkts: Vec<_> = filtered_packets.into_iter().zip(repeat(addr)).collect();
+            let _ = batch_send(&self.udp_socket, &pkts);
+        } else {
+            let conn = self.connection_cache.get_connection(&addr);
+            let _ = conn.send_data_batch_async(filtered_packets.collect::<Vec<_>>());
         }
     }
 
