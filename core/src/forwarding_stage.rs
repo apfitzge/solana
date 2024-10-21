@@ -1,9 +1,10 @@
 use {
     crate::{
         banking_stage::LikeClusterInfo,
-        banking_trace::{BankingPacketBatch, BankingPacketReceiver},
+        banking_trace::BankingPacketBatch,
         next_leader::{next_leader, next_leader_tpu_vote},
     },
+    crossbeam_channel::Receiver,
     solana_client::connection_cache::ConnectionCache,
     solana_connection_cache::client_connection::ClientConnection,
     solana_perf::data_budget::DataBudget,
@@ -19,7 +20,7 @@ use {
 };
 
 pub struct ForwardingStage<T: LikeClusterInfo> {
-    receiver: BankingPacketReceiver,
+    receiver: Receiver<(BankingPacketBatch, bool)>,
     poh_recorder: Arc<RwLock<PohRecorder>>,
     cluster_info: T,
     connection_cache: Arc<ConnectionCache>,
@@ -29,7 +30,7 @@ pub struct ForwardingStage<T: LikeClusterInfo> {
 
 impl<T: LikeClusterInfo> ForwardingStage<T> {
     pub fn spawn(
-        receiver: BankingPacketReceiver,
+        receiver: Receiver<(BankingPacketBatch, bool)>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         cluster_info: T,
         connection_cache: Arc<ConnectionCache>,
@@ -49,10 +50,7 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
     }
 
     fn run(self) {
-        while let Ok(packet_batches) = self.receiver.recv() {
-            // Determine if these are vote packets or non-vote packets.
-            let tpu_vote_batch = Self::is_tpu_vote(&packet_batches);
-
+        while let Ok((packet_batches, tpu_vote_batch)) = self.receiver.recv() {
             // Get the leader and address to forward the packets to.
             let Some((_leader, leader_address)) = self.get_leader_and_addr(tpu_vote_batch) else {
                 // If unknown leader, move to next packet batch.
@@ -106,16 +104,5 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
                 MAX_BYTES_BUDGET,
             )
         });
-    }
-
-    /// Check if `packet_batches` came from tpu_vote or tpu.
-    /// Returns true if the packets are from tpu_vote, false if from tpu.
-    fn is_tpu_vote(packet_batches: &BankingPacketBatch) -> bool {
-        packet_batches
-            .0
-            .first()
-            .and_then(|batch| batch.iter().next())
-            .map(|packet| packet.meta().is_simple_vote_tx())
-            .unwrap_or(false)
     }
 }

@@ -58,7 +58,7 @@ impl SigverifyTracerPacketStats {
 
 pub struct TransactionSigVerifier {
     banking_stage_sender: BankingPacketSender,
-    forward_stage_sender: Option<Sender<BankingPacketBatch>>,
+    forward_stage_sender: Option<Sender<(BankingPacketBatch, bool)>>,
     tracer_packet_stats: SigverifyTracerPacketStats,
     recycler: Recycler<TxOffset>,
     recycler_out: Recycler<PinnedVec<u8>>,
@@ -68,7 +68,7 @@ pub struct TransactionSigVerifier {
 impl TransactionSigVerifier {
     pub fn new_reject_non_vote(
         banking_stage_sender: BankingPacketSender,
-        forward_stage_sender: Option<Sender<BankingPacketBatch>>,
+        forward_stage_sender: Option<Sender<(BankingPacketBatch, bool)>>,
     ) -> Self {
         let mut new_self = Self::new(banking_stage_sender, forward_stage_sender);
         new_self.reject_non_vote = true;
@@ -77,7 +77,7 @@ impl TransactionSigVerifier {
 
     pub fn new(
         banking_stage_sender: BankingPacketSender,
-        forward_stage_sender: Option<Sender<BankingPacketBatch>>,
+        forward_stage_sender: Option<Sender<(BankingPacketBatch, bool)>>,
     ) -> Self {
         init();
         Self {
@@ -141,7 +141,7 @@ impl SigVerifier for TransactionSigVerifier {
         if let Some(forward_stage_sender) = &self.forward_stage_sender {
             self.banking_stage_sender
                 .send(banking_packet_batch.clone())?;
-            let _ = forward_stage_sender.try_send(banking_packet_batch);
+            let _ = forward_stage_sender.try_send((banking_packet_batch, self.reject_non_vote));
         } else {
             self.banking_stage_sender.send(banking_packet_batch)?;
         }
