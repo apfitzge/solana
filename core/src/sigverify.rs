@@ -141,7 +141,7 @@ impl SigVerifier for TransactionSigVerifier {
         if let Some(forward_stage_sender) = &self.forward_stage_sender {
             self.banking_stage_sender
                 .send(banking_packet_batch.clone())?;
-            forward_stage_sender.send(banking_packet_batch)?;
+            let _ = forward_stage_sender.try_send(banking_packet_batch);
         } else {
             self.banking_stage_sender.send(banking_packet_batch)?;
         }

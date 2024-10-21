@@ -19,7 +19,7 @@ use {
         validator::{BlockProductionMethod, GeneratorConfig},
     },
     bytes::Bytes,
-    crossbeam_channel::{unbounded, Receiver},
+    crossbeam_channel::{bounded, unbounded, Receiver},
     solana_client::connection_cache::ConnectionCache,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{
@@ -201,7 +201,7 @@ impl Tpu {
         )
         .unwrap();
 
-        let (forward_stage_sender, forward_stage_receiver) = unbounded();
+        let (forward_stage_sender, forward_stage_receiver) = bounded(64);
         let sigverify_stage = {
             let verifier = TransactionSigVerifier::new(
                 non_vote_sender,
