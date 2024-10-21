@@ -141,7 +141,8 @@ fn test_simulation_replaced_blockhash() -> ClientResult<()> {
     solana_logger::setup();
 
     let alice = Keypair::new();
-    let validator = TestValidator::with_no_base_fees(alice.pubkey(), None, SocketAddrSpace::Unspecified);
+    let validator =
+        TestValidator::with_no_base_fees(alice.pubkey(), None, SocketAddrSpace::Unspecified);
     let rpc_client = RpcClient::new(validator.rpc_url());
 
     let bob = Keypair::new();
@@ -559,7 +560,8 @@ fn deserialize_rpc_error() -> ClientResult<()> {
     solana_logger::setup();
 
     let alice = Keypair::new();
-    let validator = TestValidator::with_no_base_fees(alice.pubkey(), None, SocketAddrSpace::Unspecified);
+    let validator =
+        TestValidator::with_no_base_fees(alice.pubkey(), None, SocketAddrSpace::Unspecified);
     let rpc_client = RpcClient::new(validator.rpc_url());
 
     let bob = Keypair::new();
