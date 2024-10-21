@@ -71,21 +71,23 @@ impl<T: ForwardAddressGetter> ForwardingStage<T> {
 
     fn run(self) {
         while let Ok((packet_batches, tpu_vote_batch)) = self.receiver.recv() {
-            // Get the address to forward the packets to.
-            let Some(addr) = self
-                .forward_address_getter
-                .get_forwarding_address(tpu_vote_batch, self.connection_cache.protocol())
-            else {
-                // If unknown, move to next packet batch.
-                continue;
-            };
-
-            self.update_data_budget();
-            self.forward_batch(packet_batches, tpu_vote_batch, addr);
+            self.handle_batches(packet_batches, tpu_vote_batch);
         }
     }
 
-    fn forward_batch(
+    fn handle_batches(&self, packet_batches: BankingPacketBatch, tpu_vote_batch: bool) {
+        let Some(addr) = self
+            .forward_address_getter
+            .get_forwarding_address(tpu_vote_batch, self.connection_cache.protocol())
+        else {
+            return;
+        };
+
+        self.update_data_budget();
+        self.forward_batches(packet_batches, tpu_vote_batch, addr);
+    }
+
+    fn forward_batches(
         &self,
         packet_batches: BankingPacketBatch,
         tpu_vote_batch: bool,
@@ -134,24 +136,24 @@ mod tests {
         std::time::Duration,
     };
 
-    struct DummyForwardAddressGetter(Option<SocketAddr>);
-    impl ForwardAddressGetter for DummyForwardAddressGetter {
+    struct UnimplementedForwardAddressGetter;
+    impl ForwardAddressGetter for UnimplementedForwardAddressGetter {
         fn get_forwarding_address(
             &self,
             _tpu_vote: bool,
             _protocol: Protocol,
         ) -> Option<SocketAddr> {
-            self.0
+            unimplemented!("UnimplementedForwardAddressGetter:get_forwarding_address")
         }
     }
 
     #[test]
-    fn test_tpu_vote_forwarding() {
-        let forward_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let forward_addr = forward_socket.local_addr().unwrap();
+    fn test_forward_batches() {
+        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let addr = socket.local_addr().unwrap();
 
         let (_sender, receiver) = crossbeam_channel::unbounded();
-        let dummy_forward_address_getter = DummyForwardAddressGetter(Some(forward_addr));
+        let dummy_forward_address_getter = UnimplementedForwardAddressGetter;
         let connection_cache = ConnectionCache::new("connection_cache_test");
 
         let forwarding_stage = ForwardingStage::new(
@@ -160,53 +162,58 @@ mod tests {
             Arc::new(connection_cache),
         );
 
+        // Simple dummy packet
         const NUM_BYTES: usize = 8;
         let mut packet = Packet::default();
-        packet.populate_packet(None, &[0u8; NUM_BYTES]).unwrap(); // we don't need actual content here
+        packet.populate_packet(None, &[0u8; NUM_BYTES]).unwrap();
         packet.meta_mut().set_simple_vote(true);
         packet.meta_mut().set_from_staked_node(true);
 
-        forward_socket
+        socket
             .set_read_timeout(Some(Duration::from_millis(10)))
             .unwrap();
         let recv_buffer = &mut [0; 1024];
 
         // Data Budget is 0, so no packets should be sent
-        forwarding_stage.forward_batch(
-            BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
-            true,
-            forward_addr,
-        );
-        assert!(forward_socket.recv_from(recv_buffer).is_err());
+        for tpu_vote in [false, true] {
+            forwarding_stage.forward_batches(
+                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                tpu_vote,
+                addr,
+            );
+            assert!(socket.recv_from(recv_buffer).is_err());
+        }
 
-        // Packet is valid, so it should be sent
-        forwarding_stage.update_data_budget();
-        forwarding_stage.forward_batch(
-            BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
-            true,
-            forward_addr,
-        );
-        assert_eq!(forward_socket.recv_from(recv_buffer).unwrap().0, NUM_BYTES);
+        for tpu_vote in [false, true] {
+            // Packet is valid, so it should be sent
+            forwarding_stage.update_data_budget();
+            forwarding_stage.forward_batches(
+                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                tpu_vote,
+                addr,
+            );
+            assert_eq!(socket.recv_from(recv_buffer).unwrap().0, NUM_BYTES);
 
-        // Packet is not from staked node, so it should not be sent
-        forwarding_stage.update_data_budget();
-        packet.meta_mut().set_from_staked_node(false);
-        forwarding_stage.forward_batch(
-            BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
-            true,
-            forward_addr,
-        );
-        assert!(forward_socket.recv_from(recv_buffer).is_err());
+            // Packet is not from staked node, so it should not be sent
+            forwarding_stage.update_data_budget();
+            packet.meta_mut().set_from_staked_node(false);
+            forwarding_stage.forward_batches(
+                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                tpu_vote,
+                addr,
+            );
+            assert!(socket.recv_from(recv_buffer).is_err());
 
-        // Packet is already forwarded, so it should not be sent
-        forwarding_stage.update_data_budget();
-        packet.meta_mut().set_from_staked_node(true);
-        packet.meta_mut().flags |= PacketFlags::FORWARDED;
-        forwarding_stage.forward_batch(
-            BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
-            true,
-            forward_addr,
-        );
-        assert!(forward_socket.recv_from(recv_buffer).is_err());
+            // Packet is already forwarded, so it should not be sent
+            forwarding_stage.update_data_budget();
+            packet.meta_mut().set_from_staked_node(true);
+            packet.meta_mut().flags |= PacketFlags::FORWARDED;
+            forwarding_stage.forward_batches(
+                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                tpu_vote,
+                addr,
+            );
+            assert!(socket.recv_from(recv_buffer).is_err());
+        }
     }
 }
