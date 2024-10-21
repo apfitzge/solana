@@ -258,8 +258,7 @@ impl Tpu {
 
         let forwarding_stage = ForwardingStage::spawn(
             forward_stage_receiver,
-            poh_recorder.clone(),
-            cluster_info.clone(),
+            (cluster_info.clone(), poh_recorder.clone()),
             connection_cache.clone(),
         );
 

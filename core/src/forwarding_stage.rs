@@ -7,6 +7,7 @@ use {
     crossbeam_channel::Receiver,
     solana_client::connection_cache::ConnectionCache,
     solana_connection_cache::client_connection::ClientConnection,
+    solana_gossip::contact_info::Protocol,
     solana_perf::data_budget::DataBudget,
     solana_poh::poh_recorder::PohRecorder,
     solana_streamer::sendmmsg::batch_send,
@@ -18,23 +19,36 @@ use {
     },
 };
 
-pub struct ForwardingStage<T: LikeClusterInfo> {
+pub trait ForwardAddressGetter: Send + Sync + 'static {
+    fn get_forwarding_address(&self, tpu_vote: bool, protocol: Protocol) -> Option<SocketAddr>;
+}
+
+impl<T: LikeClusterInfo> ForwardAddressGetter for (T, Arc<RwLock<PohRecorder>>) {
+    fn get_forwarding_address(&self, tpu_vote: bool, protocol: Protocol) -> Option<SocketAddr> {
+        if tpu_vote {
+            next_leader_tpu_vote(&self.0, &self.1)
+        } else {
+            next_leader(&self.0, &self.1, |node| node.tpu_forwards(protocol))
+        }
+        .map(|(_, addr)| addr)
+    }
+}
+
+pub struct ForwardingStage<T: ForwardAddressGetter> {
     receiver: Receiver<(BankingPacketBatch, bool)>,
-    poh_recorder: Arc<RwLock<PohRecorder>>,
-    cluster_info: T,
+    forward_address_getter: T,
     connection_cache: Arc<ConnectionCache>,
     data_budget: DataBudget,
     udp_socket: UdpSocket,
 }
 
-impl<T: LikeClusterInfo> ForwardingStage<T> {
+impl<T: ForwardAddressGetter> ForwardingStage<T> {
     pub fn spawn(
         receiver: Receiver<(BankingPacketBatch, bool)>,
-        poh_recorder: Arc<RwLock<PohRecorder>>,
-        cluster_info: T,
+        forward_address_getter: T,
         connection_cache: Arc<ConnectionCache>,
     ) -> JoinHandle<()> {
-        let forwarding_stage = Self::new(receiver, poh_recorder, cluster_info, connection_cache);
+        let forwarding_stage = Self::new(receiver, forward_address_getter, connection_cache);
         Builder::new()
             .name("solFwdStage".to_string())
             .spawn(move || forwarding_stage.run())
@@ -43,14 +57,12 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
 
     fn new(
         receiver: Receiver<(BankingPacketBatch, bool)>,
-        poh_recorder: Arc<RwLock<PohRecorder>>,
-        cluster_info: T,
+        forward_address_getter: T,
         connection_cache: Arc<ConnectionCache>,
     ) -> Self {
         Self {
             receiver,
-            poh_recorder,
-            cluster_info,
+            forward_address_getter,
             connection_cache,
             data_budget: DataBudget::default(),
             udp_socket: UdpSocket::bind("0.0.0.0:0").unwrap(),
@@ -60,7 +72,10 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
     fn run(self) {
         while let Ok((packet_batches, tpu_vote_batch)) = self.receiver.recv() {
             // Get the address to forward the packets to.
-            let Some(addr) = self.get_forwarding_addr(tpu_vote_batch) else {
+            let Some(addr) = self
+                .forward_address_getter
+                .get_forwarding_address(tpu_vote_batch, self.connection_cache.protocol())
+            else {
                 // If unknown, move to next packet batch.
                 continue;
             };
@@ -92,18 +107,6 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
             let conn = self.connection_cache.get_connection(&addr);
             let _ = conn.send_data_batch_async(filtered_packets.collect::<Vec<_>>());
         }
-    }
-
-    /// Get socket address for the leader to forward to
-    fn get_forwarding_addr(&self, tpu_vote: bool) -> Option<SocketAddr> {
-        if tpu_vote {
-            next_leader_tpu_vote(&self.cluster_info, &self.poh_recorder)
-        } else {
-            next_leader(&self.cluster_info, &self.poh_recorder, |node| {
-                node.tpu_forwards(self.connection_cache.protocol())
-            })
-        }
-        .map(|(_, addr)| addr)
     }
 
     /// Re-fill the data budget if enough time has passed
