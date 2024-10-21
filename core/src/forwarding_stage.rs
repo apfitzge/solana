@@ -10,6 +10,7 @@ use {
     solana_gossip::contact_info::Protocol,
     solana_perf::data_budget::DataBudget,
     solana_poh::poh_recorder::PohRecorder,
+    solana_sdk::timing::AtomicInterval,
     solana_streamer::sendmmsg::batch_send,
     std::{
         iter::repeat,
@@ -40,6 +41,7 @@ pub struct ForwardingStage<T: ForwardAddressGetter> {
     connection_cache: Arc<ConnectionCache>,
     data_budget: DataBudget,
     udp_socket: UdpSocket,
+    metrics: ForwardingStageMetrics,
 }
 
 impl<T: ForwardAddressGetter> ForwardingStage<T> {
@@ -66,16 +68,26 @@ impl<T: ForwardAddressGetter> ForwardingStage<T> {
             connection_cache,
             data_budget: DataBudget::default(),
             udp_socket: UdpSocket::bind("0.0.0.0:0").unwrap(),
+            metrics: ForwardingStageMetrics::default(),
         }
     }
 
-    fn run(self) {
+    fn run(mut self) {
         while let Ok((packet_batches, tpu_vote_batch)) = self.receiver.recv() {
+            self.metrics.maybe_report();
             self.handle_batches(packet_batches, tpu_vote_batch);
         }
     }
 
-    fn handle_batches(&self, packet_batches: BankingPacketBatch, tpu_vote_batch: bool) {
+    fn handle_batches(&mut self, packet_batches: BankingPacketBatch, tpu_vote_batch: bool) {
+        // Count the number of packets received
+        let num_packets_received: usize = packet_batches.0.iter().map(|batch| batch.len()).sum();
+        if tpu_vote_batch {
+            self.metrics.vote_packets_received += num_packets_received;
+        } else {
+            self.metrics.non_vote_packets_received += num_packets_received;
+        }
+
         let Some(addr) = self
             .forward_address_getter
             .get_forwarding_address(tpu_vote_batch, self.connection_cache.protocol())
@@ -88,7 +100,7 @@ impl<T: ForwardAddressGetter> ForwardingStage<T> {
     }
 
     fn forward_batches(
-        &self,
+        &mut self,
         packet_batches: BankingPacketBatch,
         tpu_vote_batch: bool,
         addr: SocketAddr,
@@ -103,13 +115,29 @@ impl<T: ForwardAddressGetter> ForwardingStage<T> {
             .filter(|p| self.data_budget.take(p.meta().size))
             .filter_map(|p| p.data(..).map(|data| data.to_vec()));
 
-        if tpu_vote_batch {
+        let (success, num_packets) = if tpu_vote_batch {
             let packets: Vec<_> = filtered_packets.into_iter().zip(repeat(addr)).collect();
-            let _ = batch_send(&self.udp_socket, &packets);
+            let num_packets = packets.len();
+            let res = batch_send(&self.udp_socket, &packets);
+            (res.is_ok(), num_packets)
         } else {
             let packets: Vec<_> = filtered_packets.collect();
+            let num_packets = packets.len();
             let conn = self.connection_cache.get_connection(&addr);
-            let _ = conn.send_data_batch_async(packets);
+            let res = conn.send_data_batch_async(packets);
+            (res.is_ok(), num_packets)
+        };
+
+        if tpu_vote_batch {
+            self.metrics.vote_packets_attempted_forward += num_packets;
+            if success {
+                self.metrics.vote_packets_forwarded += num_packets;
+            }
+        } else {
+            self.metrics.non_vote_packets_attempted_forward += num_packets;
+            if success {
+                self.metrics.non_vote_packets_forwarded += num_packets;
+            }
         }
     }
 
@@ -126,6 +154,60 @@ impl<T: ForwardAddressGetter> ForwardingStage<T> {
                 MAX_BYTES_BUDGET,
             )
         });
+    }
+}
+
+#[derive(Default)]
+struct ForwardingStageMetrics {
+    interval: AtomicInterval,
+
+    vote_packets_received: usize,
+    vote_packets_attempted_forward: usize,
+    vote_packets_forwarded: usize,
+
+    non_vote_packets_received: usize,
+    non_vote_packets_attempted_forward: usize,
+    non_vote_packets_forwarded: usize,
+}
+
+impl ForwardingStageMetrics {
+    fn maybe_report(&mut self) {
+        const REPORT_INTERVAL_MS: u64 = 5000;
+        if self.interval.should_update(REPORT_INTERVAL_MS) {
+            datapoint_info!(
+                "forwarding_stage",
+                (
+                    "vote_packets_received",
+                    core::mem::replace(&mut self.vote_packets_received, 0),
+                    i64
+                ),
+                (
+                    "vote_packets_attempted_forward",
+                    core::mem::replace(&mut self.vote_packets_attempted_forward, 0),
+                    i64
+                ),
+                (
+                    "vote_packets_forwarded",
+                    core::mem::replace(&mut self.vote_packets_forwarded, 0),
+                    i64
+                ),
+                (
+                    "non_vote_packets_received",
+                    core::mem::replace(&mut self.non_vote_packets_received, 0),
+                    i64
+                ),
+                (
+                    "non_vote_packets_attempted_forward",
+                    core::mem::replace(&mut self.non_vote_packets_attempted_forward, 0),
+                    i64
+                ),
+                (
+                    "non_vote_packets_forwarded",
+                    core::mem::replace(&mut self.non_vote_packets_forwarded, 0),
+                    i64
+                ),
+            );
+        }
     }
 }
 
@@ -185,7 +267,7 @@ mod tests {
         let dummy_forward_address_getter = UnimplementedForwardAddressGetter;
         let connection_cache = ConnectionCache::with_udp("connection_cache_test", 1);
 
-        let forwarding_stage = ForwardingStage::new(
+        let mut forwarding_stage = ForwardingStage::new(
             receiver,
             dummy_forward_address_getter,
             Arc::new(connection_cache),
@@ -268,7 +350,7 @@ mod tests {
         };
         let connection_cache = ConnectionCache::with_udp("connection_cache_test", 1);
 
-        let forwarding_stage = ForwardingStage::new(
+        let mut forwarding_stage = ForwardingStage::new(
             receiver,
             dummy_forward_address_getter,
             Arc::new(connection_cache),
