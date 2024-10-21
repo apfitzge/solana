@@ -82,7 +82,7 @@ fn test_cli_program_deploy_non_upgradeable() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -287,7 +287,7 @@ fn test_cli_program_deploy_no_authority() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -679,7 +679,7 @@ fn test_cli_program_deploy_with_authority() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -1080,7 +1080,7 @@ fn test_cli_program_upgrade_auto_extend() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -1233,7 +1233,7 @@ fn test_cli_program_close_program() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -1352,7 +1352,7 @@ fn test_cli_program_extend_program() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -1522,7 +1522,7 @@ fn test_cli_program_write_buffer() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -2009,7 +2009,7 @@ fn test_cli_program_set_buffer_authority() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -2181,7 +2181,7 @@ fn test_cli_program_mismatch_buffer_authority() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -2307,7 +2307,7 @@ fn test_cli_program_deploy_with_offline_signing(use_offline_signer_as_fee_payer:
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -2500,7 +2500,7 @@ fn test_cli_program_show() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -2697,7 +2697,7 @@ fn test_cli_program_dump() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());

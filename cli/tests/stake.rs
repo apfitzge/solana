@@ -206,7 +206,7 @@ fn test_seed_stake_delegation_and_deactivation(compute_unit_price: Option<u64>) 
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -302,7 +302,7 @@ fn test_stake_delegation_and_deactivation(compute_unit_price: Option<u64>) {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -394,7 +394,7 @@ fn test_offline_stake_delegation_and_deactivation(compute_unit_price: Option<u64
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -554,7 +554,7 @@ fn test_nonced_stake_delegation_and_deactivation(compute_unit_price: Option<u64>
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -683,7 +683,7 @@ fn test_stake_authorize(compute_unit_price: Option<u64>) {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -1642,7 +1642,7 @@ fn test_offline_nonced_create_stake_account_and_withdraw(compute_unit_price: Opt
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -1885,7 +1885,7 @@ fn test_stake_checked_instructions() {
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator =
-        TestValidator::with_no_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(mint_pubkey, Some(faucet_addr), SocketAddrSpace::Unspecified);
 
     let rpc_client =
         RpcClient::new_with_commitment(test_validator.rpc_url(), CommitmentConfig::processed());
@@ -2119,7 +2119,7 @@ fn test_stake_checked_instructions() {
 #[test]
 fn test_stake_minimum_delegation() {
     let test_validator =
-        TestValidator::with_no_fees(Pubkey::new_unique(), None, SocketAddrSpace::Unspecified);
+        TestValidator::with_no_base_fees(Pubkey::new_unique(), None, SocketAddrSpace::Unspecified);
     let mut config = CliConfig::recent_for_tests();
     config.json_rpc_url = test_validator.rpc_url();
 
