@@ -9,7 +9,6 @@ use {
     solana_connection_cache::client_connection::ClientConnection,
     solana_perf::data_budget::DataBudget,
     solana_poh::poh_recorder::PohRecorder,
-    solana_sdk::pubkey::Pubkey,
     solana_streamer::sendmmsg::batch_send,
     std::{
         iter::repeat,
@@ -51,9 +50,9 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
 
     fn run(self) {
         while let Ok((packet_batches, tpu_vote_batch)) = self.receiver.recv() {
-            // Get the leader and address to forward the packets to.
-            let Some((_leader, leader_address)) = self.get_leader_and_addr(tpu_vote_batch) else {
-                // If unknown leader, move to next packet batch.
+            // Get the address to forward the packets to.
+            let Some(addr) = self.get_forwarding_addr(tpu_vote_batch) else {
+                // If unknown, move to next packet batch.
                 continue;
             };
 
@@ -74,14 +73,14 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
                 let pkts: Vec<_> = packet_vec.into_iter().zip(repeat(leader_address)).collect();
                 let _ = batch_send(&self.udp_socket, &pkts);
             } else {
-                let conn = self.connection_cache.get_connection(&leader_address);
+                let conn = self.connection_cache.get_connection(&addr);
                 let _ = conn.send_data_batch_async(packet_vec);
             }
         }
     }
 
-    /// Get the pubkey and socket address for the leader to forward to
-    fn get_leader_and_addr(&self, tpu_vote: bool) -> Option<(Pubkey, SocketAddr)> {
+    /// Get socket address for the leader to forward to
+    fn get_forwarding_addr(&self, tpu_vote: bool) -> Option<SocketAddr> {
         if tpu_vote {
             next_leader_tpu_vote(&self.cluster_info, &self.poh_recorder)
         } else {
@@ -89,6 +88,7 @@ impl<T: LikeClusterInfo> ForwardingStage<T> {
                 node.tpu_forwards(self.connection_cache.protocol())
             })
         }
+        .map(|(_, addr)| addr)
     }
 
     /// Re-fill the data budget if enough time has passed
