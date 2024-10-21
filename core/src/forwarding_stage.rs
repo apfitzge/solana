@@ -97,6 +97,7 @@ impl<T: ForwardAddressGetter> ForwardingStage<T> {
             .0
             .iter()
             .flat_map(|batch| batch.iter())
+            .filter(|p| !p.meta().discard())
             .filter(|p| !p.meta().forwarded())
             .filter(|p| p.meta().is_from_staked_node())
             .filter(|p| self.data_budget.take(p.meta().size))
@@ -194,8 +195,19 @@ mod tests {
             );
             assert_eq!(socket.recv_from(recv_buffer).unwrap().0, NUM_BYTES);
 
+            // Packet is marked for discard, so it should not be sent
+            forwarding_stage.update_data_budget();
+            packet.meta_mut().set_discard(true);
+            forwarding_stage.forward_batches(
+                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                tpu_vote,
+                addr,
+            );
+            assert!(socket.recv_from(recv_buffer).is_err());
+
             // Packet is not from staked node, so it should not be sent
             forwarding_stage.update_data_budget();
+            packet.meta_mut().set_discard(false);
             packet.meta_mut().set_from_staked_node(false);
             forwarding_stage.forward_batches(
                 BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
@@ -216,4 +228,7 @@ mod tests {
             assert!(socket.recv_from(recv_buffer).is_err());
         }
     }
+
+    #[test]
+    fn handle_batches() {}
 }
