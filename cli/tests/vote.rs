@@ -262,23 +262,32 @@ fn test_offline_vote_authorize_and_withdraw(compute_unit_price: Option<u64>) {
     // Verify that we cannot reach the cluster
     process_command(&config_offline).unwrap_err();
 
+    let airdrop_amount = 100_000_000;
     request_and_confirm_airdrop(
         &rpc_client,
         &config_payer,
         &config_payer.signers[0].pubkey(),
-        100_000,
+        airdrop_amount,
     )
     .unwrap();
-    check_balance!(100_000, &rpc_client, &config_payer.signers[0].pubkey());
+    check_balance!(
+        airdrop_amount,
+        &rpc_client,
+        &config_payer.signers[0].pubkey()
+    );
 
     request_and_confirm_airdrop(
         &rpc_client,
         &config_offline,
         &config_offline.signers[0].pubkey(),
-        100_000,
+        airdrop_amount,
     )
     .unwrap();
-    check_balance!(100_000, &rpc_client, &config_offline.signers[0].pubkey());
+    check_balance!(
+        airdrop_amount,
+        &rpc_client,
+        &config_offline.signers[0].pubkey()
+    );
 
     // Create vote account with specific withdrawer
     let vote_account_keypair = Keypair::new();
