@@ -104,11 +104,12 @@ impl<T: ForwardAddressGetter> ForwardingStage<T> {
             .filter_map(|p| p.data(..).map(|data| data.to_vec()));
 
         if tpu_vote_batch {
-            let pkts: Vec<_> = filtered_packets.into_iter().zip(repeat(addr)).collect();
-            let _ = batch_send(&self.udp_socket, &pkts);
+            let packets: Vec<_> = filtered_packets.into_iter().zip(repeat(addr)).collect();
+            let _ = batch_send(&self.udp_socket, &packets);
         } else {
+            let packets: Vec<_> = filtered_packets.collect();
             let conn = self.connection_cache.get_connection(&addr);
-            let _ = conn.send_data_batch_async(filtered_packets.collect::<Vec<_>>());
+            let _ = conn.send_data_batch_async(packets);
         }
     }
 
@@ -148,6 +149,33 @@ mod tests {
         }
     }
 
+    struct DummyForwardAddressGetter {
+        vote_addr: SocketAddr,
+        non_vote_addr: SocketAddr,
+    }
+    impl ForwardAddressGetter for DummyForwardAddressGetter {
+        fn get_forwarding_address(
+            &self,
+            tpu_vote: bool,
+            _protocol: Protocol,
+        ) -> Option<SocketAddr> {
+            Some(if tpu_vote {
+                self.vote_addr
+            } else {
+                self.non_vote_addr
+            })
+        }
+    }
+
+    // Create simple dummy packets with different flags
+    // to filter out packets that should not be forwarded.
+    fn create_dummy_packet(num_bytes: usize, flags: PacketFlags) -> Packet {
+        let mut packet = Packet::default();
+        packet.meta_mut().size = num_bytes;
+        packet.meta_mut().flags = flags;
+        packet
+    }
+
     #[test]
     fn test_forward_batches() {
         let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
@@ -155,7 +183,7 @@ mod tests {
 
         let (_sender, receiver) = crossbeam_channel::unbounded();
         let dummy_forward_address_getter = UnimplementedForwardAddressGetter;
-        let connection_cache = ConnectionCache::new("connection_cache_test");
+        let connection_cache = ConnectionCache::with_udp("connection_cache_test", 1);
 
         let forwarding_stage = ForwardingStage::new(
             receiver,
@@ -163,12 +191,16 @@ mod tests {
             Arc::new(connection_cache),
         );
 
-        // Simple dummy packet
-        const NUM_BYTES: usize = 8;
-        let mut packet = Packet::default();
-        packet.populate_packet(None, &[0u8; NUM_BYTES]).unwrap();
-        packet.meta_mut().set_simple_vote(true);
-        packet.meta_mut().set_from_staked_node(true);
+        const DUMMY_PACKET_SIZE: usize = 8;
+        let create_banking_packet_batch = |flags| {
+            BankingPacketBatch::new((
+                vec![PacketBatch::new(vec![create_dummy_packet(
+                    DUMMY_PACKET_SIZE,
+                    flags,
+                )])],
+                None,
+            ))
+        };
 
         socket
             .set_read_timeout(Some(Duration::from_millis(10)))
@@ -178,7 +210,7 @@ mod tests {
         // Data Budget is 0, so no packets should be sent
         for tpu_vote in [false, true] {
             forwarding_stage.forward_batches(
-                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                create_banking_packet_batch(PacketFlags::FROM_STAKED_NODE),
                 tpu_vote,
                 addr,
             );
@@ -189,17 +221,16 @@ mod tests {
             // Packet is valid, so it should be sent
             forwarding_stage.update_data_budget();
             forwarding_stage.forward_batches(
-                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                create_banking_packet_batch(PacketFlags::FROM_STAKED_NODE),
                 tpu_vote,
                 addr,
             );
-            assert_eq!(socket.recv_from(recv_buffer).unwrap().0, NUM_BYTES);
+            assert_eq!(socket.recv_from(recv_buffer).unwrap().0, DUMMY_PACKET_SIZE,);
 
             // Packet is marked for discard, so it should not be sent
             forwarding_stage.update_data_budget();
-            packet.meta_mut().set_discard(true);
             forwarding_stage.forward_batches(
-                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                create_banking_packet_batch(PacketFlags::FROM_STAKED_NODE | PacketFlags::DISCARD),
                 tpu_vote,
                 addr,
             );
@@ -207,10 +238,8 @@ mod tests {
 
             // Packet is not from staked node, so it should not be sent
             forwarding_stage.update_data_budget();
-            packet.meta_mut().set_discard(false);
-            packet.meta_mut().set_from_staked_node(false);
             forwarding_stage.forward_batches(
-                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                create_banking_packet_batch(PacketFlags::empty()),
                 tpu_vote,
                 addr,
             );
@@ -218,10 +247,8 @@ mod tests {
 
             // Packet is already forwarded, so it should not be sent
             forwarding_stage.update_data_budget();
-            packet.meta_mut().set_from_staked_node(true);
-            packet.meta_mut().flags |= PacketFlags::FORWARDED;
             forwarding_stage.forward_batches(
-                BankingPacketBatch::new((vec![PacketBatch::new(vec![packet.clone()])], None)),
+                create_banking_packet_batch(PacketFlags::FROM_STAKED_NODE | PacketFlags::FORWARDED),
                 tpu_vote,
                 addr,
             );
@@ -230,5 +257,58 @@ mod tests {
     }
 
     #[test]
-    fn handle_batches() {}
+    fn test_handle_batches() {
+        let vote_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let non_vote_socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+
+        let (_sender, receiver) = crossbeam_channel::unbounded();
+        let dummy_forward_address_getter = DummyForwardAddressGetter {
+            vote_addr: vote_socket.local_addr().unwrap(),
+            non_vote_addr: non_vote_socket.local_addr().unwrap(),
+        };
+        let connection_cache = ConnectionCache::with_udp("connection_cache_test", 1);
+
+        let forwarding_stage = ForwardingStage::new(
+            receiver,
+            dummy_forward_address_getter,
+            Arc::new(connection_cache),
+        );
+
+        // packet sizes should be unique and paired with
+        // `expected_received` below so we can verify the correct packets
+        // were forwarded.
+        let banking_packet_batches = BankingPacketBatch::new((
+            vec![
+                PacketBatch::new(vec![
+                    create_dummy_packet(1, PacketFlags::empty()), // invalid
+                    create_dummy_packet(2, PacketFlags::FROM_STAKED_NODE), // valid
+                    create_dummy_packet(3, PacketFlags::DISCARD), // invalid
+                    create_dummy_packet(4, PacketFlags::FORWARDED), // invalid
+                ]),
+                PacketBatch::new(vec![
+                    create_dummy_packet(5, PacketFlags::FROM_STAKED_NODE), // valid
+                    create_dummy_packet(6, PacketFlags::DISCARD),          // invalid
+                    create_dummy_packet(7, PacketFlags::FROM_STAKED_NODE), // valid
+                    create_dummy_packet(8, PacketFlags::FORWARDED),        // invalid
+                    create_dummy_packet(9, PacketFlags::FROM_STAKED_NODE | PacketFlags::DISCARD), // invalid
+                ]),
+            ],
+            None,
+        ));
+        let expected_received = [2, 5, 7];
+
+        let recv_buffer = &mut [0; 1024];
+        for (is_tpu_vote, socket) in [(true, vote_socket), (false, non_vote_socket)] {
+            socket
+                .set_read_timeout(Some(Duration::from_millis(10)))
+                .unwrap();
+
+            forwarding_stage.handle_batches(banking_packet_batches.clone(), is_tpu_vote);
+
+            for expected_size in &expected_received {
+                assert_eq!(socket.recv_from(recv_buffer).unwrap().0, *expected_size);
+            }
+            assert!(socket.recv_from(recv_buffer).is_err()); // nothing more to receive
+        }
+    }
 }
