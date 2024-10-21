@@ -40,8 +40,14 @@ fn test_vote_authorize_and_withdraw(compute_unit_price: Option<u64>) {
     config.json_rpc_url = test_validator.rpc_url();
     config.signers = vec![&default_signer];
 
-    request_and_confirm_airdrop(&rpc_client, &config, &config.signers[0].pubkey(), 100_000)
-        .unwrap();
+    let priority_fee = 200_000 * compute_unit_price.unwrap_or(0);
+    request_and_confirm_airdrop(
+        &rpc_client,
+        &config,
+        &config.signers[0].pubkey(),
+        100_000 + priority_fee,
+    )
+    .unwrap();
 
     // Create vote account
     let vote_account_keypair = Keypair::new();
