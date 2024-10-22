@@ -55,7 +55,6 @@ pub enum TransactionLoadResult {
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct CheckedTransactionDetails {
     pub nonce: Option<NonceInfo>,
-    pub lamports_per_signature: u64,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]

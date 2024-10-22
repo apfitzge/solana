@@ -214,7 +214,6 @@ impl TransactionBatchItem {
         Self {
             check_result: Ok(CheckedTransactionDetails {
                 nonce: Some(nonce_info),
-                lamports_per_signature: LAMPORTS_PER_SIGNATURE,
             }),
             ..Self::default()
         }
@@ -225,10 +224,7 @@ impl Default for TransactionBatchItem {
     fn default() -> Self {
         Self {
             transaction: Transaction::default(),
-            check_result: Ok(CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature: LAMPORTS_PER_SIGNATURE,
-            }),
+            check_result: Ok(CheckedTransactionDetails { nonce: None }),
             asserts: TransactionBatchItemAsserts::default(),
         }
     }
@@ -1187,10 +1183,7 @@ fn svm_inspect_account() {
         Hash::default(),
     );
     let sanitized_transaction = SanitizedTransaction::from_transaction_for_tests(transaction);
-    let transaction_check = Ok(CheckedTransactionDetails {
-        nonce: None,
-        lamports_per_signature: 20,
-    });
+    let transaction_check = Ok(CheckedTransactionDetails { nonce: None });
 
     // Load and execute the transaction
 
@@ -1289,10 +1282,7 @@ fn svm_inspect_account() {
         Hash::default(),
     );
     let sanitized_transaction = SanitizedTransaction::from_transaction_for_tests(transaction);
-    let transaction_check = Ok(CheckedTransactionDetails {
-        nonce: None,
-        lamports_per_signature: 20,
-    });
+    let transaction_check = Ok(CheckedTransactionDetails { nonce: None });
 
     // Load and execute the second transaction
     let _result = batch_processor.load_and_execute_sanitized_transactions(

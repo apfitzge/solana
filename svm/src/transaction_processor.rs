@@ -467,10 +467,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         )
         .rent_amount;
 
-        let CheckedTransactionDetails {
-            nonce,
-            lamports_per_signature: _,
-        } = checked_details;
+        let CheckedTransactionDetails { nonce } = checked_details;
 
         let fee_budget_limits = FeeBudgetLimits::from(compute_budget_limits);
         let fee_details = solana_fee::calculate_fee_details(
@@ -1906,10 +1903,7 @@ mod tests {
             &mock_bank,
             None,
             &message,
-            CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature,
-            },
+            CheckedTransactionDetails { nonce: None },
             &FeatureSet::default(),
             &FeeStructure::default(),
             &rent_collector,
@@ -1984,10 +1978,7 @@ mod tests {
             &mock_bank,
             None,
             &message,
-            CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature,
-            },
+            CheckedTransactionDetails { nonce: None },
             &FeatureSet::default(),
             &FeeStructure::default(),
             &rent_collector,
@@ -2024,7 +2015,6 @@ mod tests {
 
     #[test]
     fn test_validate_transaction_fee_payer_not_found() {
-        let lamports_per_signature = 5000;
         let message =
             new_unchecked_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
 
@@ -2035,10 +2025,7 @@ mod tests {
             &mock_bank,
             None,
             &message,
-            CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature,
-            },
+            CheckedTransactionDetails { nonce: None },
             &FeatureSet::default(),
             &FeeStructure::default(),
             &RentCollector::default(),
@@ -2051,7 +2038,6 @@ mod tests {
 
     #[test]
     fn test_validate_transaction_fee_payer_insufficient_funds() {
-        let lamports_per_signature = 5000;
         let message =
             new_unchecked_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
         let fee_payer_address = message.fee_payer();
@@ -2069,10 +2055,7 @@ mod tests {
             &mock_bank,
             None,
             &message,
-            CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature,
-            },
+            CheckedTransactionDetails { nonce: None },
             &FeatureSet::default(),
             &FeeStructure::default(),
             &RentCollector::default(),
@@ -2107,10 +2090,7 @@ mod tests {
             &mock_bank,
             None,
             &message,
-            CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature,
-            },
+            CheckedTransactionDetails { nonce: None },
             &FeatureSet::default(),
             &FeeStructure::default(),
             &rent_collector,
@@ -2125,7 +2105,6 @@ mod tests {
 
     #[test]
     fn test_validate_transaction_fee_payer_invalid() {
-        let lamports_per_signature = 5000;
         let message =
             new_unchecked_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
         let fee_payer_address = message.fee_payer();
@@ -2143,10 +2122,7 @@ mod tests {
             &mock_bank,
             None,
             &message,
-            CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature,
-            },
+            CheckedTransactionDetails { nonce: None },
             &FeatureSet::default(),
             &FeeStructure::default(),
             &RentCollector::default(),
@@ -2159,7 +2135,6 @@ mod tests {
 
     #[test]
     fn test_validate_transaction_fee_payer_invalid_compute_budget() {
-        let lamports_per_signature = 5000;
         let message = new_unchecked_sanitized_message(Message::new(
             &[
                 ComputeBudgetInstruction::set_compute_unit_limit(2000u32),
@@ -2175,10 +2150,7 @@ mod tests {
             &mock_bank,
             None,
             &message,
-            CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature,
-            },
+            CheckedTransactionDetails { nonce: None },
             &FeatureSet::default(),
             &FeeStructure::default(),
             &RentCollector::default(),
@@ -2244,7 +2216,6 @@ mod tests {
                 &message,
                 CheckedTransactionDetails {
                     nonce: nonce.clone(),
-                    lamports_per_signature,
                 },
                 &feature_set,
                 &FeeStructure::default(),
@@ -2304,10 +2275,7 @@ mod tests {
                 &mock_bank,
                 None,
                 &message,
-                CheckedTransactionDetails {
-                    nonce: None,
-                    lamports_per_signature,
-                },
+                CheckedTransactionDetails { nonce: None },
                 &feature_set,
                 &FeeStructure::default(),
                 &rent_collector,
@@ -2358,10 +2326,7 @@ mod tests {
             &mock_bank,
             Some(&account_overrides),
             &message,
-            CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature,
-            },
+            CheckedTransactionDetails { nonce: None },
             &FeatureSet::default(),
             &FeeStructure::default(),
             &rent_collector,
@@ -2406,10 +2371,7 @@ mod tests {
                 &mock_bank,
                 None,
                 &message,
-                CheckedTransactionDetails {
-                    nonce: None,
-                    lamports_per_signature: 5000,
-                },
+                CheckedTransactionDetails { nonce: None },
                 &FeatureSet::default(),
                 &FeeStructure::default(),
                 &RentCollector::default(),

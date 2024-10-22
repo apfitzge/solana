@@ -230,10 +230,7 @@ fn run_fixture(fixture: InstrFixture, filename: OsString, execute_as_instr: bool
     };
 
     let transactions = vec![transaction];
-    let transaction_check = vec![Ok(CheckedTransactionDetails {
-        nonce: None,
-        lamports_per_signature: 30,
-    })];
+    let transaction_check = vec![Ok(CheckedTransactionDetails { nonce: None })];
 
     let compute_budget = ComputeBudget {
         compute_unit_limit: input.cu_avail,

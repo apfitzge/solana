@@ -2566,43 +2566,22 @@ mod tests {
             Consumer::filter_valid_transaction_indexes(&[
                 Err(TransactionError::BlockhashNotFound),
                 Err(TransactionError::BlockhashNotFound),
-                Ok(CheckedTransactionDetails {
-                    nonce: None,
-                    lamports_per_signature: 0
-                }),
+                Ok(CheckedTransactionDetails { nonce: None }),
                 Err(TransactionError::BlockhashNotFound),
-                Ok(CheckedTransactionDetails {
-                    nonce: None,
-                    lamports_per_signature: 0
-                }),
-                Ok(CheckedTransactionDetails {
-                    nonce: None,
-                    lamports_per_signature: 0
-                }),
+                Ok(CheckedTransactionDetails { nonce: None }),
+                Ok(CheckedTransactionDetails { nonce: None }),
             ]),
             [2, 4, 5]
         );
 
         assert_eq!(
             Consumer::filter_valid_transaction_indexes(&[
-                Ok(CheckedTransactionDetails {
-                    nonce: None,
-                    lamports_per_signature: 0,
-                }),
+                Ok(CheckedTransactionDetails { nonce: None }),
                 Err(TransactionError::BlockhashNotFound),
                 Err(TransactionError::BlockhashNotFound),
-                Ok(CheckedTransactionDetails {
-                    nonce: None,
-                    lamports_per_signature: 0,
-                }),
-                Ok(CheckedTransactionDetails {
-                    nonce: None,
-                    lamports_per_signature: 0,
-                }),
-                Ok(CheckedTransactionDetails {
-                    nonce: None,
-                    lamports_per_signature: 0,
-                }),
+                Ok(CheckedTransactionDetails { nonce: None }),
+                Ok(CheckedTransactionDetails { nonce: None }),
+                Ok(CheckedTransactionDetails { nonce: None }),
             ]),
             [0, 3, 4, 5]
         );
