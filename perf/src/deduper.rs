@@ -64,7 +64,6 @@ impl<const K: usize, T: ?Sized + Hash> Deduper<K, T> {
 
     // Returns true if the data is duplicate.
     #[must_use]
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn dedup(&self, data: &T) -> bool {
         let hashes = self
             .state
@@ -81,6 +80,7 @@ impl<const K: usize, T: ?Sized + Hash> Deduper<K, T> {
     // inconsistent between machines. This method allows tests to provide
     // consistent "hashed" values that get inserted into the data-structure,
     // so that they may assert the expected behavior
+    #[allow(clippy::arithmetic_side_effects)]
     fn dedup_hashed(&self, hashes: impl ExactSizeIterator<Item = u64>) -> bool {
         let mut out = true;
         for hash in hashes {
