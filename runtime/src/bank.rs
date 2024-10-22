@@ -3196,6 +3196,12 @@ impl Bank {
     }
 
     pub fn get_fee_for_message(&self, message: &SanitizedMessage) -> Option<u64> {
+        // It used to be required to get the lamports_per_signature from the
+        // blockhash_queue, which had the added benefit of ensuring that the
+        // transaction or nonce is not expired.
+        // This is no longer strictly required, but RPC users may have relied
+        // on this behavior. So even though the value is not used, we still
+        // fetch it to keep behavior consistent.
         let _lamports_per_signature = {
             let blockhash_queue = self.blockhash_queue.read().unwrap();
             blockhash_queue.get_lamports_per_signature(message.recent_blockhash())
