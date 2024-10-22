@@ -3186,15 +3186,6 @@ impl Bank {
         self.rent_collector.rent.minimum_balance(data_len).max(1)
     }
 
-    pub fn get_lamports_per_signature(&self) -> u64 {
-        self.fee_rate_governor.lamports_per_signature
-    }
-
-    pub fn get_lamports_per_signature_for_blockhash(&self, hash: &Hash) -> Option<u64> {
-        let blockhash_queue = self.blockhash_queue.read().unwrap();
-        blockhash_queue.get_lamports_per_signature(hash)
-    }
-
     pub fn get_fee_for_message(&self, message: &SanitizedMessage) -> Option<u64> {
         // It used to be required to get the lamports_per_signature from the
         // blockhash_queue, which had the added benefit of ensuring that the
