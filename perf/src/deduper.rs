@@ -134,6 +134,9 @@ mod tests {
     use {
         super::*,
         crate::{packet::to_packet_batches, sigverify, test_tx::test_tx},
+        rand::SeedableRng,
+        rand_chacha::ChaChaRng,
+        solana_sdk::packet::{Meta, PACKET_DATA_SIZE},
         test_case::test_case,
     };
 
@@ -249,6 +252,34 @@ mod tests {
         assert!(deduper.maybe_reset(
             &mut rng,
             false_positive_rate,
+            Duration::from_millis(0), // reset_cycle
+        ));
+    }
+
+    #[test_case([0xf9; 32],  3_199_997, 101_192,  51_414)]
+    #[test_case([0xdc; 32],  3_200_003, 101_192,  51_414)]
+    #[test_case([0xa5; 32],  6_399_971, 202_384, 102_828)]
+    #[test_case([0xdb; 32],  6_400_013, 202_386, 102_828)]
+    #[test_case([0xcd; 32], 12_799_987, 404_771, 205_655)]
+    #[test_case([0xc3; 32], 12_800_009, 404_771, 205_656)]
+    fn test_dedup_seeded(seed: [u8; 32], num_bits: u64, capacity: u64, num_packets: usize) {
+        const FALSE_POSITIVE_RATE: f64 = 0.001;
+        let mut rng = ChaChaRng::from_seed(seed);
+        let mut deduper = Deduper::<2, [u8]>::new(&mut rng, num_bits);
+        assert_eq!(get_capacity::<2>(num_bits, FALSE_POSITIVE_RATE), capacity);
+        let mut packet = Packet::new([0u8; PACKET_DATA_SIZE], Meta::default());
+        for _ in 0..num_packets {
+            let size = rng.gen_range(0..PACKET_DATA_SIZE);
+            packet.meta_mut().size = size;
+            rng.fill(&mut packet.buffer_mut()[0..size]);
+
+            let _ = deduper.dedup(packet.data(..).unwrap());
+            assert!(deduper.dedup(packet.data(..).unwrap()));
+        }
+        assert!(deduper.false_positive_rate() < FALSE_POSITIVE_RATE);
+        assert!(!deduper.maybe_reset(
+            &mut rng,
+            FALSE_POSITIVE_RATE,
             Duration::from_millis(0), // reset_cycle
         ));
     }
