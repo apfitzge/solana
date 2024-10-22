@@ -66,19 +66,34 @@ impl<const K: usize, T: ?Sized + Hash> Deduper<K, T> {
     #[must_use]
     #[allow(clippy::arithmetic_side_effects)]
     pub fn dedup(&self, data: &T) -> bool {
+        let hashes = self
+            .state
+            .iter()
+            .map(RandomState::build_hasher)
+            .map(|mut hasher| {
+                data.hash(&mut hasher);
+                hasher.finish()
+            });
+        self.dedup_hashed(hashes)
+    }
+
+    // `Deduper` is a probabilistic data structure, and hashing may be
+    // inconsistent between machines. This method allows tests to provide
+    // consistent "hashed" values that get inserted into the data-structure,
+    // so that they may assert the expected behavior
+    fn dedup_hashed(&self, hashes: impl ExactSizeIterator<Item = u64>) -> bool {
         let mut out = true;
-        let hashers = self.state.iter().map(RandomState::build_hasher);
-        for mut hasher in hashers {
-            data.hash(&mut hasher);
-            let hash: u64 = hasher.finish() % self.num_bits;
-            let index = (hash >> 6) as usize;
-            let mask: u64 = 1u64 << (hash & 63);
+        for hash in hashes {
+            let mod_hash = hash % self.num_bits;
+            let index = (mod_hash >> 6) as usize;
+            let mask: u64 = 1u64 << (mod_hash & 63);
             let old = self.bits[index].fetch_or(mask, Ordering::Relaxed);
             if old & mask == 0u64 {
                 self.popcount.fetch_add(1, Ordering::Relaxed);
                 out = false;
             }
         }
+
         out
     }
 }
@@ -241,42 +256,19 @@ mod tests {
         ));
     }
 
-    #[test_case([0xf9; 32],  3_199_997, 101_192,  51_414,  77, 101_083)]
-    #[test_case([0xdc; 32],  3_200_003, 101_192,  51_414,  64, 101_097)]
-    #[test_case([0xa5; 32],  6_399_971, 202_384, 102_828, 117, 202_257)]
-    #[test_case([0xdb; 32],  6_400_013, 202_386, 102_828, 135, 202_254)]
-    #[test_case([0xcd; 32], 12_799_987, 404_771, 205_655, 273, 404_521)]
-    #[test_case([0xc3; 32], 12_800_009, 404_771, 205_656, 283, 404_365)]
-    fn test_dedup_seeded(
-        seed: [u8; 32],
-        num_bits: u64,
-        capacity: u64,
-        num_packets: usize,
-        num_dups: usize,
-        popcount: u64,
-    ) {
-        const FALSE_POSITIVE_RATE: f64 = 0.001;
-        let mut rng = ChaChaRng::from_seed(seed);
-        let mut deduper = Deduper::<2, [u8]>::new(&mut rng, num_bits);
-        assert_eq!(get_capacity::<2>(num_bits, FALSE_POSITIVE_RATE), capacity);
-        let mut packet = Packet::new([0u8; PACKET_DATA_SIZE], Meta::default());
-        let mut dup_count = 0usize;
-        for _ in 0..num_packets {
-            let size = rng.gen_range(0..PACKET_DATA_SIZE);
-            packet.meta_mut().size = size;
-            rng.fill(&mut packet.buffer_mut()[0..size]);
-            if deduper.dedup(packet.data(..).unwrap()) {
-                dup_count += 1;
-            }
-            assert!(deduper.dedup(packet.data(..).unwrap()));
+    #[test_case(&[(&[10, 20, 30], false), (&[40, 50, 60], false)], 128, 6; "no_duplicates")]
+    #[test_case(&[(&[1, 2, 3], false), (&[1, 4, 5], false)], 64, 5; "with_some_duplicates")]
+    #[test_case(&[(&[100, 200, 300], false), (&[100, 200, 300], true)], 64, 3; "all_duplicates_in_second_set")]
+    #[test_case(&[(&[100, 200, 300], false), (&[164, 264, 364], true)], 64, 3; "all_duplicates_after_mod")]
+    fn test_dedup_hashed(hashes_and_duplicate: &[(&[u64], bool)], num_bits: u64, popcount: u64) {
+        // rng only used to construct `Deduper`, does not affect test outcomes
+        let mut rng = rand::thread_rng();
+        let deduper = Deduper::<2, [u8]>::new(&mut rng, num_bits);
+
+        for (hashes, is_duplicate) in hashes_and_duplicate {
+            assert_eq!(deduper.dedup_hashed(hashes.iter().copied()), *is_duplicate);
         }
-        assert_eq!(dup_count, num_dups);
+
         assert_eq!(deduper.popcount.load(Ordering::Relaxed), popcount);
-        assert!(deduper.false_positive_rate() < FALSE_POSITIVE_RATE);
-        assert!(!deduper.maybe_reset(
-            &mut rng,
-            FALSE_POSITIVE_RATE,
-            Duration::from_millis(0), // reset_cycle
-        ));
     }
 }
