@@ -1,5 +1,10 @@
 use {
-    crate::compute_budget_instruction_details::*,
+    crate::{
+        compute_budget_instruction_details::*,
+        instruction_processor::{CachedInstructionProcessor, InstructionProcessor},
+        program_id_flags::ProgramIdFlag,
+        signature_details::PrecompileSignatureDetails,
+    },
     solana_compute_budget::compute_budget_limits::*,
     solana_sdk::{pubkey::Pubkey, transaction::TransactionError},
     solana_svm_transaction::instruction::SVMInstruction,
@@ -15,6 +20,36 @@ pub fn process_compute_budget_instructions<'a>(
 ) -> Result<ComputeBudgetLimits, TransactionError> {
     ComputeBudgetInstructionDetails::try_from(instructions)?
         .sanitize_and_convert_to_compute_budget_limits()
+}
+
+type RuntimeTransactionInstructionsProcessor =
+    (PrecompileSignatureDetails, ComputeBudgetInstructionDetails);
+impl InstructionProcessor<ProgramIdFlag> for RuntimeTransactionInstructionsProcessor {
+    type OUTPUT = Self;
+
+    #[inline]
+    fn process_instruction(
+        &mut self,
+        flag: &ProgramIdFlag,
+        instruction_index: usize,
+        instruction: &SVMInstruction,
+    ) -> Result<(), TransactionError> {
+        let (signature_details, compute_budget_details) = self;
+        signature_details.process_instruction(&flag.into(), instruction_index, instruction)?;
+        compute_budget_details.process_instruction(&flag.into(), instruction_index, instruction)
+    }
+
+    fn finalize(self) -> Self::OUTPUT {
+        self
+    }
+}
+
+pub(crate) fn get_instruction_details<'a>(
+    instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)>,
+) -> Result<RuntimeTransactionInstructionsProcessor, TransactionError> {
+    CachedInstructionProcessor::<ProgramIdFlag, RuntimeTransactionInstructionsProcessor>::default()
+        .process_instructions(instructions)
+        .map(|processor| processor.finalize())
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use {
 /// Top-level program id flags.
 /// The main checking point is done with this enum, and for individual
 /// processors, the flags are converted to specific sub-enums.
+#[derive(Clone)]
 pub enum ProgramIdFlag {
     NoMatch,
     Secp256k1,
@@ -26,6 +27,14 @@ impl From<&Pubkey> for ProgramIdFlag {
         } else {
             Self::NoMatch
         }
+    }
+}
+
+/// Self translation for [ProgramIdFlag].
+impl From<&ProgramIdFlag> for ProgramIdFlag {
+    #[inline]
+    fn from(flag: &ProgramIdFlag) -> Self {
+        flag.clone()
     }
 }
 

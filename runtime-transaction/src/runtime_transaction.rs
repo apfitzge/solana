@@ -12,7 +12,7 @@
 use {
     crate::{
         compute_budget_instruction_details::*,
-        signature_details::get_precompile_signature_details,
+        instructions_processor::get_instruction_details,
         transaction_meta::{DynamicMeta, StaticMeta, TransactionMeta},
     },
     core::ops::Deref,
@@ -85,12 +85,14 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
         let is_simple_vote_tx = is_simple_vote_tx
             .unwrap_or_else(|| is_simple_vote_transaction(&sanitized_versioned_tx));
 
-        let precompile_signature_details = get_precompile_signature_details(
-            sanitized_versioned_tx
-                .get_message()
-                .program_instructions_iter()
-                .map(|(program_id, ix)| (program_id, SVMInstruction::from(ix))),
-        );
+        let (precompile_signature_details, compute_budget_instruction_details) =
+            get_instruction_details(
+                sanitized_versioned_tx
+                    .get_message()
+                    .program_instructions_iter()
+                    .map(|(program_id, ix)| (program_id, SVMInstruction::from(ix))),
+            )?;
+
         let signature_details = TransactionSignatureDetails::new(
             u64::from(
                 sanitized_versioned_tx
@@ -102,12 +104,6 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
             precompile_signature_details.num_secp256k1_instruction_signatures,
             precompile_signature_details.num_ed25519_instruction_signatures,
         );
-        let compute_budget_instruction_details = ComputeBudgetInstructionDetails::try_from(
-            sanitized_versioned_tx
-                .get_message()
-                .program_instructions_iter()
-                .map(|(program_id, ix)| (program_id, SVMInstruction::from(ix))),
-        )?;
 
         Ok(Self {
             transaction: sanitized_versioned_tx,
