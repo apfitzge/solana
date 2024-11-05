@@ -30,6 +30,7 @@ impl<T, P> Default for CachedInstructionProcessor<T, P>
 where
     P: InstructionProcessor<T> + Default,
 {
+    #[inline]
     fn default() -> Self {
         Self {
             flags: core::array::from_fn(|_| None),
@@ -43,6 +44,7 @@ where
     T: for<'k> From<&'k ProgramIdFlag>,
     P: InstructionProcessor<T>,
 {
+    #[inline]
     pub fn process_instructions<'b>(
         mut self,
         instructions: impl Iterator<Item = (&'b Pubkey, SVMInstruction<'b>)>,

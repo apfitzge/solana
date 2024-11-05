@@ -32,6 +32,7 @@ pub(crate) struct ComputeBudgetInstructionDetails {
 impl InstructionProcessor<ComputeBudgetFlag> for ComputeBudgetInstructionDetails {
     type OUTPUT = Self;
 
+    #[inline]
     fn process_instruction(
         &mut self,
         flag: &ComputeBudgetFlag,
@@ -82,6 +83,7 @@ impl InstructionProcessor<ComputeBudgetFlag> for ComputeBudgetInstructionDetails
         Ok(())
     }
 
+    #[inline(always)]
     fn finalize(self) -> Self::OUTPUT {
         self
     }

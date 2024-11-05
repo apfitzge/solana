@@ -17,6 +17,7 @@ pub struct PrecompileSignatureDetails {
 impl InstructionProcessor<SignatureDetailsFlag> for PrecompileSignatureDetails {
     type OUTPUT = Self;
 
+    #[inline]
     fn process_instruction(
         &mut self,
         flag: &SignatureDetailsFlag,
@@ -42,6 +43,7 @@ impl InstructionProcessor<SignatureDetailsFlag> for PrecompileSignatureDetails {
         Ok(())
     }
 
+    #[inline(always)]
     fn finalize(self) -> Self::OUTPUT {
         self
     }

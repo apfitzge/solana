@@ -17,11 +17,11 @@ pub enum ProgramIdFlag {
 impl From<&Pubkey> for ProgramIdFlag {
     #[inline]
     fn from(program_id: &Pubkey) -> Self {
-        if secp256k1_program::check_id(program_id) {
+        if program_id == &secp256k1_program::ID {
             Self::Secp256k1
-        } else if ed25519_program::check_id(program_id) {
+        } else if program_id == &ed25519_program::ID {
             Self::Ed25519
-        } else if compute_budget::check_id(program_id) {
+        } else if program_id == &compute_budget::ID {
             Self::ComputeBudgetProgram
         } else {
             Self::NoMatch
