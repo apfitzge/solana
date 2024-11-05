@@ -3,8 +3,9 @@
 
 mod compute_budget_instruction_details;
 mod compute_budget_program_id_filter;
-pub mod instruction_processor_chain;
+mod instruction_processor;
 pub mod instructions_processor;
+mod program_id_flags;
 pub mod runtime_transaction;
 pub mod signature_details;
 pub mod svm_transaction_adapter;
