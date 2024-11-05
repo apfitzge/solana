@@ -19,11 +19,11 @@ use {
 pub(crate) struct ComputeBudgetInstructionDetails {
     // compute-budget instruction details:
     // the first field in tuple is instruction index, second field is the unsanitized value set by user
-    requested_compute_unit_limit: Option<(u8, u32)>,
-    requested_compute_unit_price: Option<(u8, u64)>,
-    requested_heap_size: Option<(u8, u32)>,
-    requested_loaded_accounts_data_size_limit: Option<(u8, u32)>,
-    num_non_compute_budget_instructions: u32,
+    pub(crate) requested_compute_unit_limit: Option<(u8, u32)>,
+    pub(crate) requested_compute_unit_price: Option<(u8, u64)>,
+    pub(crate) requested_heap_size: Option<(u8, u32)>,
+    pub(crate) requested_loaded_accounts_data_size_limit: Option<(u8, u32)>,
+    pub(crate) num_non_compute_budget_instructions: u32,
 }
 
 impl ComputeBudgetInstructionDetails {
@@ -101,7 +101,11 @@ impl ComputeBudgetInstructionDetails {
         })
     }
 
-    fn process_instruction(&mut self, index: u8, instruction: &SVMInstruction) -> Result<()> {
+    pub(crate) fn process_instruction(
+        &mut self,
+        index: u8,
+        instruction: &SVMInstruction,
+    ) -> Result<()> {
         let invalid_instruction_data_error =
             TransactionError::InstructionError(index, InstructionError::InvalidInstructionData);
         let duplicate_instruction_error = TransactionError::DuplicateInstruction(index);

@@ -4,6 +4,7 @@ use {
     solana_pubkey::Pubkey, solana_svm_transaction::instruction::SVMInstruction,
 };
 
+#[derive(Default)]
 pub struct PrecompileSignatureDetails {
     pub num_secp256k1_instruction_signatures: u64,
     pub num_ed25519_instruction_signatures: u64,
