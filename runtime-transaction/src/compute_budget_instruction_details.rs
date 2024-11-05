@@ -1,5 +1,8 @@
 use {
-    crate::compute_budget_program_id_filter::ComputeBudgetProgramIdFilter,
+    crate::{
+        instruction_processor::{CachedInstructionProcessor, InstructionProcessor},
+        program_id_flags::ComputeBudgetFlag,
+    },
     solana_compute_budget::compute_budget_limits::*,
     solana_sdk::{
         borsh1::try_from_slice_unchecked,
@@ -26,25 +29,71 @@ pub(crate) struct ComputeBudgetInstructionDetails {
     pub(crate) num_non_compute_budget_instructions: u32,
 }
 
+impl InstructionProcessor<ComputeBudgetFlag> for ComputeBudgetInstructionDetails {
+    type OUTPUT = Self;
+
+    fn process_instruction(
+        &mut self,
+        flag: &ComputeBudgetFlag,
+        instruction_index: usize,
+        instruction: &SVMInstruction,
+    ) -> std::result::Result<(), TransactionError> {
+        if matches!(flag, ComputeBudgetFlag::NoMatch) {
+            saturating_add_assign!(self.num_non_compute_budget_instructions, 1);
+            return Ok(());
+        }
+
+        // bad casting with assumption of instruction_index < 256
+        let instruction_index = instruction_index as u8;
+        let invalid_instruction_data_error = TransactionError::InstructionError(
+            instruction_index,
+            InstructionError::InvalidInstructionData,
+        );
+        let duplicate_instruction_error = TransactionError::DuplicateInstruction(instruction_index);
+
+        match try_from_slice_unchecked(instruction.data) {
+            Ok(ComputeBudgetInstruction::RequestHeapFrame(bytes)) => {
+                if self.requested_heap_size.is_some() {
+                    return Err(duplicate_instruction_error);
+                }
+                self.requested_heap_size = Some((instruction_index, bytes));
+            }
+            Ok(ComputeBudgetInstruction::SetComputeUnitLimit(compute_unit_limit)) => {
+                if self.requested_compute_unit_limit.is_some() {
+                    return Err(duplicate_instruction_error);
+                }
+                self.requested_compute_unit_limit = Some((instruction_index, compute_unit_limit));
+            }
+            Ok(ComputeBudgetInstruction::SetComputeUnitPrice(micro_lamports)) => {
+                if self.requested_compute_unit_price.is_some() {
+                    return Err(duplicate_instruction_error);
+                }
+                self.requested_compute_unit_price = Some((instruction_index, micro_lamports));
+            }
+            Ok(ComputeBudgetInstruction::SetLoadedAccountsDataSizeLimit(bytes)) => {
+                if self.requested_loaded_accounts_data_size_limit.is_some() {
+                    return Err(duplicate_instruction_error);
+                }
+                self.requested_loaded_accounts_data_size_limit = Some((instruction_index, bytes));
+            }
+            _ => return Err(invalid_instruction_data_error),
+        }
+
+        Ok(())
+    }
+
+    fn finalize(self) -> Self::OUTPUT {
+        self
+    }
+}
+
 impl ComputeBudgetInstructionDetails {
     pub fn try_from<'a>(
         instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)>,
     ) -> Result<Self> {
-        let mut filter = ComputeBudgetProgramIdFilter::new();
-
-        let mut compute_budget_instruction_details = ComputeBudgetInstructionDetails::default();
-        for (i, (program_id, instruction)) in instructions.enumerate() {
-            if filter.is_compute_budget_program(instruction.program_id_index as usize, program_id) {
-                compute_budget_instruction_details.process_instruction(i as u8, &instruction)?;
-            } else {
-                saturating_add_assign!(
-                    compute_budget_instruction_details.num_non_compute_budget_instructions,
-                    1
-                );
-            }
-        }
-
-        Ok(compute_budget_instruction_details)
+        CachedInstructionProcessor::<ComputeBudgetFlag, Self>::default()
+            .process_instructions(instructions)
+            .map(|processor| processor.finalize())
     }
 
     pub fn sanitize_and_convert_to_compute_budget_limits(&self) -> Result<ComputeBudgetLimits> {
@@ -99,46 +148,6 @@ impl ComputeBudgetInstructionDetails {
             compute_unit_price,
             loaded_accounts_bytes,
         })
-    }
-
-    pub(crate) fn process_instruction(
-        &mut self,
-        index: u8,
-        instruction: &SVMInstruction,
-    ) -> Result<()> {
-        let invalid_instruction_data_error =
-            TransactionError::InstructionError(index, InstructionError::InvalidInstructionData);
-        let duplicate_instruction_error = TransactionError::DuplicateInstruction(index);
-
-        match try_from_slice_unchecked(instruction.data) {
-            Ok(ComputeBudgetInstruction::RequestHeapFrame(bytes)) => {
-                if self.requested_heap_size.is_some() {
-                    return Err(duplicate_instruction_error);
-                }
-                self.requested_heap_size = Some((index, bytes));
-            }
-            Ok(ComputeBudgetInstruction::SetComputeUnitLimit(compute_unit_limit)) => {
-                if self.requested_compute_unit_limit.is_some() {
-                    return Err(duplicate_instruction_error);
-                }
-                self.requested_compute_unit_limit = Some((index, compute_unit_limit));
-            }
-            Ok(ComputeBudgetInstruction::SetComputeUnitPrice(micro_lamports)) => {
-                if self.requested_compute_unit_price.is_some() {
-                    return Err(duplicate_instruction_error);
-                }
-                self.requested_compute_unit_price = Some((index, micro_lamports));
-            }
-            Ok(ComputeBudgetInstruction::SetLoadedAccountsDataSizeLimit(bytes)) => {
-                if self.requested_loaded_accounts_data_size_limit.is_some() {
-                    return Err(duplicate_instruction_error);
-                }
-                self.requested_loaded_accounts_data_size_limit = Some((index, bytes));
-            }
-            _ => return Err(invalid_instruction_data_error),
-        }
-
-        Ok(())
     }
 
     fn sanitize_requested_heap_size(bytes: u32) -> bool {
