@@ -4,14 +4,16 @@ use {
         signature_details::get_precompile_signature_details, transaction_meta::TransactionMeta,
     },
     agave_transaction_view::{
-        transaction_data::TransactionData, transaction_version::TransactionVersion,
-        transaction_view::SanitizedTransactionView,
+        resolved_transaction_view::ResolvedTransactionView, transaction_data::TransactionData,
+        transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
     },
+    solana_pubkey::Pubkey,
     solana_sdk::{
-        message::{TransactionSignatureDetails, VersionedMessage},
+        message::{v0::LoadedAddresses, TransactionSignatureDetails, VersionedMessage},
         simple_vote_transaction_checker::is_simple_vote_transaction_impl,
-        transaction::{MessageHash, Result},
+        transaction::{MessageHash, Result, TransactionError},
     },
+    std::collections::HashSet,
 };
 
 fn is_simple_vote_transaction<D: TransactionData>(
@@ -58,5 +60,33 @@ impl<D: TransactionData> RuntimeTransaction<SanitizedTransactionView<D>> {
                 compute_budget_instruction_details,
             },
         })
+    }
+}
+
+impl<D: TransactionData> RuntimeTransaction<ResolvedTransactionView<D>> {
+    /// Create a new `RuntimeTransaction<ResolvedTransactionView>` from a
+    /// `RuntimeTransaction<SanitizedTransactionView>` that already has
+    /// static metadata loaded.
+    pub fn try_from(
+        statically_loaded_runtime_tx: RuntimeTransaction<SanitizedTransactionView<D>>,
+        loaded_addresses: Option<LoadedAddresses>,
+        reserved_account_keys: &HashSet<Pubkey>,
+    ) -> Result<Self> {
+        let RuntimeTransaction { transaction, meta } = statically_loaded_runtime_tx;
+        // transaction-view does not distinguish between different types of errors here.
+        // return generic sanitize failure error here.
+        // these transactions should be immediately dropped, and we generally
+        // will not care about the specific error at this point.
+        let transaction =
+            ResolvedTransactionView::try_new(transaction, loaded_addresses, reserved_account_keys)
+                .map_err(|_| TransactionError::SanitizeFailure)?;
+        let mut tx = Self { transaction, meta };
+        tx.load_dynamic_metadata()?;
+
+        Ok(tx)
+    }
+
+    fn load_dynamic_metadata(&mut self) -> Result<()> {
+        Ok(())
     }
 }
