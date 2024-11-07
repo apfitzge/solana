@@ -31,6 +31,7 @@ use {
 };
 
 mod sdk_transactions;
+mod transaction_view;
 
 #[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
 #[derive(Debug)]
