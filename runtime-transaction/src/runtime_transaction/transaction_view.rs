@@ -90,3 +90,61 @@ impl<D: TransactionData> RuntimeTransaction<ResolvedTransactionView<D>> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use {
+        crate::{runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta},
+        agave_transaction_view::{
+            resolved_transaction_view::ResolvedTransactionView,
+            transaction_view::SanitizedTransactionView,
+        },
+        solana_pubkey::Pubkey,
+        solana_sdk::{
+            hash::Hash,
+            reserved_account_keys::ReservedAccountKeys,
+            signature::Keypair,
+            system_transaction,
+            transaction::{MessageHash, VersionedTransaction},
+        },
+    };
+
+    #[test]
+    fn test_advancing_transaction_type() {
+        // Create serialized simple transfer.
+        let serialized_transaction = {
+            let transaction = VersionedTransaction::from(system_transaction::transfer(
+                &Keypair::new(),
+                &Pubkey::new_unique(),
+                1,
+                Hash::new_unique(),
+            ));
+            bincode::serialize(&transaction).unwrap()
+        };
+
+        let hash = Hash::new_unique();
+        let transaction =
+            SanitizedTransactionView::try_new_sanitized(&serialized_transaction[..]).unwrap();
+        let static_runtime_transaction =
+            RuntimeTransaction::<SanitizedTransactionView<_>>::try_from(
+                transaction,
+                MessageHash::Precomputed(hash),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(hash, *static_runtime_transaction.message_hash());
+        assert!(!static_runtime_transaction.is_simple_vote_transaction());
+
+        let dynamic_runtime_transaction =
+            RuntimeTransaction::<ResolvedTransactionView<_>>::try_from(
+                static_runtime_transaction,
+                None,
+                &ReservedAccountKeys::empty_key_set(),
+            )
+            .unwrap();
+
+        assert_eq!(hash, *dynamic_runtime_transaction.message_hash());
+        assert!(!dynamic_runtime_transaction.is_simple_vote_transaction());
+    }
+}
