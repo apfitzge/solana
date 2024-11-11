@@ -54,42 +54,21 @@ fn read_entry_header(entry_data: &mut impl EntryData) -> Result<(u64, Hash, u64)
     // Read the header without checking bounds.
     let (num_hashes, hash, num_transactions) = unsafe {
         let ptr = bytes.as_ptr();
-        read_entry_header_unchecked(ptr)
+        let num_hashes = u64::from_le_bytes(ptr.cast::<[u8; 8]>().read_unaligned());
+        let hash = ptr
+            .add(core::mem::size_of::<u64>())
+            .cast::<Hash>()
+            .read_unaligned();
+        let num_transactions = u64::from_le_bytes(
+            ptr.add(core::mem::size_of::<u64>() + core::mem::size_of::<Hash>())
+                .cast::<[u8; 8]>()
+                .read_unaligned(),
+        );
+        (num_hashes, hash, num_transactions)
     };
     entry_data.advance(HEADER_SIZE);
 
     Ok((num_hashes, hash, num_transactions))
-}
-
-#[cfg(target_endian = "little")]
-#[inline]
-unsafe fn read_entry_header_unchecked(ptr: *const u8) -> (u64, Hash, u64) {
-    let num_hashes = ptr.cast::<u64>().read_unaligned();
-    let hash = ptr
-        .add(core::mem::size_of::<u64>())
-        .cast::<Hash>()
-        .read_unaligned();
-    let num_transactions = ptr
-        .add(core::mem::size_of::<u64>() + core::mem::size_of::<Hash>())
-        .cast::<u64>()
-        .read_unaligned();
-    (num_hashes, hash, num_transactions)
-}
-
-#[cfg(target_endian = "big")]
-#[inline]
-fn read_entry_header_unchecked(ptr: *const u8) -> (u64, Hash, u64) {
-    let num_hashes = u64::from_le_bytes(ptr.cast::<[u8; 8]>().read_unaligned());
-    let hash = ptr
-        .add(core::mem::size_of::<u64>())
-        .cast::<Hash>()
-        .read_unaligned();
-    let num_transactions = u64::from_le_bytes(
-        ptr.add(core::mem::size_of::<u64>() + core::mem::size_of::<Hash>())
-            .cast::<[u8; 8]>()
-            .read_unaligned(),
-    );
-    (num_hashes, hash, num_transactions)
 }
 
 #[inline]
