@@ -280,4 +280,61 @@ mod tests {
         };
         assert!(read_entry(&mut bytes, handle_transaction).is_err());
     }
+
+    #[test]
+    fn test_multiple_entries() {
+        let entries = vec![
+            Entry {
+                num_hashes: 1,
+                hash: Hash::new_unique(),
+                transactions: vec![simple_transfer()],
+            },
+            Entry {
+                num_hashes: 2,
+                hash: Hash::new_unique(),
+                transactions: vec![],
+            },
+            Entry {
+                num_hashes: 3,
+                hash: Hash::new_unique(),
+                transactions: vec![simple_transfer(), simple_transfer()],
+            },
+        ];
+        let mut bytes = Bytes::copy_from_slice(&bincode::serialize(&entries).unwrap());
+
+        // Test type for holding an entry.
+        struct TestEntry {
+            num_hashes: u64,
+            hash: Hash,
+            transactions: Vec<UnsanitizedTransactionView<Bytes>>,
+        }
+
+        // Read the number of entries from the bytes.
+        let num_entries = bincode::deserialize::<u64>(&bytes).unwrap();
+        Buf::advance(&mut bytes, core::mem::size_of::<u64>());
+
+        // Read each entry from the bytes.
+        let mut entries = Vec::new();
+        for _ in 0..num_entries {
+            let mut transactions = Vec::new();
+            let handle_transaction = |tx| {
+                transactions.push(tx);
+            };
+            let (num_hashes, hash, num_transactions) =
+                read_entry(&mut bytes, handle_transaction).unwrap();
+            assert_eq!(num_transactions, transactions.len() as u64);
+            entries.push(TestEntry {
+                num_hashes,
+                hash,
+                transactions,
+            });
+        }
+
+        // Verify the entries.
+        for (entry, test_entry) in entries.iter().zip(entries.iter()) {
+            assert_eq!(entry.num_hashes, test_entry.num_hashes);
+            assert_eq!(entry.hash, test_entry.hash);
+            assert_eq!(entry.transactions.len(), test_entry.transactions.len());
+        }
+    }
 }
