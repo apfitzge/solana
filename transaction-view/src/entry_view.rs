@@ -1,10 +1,7 @@
 use {
     crate::{
-        bytes::check_remaining,
-        result::Result,
-        transaction_data::TransactionData,
-        transaction_frame::TransactionFrame,
-        transaction_view::{TransactionView, UnsanitizedTransactionView},
+        bytes::check_remaining, result::Result, transaction_data::TransactionData,
+        transaction_frame::TransactionFrame, transaction_view::UnsanitizedTransactionView,
     },
     bytes::{Buf, Bytes},
     solana_sdk::hash::Hash,
@@ -24,17 +21,24 @@ pub trait EntryData: Clone {
     fn split_to(&mut self, index: usize) -> Self::Tx;
 }
 
+/// Reads an entry from the provided `data`.
+/// The `handle_transaction` closure is called for each transaction in the
+/// entry.
+/// Returns the number of hashes, the hash, and the number of transactions in
+/// the entry.
+/// If the entry, or any transactions within the entry, are invalid, an error
+/// is returned.
 pub fn read_entry<D: EntryData>(
-    mut data: D,
-) -> Result<(
-    u64,
-    Hash,
-    impl ExactSizeIterator<Item = Result<TransactionView<false, D::Tx>>>,
-)> {
-    let (num_hashes, hash, num_transactions) = read_entry_header(&mut data)?;
-    let transactions_iterator =
-        (0..num_transactions as usize).map(move |_| read_transaction_view(&mut data));
-    Ok((num_hashes, hash, transactions_iterator))
+    data: &mut D,
+    mut handle_transaction: impl FnMut(UnsanitizedTransactionView<D::Tx>),
+) -> Result<(u64, Hash, u64)> {
+    let (num_hashes, hash, num_transactions) = read_entry_header(data)?;
+    for _ in 0..num_transactions {
+        let transaction = read_transaction_view(data)?;
+        handle_transaction(transaction);
+    }
+
+    Ok((num_hashes, hash, num_transactions))
 }
 
 /// Read the header information from an entry.
@@ -143,30 +147,45 @@ mod tests {
 
     #[test]
     fn test_incomplete_header() {
-        let bytes = Bytes::copy_from_slice(&[0; 47]);
-        let result = read_entry(bytes);
+        let mut bytes = Bytes::copy_from_slice(&[0; 47]);
+        let mut transactions = Vec::new();
+        let handle_transaction = |tx| {
+            transactions.push(tx);
+        };
+
+        let result = read_entry(&mut bytes, handle_transaction);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_tick_entry() {
-        let (entry, bytes) = create_entry_and_serialize(vec![]);
-        let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
-        let transactions = transactions.collect::<Result<Vec<_>>>().unwrap();
+        let (entry, mut bytes) = create_entry_and_serialize(vec![]);
+        let mut transactions = Vec::new();
+        let handle_transaction = |tx| {
+            transactions.push(tx);
+        };
+        let (num_hashes, hash, num_transactions) =
+            read_entry(&mut bytes, handle_transaction).unwrap();
 
         assert_eq!(num_hashes, entry.num_hashes);
         assert_eq!(hash, entry.hash);
+        assert_eq!(num_transactions, entry.transactions.len() as u64);
         assert_eq!(transactions.len(), entry.transactions.len());
     }
 
     #[test]
     fn test_single_transaction() {
-        let (entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
-        let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
-        let transactions = transactions.collect::<Result<Vec<_>>>().unwrap();
+        let (entry, mut bytes) = create_entry_and_serialize(vec![simple_transfer()]);
+        let mut transactions = Vec::new();
+        let handle_transaction = |tx| {
+            transactions.push(tx);
+        };
+        let (num_hashes, hash, num_transactions) =
+            read_entry(&mut bytes, handle_transaction).unwrap();
 
         assert_eq!(num_hashes, entry.num_hashes);
         assert_eq!(hash, entry.hash);
+        assert_eq!(num_transactions, entry.transactions.len() as u64);
         assert_eq!(transactions.len(), entry.transactions.len());
 
         let transaction = &transactions[0];
@@ -183,16 +202,21 @@ mod tests {
 
     #[test]
     fn test_multiple_transactions() {
-        let (entry, bytes) = create_entry_and_serialize(vec![
+        let (entry, mut bytes) = create_entry_and_serialize(vec![
             simple_transfer(),
             simple_transfer(),
             simple_transfer(),
         ]);
-        let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
-        let transactions = transactions.collect::<Result<Vec<_>>>().unwrap();
+        let mut transactions = Vec::new();
+        let handle_transaction = |tx| {
+            transactions.push(tx);
+        };
+        let (num_hashes, hash, num_transactions) =
+            read_entry(&mut bytes, handle_transaction).unwrap();
 
         assert_eq!(num_hashes, entry.num_hashes);
         assert_eq!(hash, entry.hash);
+        assert_eq!(num_transactions, entry.transactions.len() as u64);
         assert_eq!(transactions.len(), entry.transactions.len());
 
         for transaction in transactions.iter() {
@@ -213,46 +237,47 @@ mod tests {
         let (entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
         let mut bytes = bytes.try_into_mut().unwrap();
         bytes.put_u8(1); // trailing bytes are okay for entries
-        let bytes = bytes.freeze();
+        let mut bytes = bytes.freeze();
 
-        let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
-        let transactions = transactions.collect::<Result<Vec<_>>>().unwrap();
+        let mut transactions = Vec::new();
+        let handle_transaction = |tx| {
+            transactions.push(tx);
+        };
+        let (num_hashes, hash, num_transactions) =
+            read_entry(&mut bytes, handle_transaction).unwrap();
 
         assert_eq!(num_hashes, entry.num_hashes);
         assert_eq!(hash, entry.hash);
+        assert_eq!(num_transactions, entry.transactions.len() as u64);
         assert_eq!(transactions.len(), entry.transactions.len());
     }
 
     #[test]
     fn test_missing_transaction_byte() {
-        let (entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
+        let (_entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
         let mut bytes = bytes.try_into_mut().unwrap();
         bytes.truncate(bytes.len() - 1); // remove last byte of last transaction
-        let bytes = bytes.freeze();
+        let mut bytes = bytes.freeze();
 
-        let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
-        assert_eq!(num_hashes, entry.num_hashes);
-        assert_eq!(hash, entry.hash);
-
-        let transactions = transactions.collect::<Vec<Result<_>>>();
-        assert!(transactions[0].is_err());
+        let mut transactions = Vec::new();
+        let handle_transaction = |tx| {
+            transactions.push(tx);
+        };
+        assert!(read_entry(&mut bytes, handle_transaction).is_err());
     }
 
     #[test]
     fn test_missing_transaction() {
-        let (entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
+        let (_entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
         let mut bytes = bytes.try_into_mut().unwrap();
         // modify `num_transactions` to expect 2 transactions
         bytes[40..48].copy_from_slice(2u64.to_le_bytes().as_ref());
-        let bytes = bytes.freeze();
+        let mut bytes = bytes.freeze();
 
-        let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
-        assert_eq!(num_hashes, entry.num_hashes);
-        assert_eq!(hash, entry.hash);
-        assert_eq!(transactions.len(), 2); // exact-sized iterator should expect 2 transactions
-
-        let transactions = transactions.collect::<Vec<Result<_>>>();
-        assert!(transactions[0].is_ok());
-        assert!(transactions[1].is_err());
+        let mut transactions = Vec::new();
+        let handle_transaction = |tx| {
+            transactions.push(tx);
+        };
+        assert!(read_entry(&mut bytes, handle_transaction).is_err());
     }
 }
