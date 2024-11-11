@@ -1,7 +1,7 @@
 use {
     crate::{
-        bytes::{check_remaining, read_type},
-        result::{Result, TransactionViewError},
+        bytes::check_remaining,
+        result::Result,
         transaction_data::TransactionData,
         transaction_frame::TransactionFrame,
         transaction_view::{TransactionView, UnsanitizedTransactionView},
@@ -44,27 +44,52 @@ pub fn read_entry<D: EntryData>(
 /// - `num_transactions` - u64
 #[inline]
 fn read_entry_header(entry_data: &mut impl EntryData) -> Result<(u64, Hash, u64)> {
-    let mut offset = 0;
+    const HEADER_SIZE: usize =
+        core::mem::size_of::<u64>() + core::mem::size_of::<Hash>() + core::mem::size_of::<u64>();
+
+    // Check that there are enough bytes to read the header.
     let bytes = entry_data.data();
-    let num_hashes = read_u64(bytes, &mut offset)?;
-    let hash = *unsafe { read_type::<Hash>(bytes, &mut offset)? };
-    let num_transactions = read_u64(bytes, &mut offset)?;
-    entry_data.move_offset(offset);
+    check_remaining(bytes, 0, HEADER_SIZE)?;
+
+    // Read the header without checking bounds.
+    let (num_hashes, hash, num_transactions) = unsafe {
+        let ptr = bytes.as_ptr();
+        read_entry_header_unchecked(ptr)
+    };
+    entry_data.move_offset(HEADER_SIZE);
 
     Ok((num_hashes, hash, num_transactions))
 }
 
-/// This function reads a `u64` WITHOUT assuming the alignment of the data.
+#[cfg(target_endian = "little")]
 #[inline]
-fn read_u64(bytes: &[u8], offset: &mut usize) -> Result<u64> {
-    check_remaining(bytes, *offset, core::mem::size_of::<u64>())?;
-    let value = u64::from_le_bytes(
-        bytes[*offset..*offset + core::mem::size_of::<u64>()]
-            .try_into()
-            .map_err(|_| TransactionViewError::ParseError)?,
+unsafe fn read_entry_header_unchecked(ptr: *const u8) -> (u64, Hash, u64) {
+    let num_hashes = ptr.cast::<u64>().read_unaligned();
+    let hash = ptr
+        .add(core::mem::size_of::<u64>())
+        .cast::<Hash>()
+        .read_unaligned();
+    let num_transactions = ptr
+        .add(core::mem::size_of::<u64>() + core::mem::size_of::<Hash>())
+        .cast::<u64>()
+        .read_unaligned();
+    (num_hashes, hash, num_transactions)
+}
+
+#[cfg(target_endian = "big")]
+#[inline]
+fn read_entry_header_unchecked(ptr: *const u8) -> (u64, Hash, u64) {
+    let num_hashes = u64::from_le_bytes(ptr.cast::<[u8; 8]>().read_unaligned());
+    let hash = ptr
+        .add(core::mem::size_of::<u64>())
+        .cast::<Hash>()
+        .read_unaligned();
+    let num_transactions = u64::from_le_bytes(
+        ptr.add(core::mem::size_of::<u64>() + core::mem::size_of::<Hash>())
+            .cast::<[u8; 8]>()
+            .read_unaligned(),
     );
-    *offset += core::mem::size_of::<u64>();
-    Ok(value)
+    (num_hashes, hash, num_transactions)
 }
 
 #[inline]
@@ -139,6 +164,13 @@ mod tests {
     }
 
     #[test]
+    fn test_incomplete_header() {
+        let bytes = Bytes::copy_from_slice(&[0; 47]);
+        let result = read_entry(bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_tick_entry() {
         let (entry, bytes) = create_entry_and_serialize(vec![]);
         let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
@@ -202,7 +234,7 @@ mod tests {
     fn test_trailing_bytes() {
         let (entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
         let mut bytes = bytes.try_into_mut().unwrap();
-        bytes.put_u8(0); // trailing bytes are okay for entries
+        bytes.put_u8(1); // trailing bytes are okay for entries
         let bytes = bytes.freeze();
 
         let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
@@ -211,5 +243,38 @@ mod tests {
         assert_eq!(num_hashes, entry.num_hashes);
         assert_eq!(hash, entry.hash);
         assert_eq!(transactions.len(), entry.transactions.len());
+    }
+
+    #[test]
+    fn test_missing_transaction_byte() {
+        let (entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
+        let mut bytes = bytes.try_into_mut().unwrap();
+        bytes.truncate(bytes.len() - 1); // remove last byte of last transaction
+        let bytes = bytes.freeze();
+
+        let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
+        assert_eq!(num_hashes, entry.num_hashes);
+        assert_eq!(hash, entry.hash);
+
+        let transactions = transactions.collect::<Vec<Result<_>>>();
+        assert!(transactions[0].is_err());
+    }
+
+    #[test]
+    fn test_missing_transaction() {
+        let (entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
+        let mut bytes = bytes.try_into_mut().unwrap();
+        // modify `num_transactions` to expect 2 transactions
+        bytes[40..48].copy_from_slice(2u64.to_le_bytes().as_ref());
+        let bytes = bytes.freeze();
+
+        let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
+        assert_eq!(num_hashes, entry.num_hashes);
+        assert_eq!(hash, entry.hash);
+        assert_eq!(transactions.len(), 2); // exact-sized iterator should expect 2 transactions
+
+        let transactions = transactions.collect::<Vec<Result<_>>>();
+        assert!(transactions[0].is_ok());
+        assert!(transactions[1].is_err());
     }
 }
