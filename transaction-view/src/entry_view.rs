@@ -6,46 +6,35 @@ use {
         transaction_frame::TransactionFrame,
         transaction_view::{TransactionView, UnsanitizedTransactionView},
     },
+    bytes::{Buf, Bytes},
     solana_sdk::hash::Hash,
-    std::sync::Arc,
 };
 
 pub trait EntryData: Clone {
+    /// Associated type for the transaction data.
+    type Tx: TransactionData;
+
+    /// Get the remaining data slice for the entry.
     fn data(&self) -> &[u8];
-}
 
-impl EntryData for Arc<Vec<u8>> {
-    #[inline]
-    fn data(&self) -> &[u8] {
-        self.as_ref()
-    }
-}
+    /// Move read offset to specific index.
+    fn move_offset(&mut self, index: usize);
 
-pub struct EntryTransactionData<D: EntryData> {
-    data: D,
-    offset: usize,
-}
-
-impl<D: EntryData> TransactionData for EntryTransactionData<D> {
-    #[inline]
-    fn data(&self) -> &[u8] {
-        &self.data.data()[self.offset..]
-    }
+    /// Split the a `TransactionData` off the front of the entry.
+    fn split_to(&mut self, index: usize) -> Self::Tx;
 }
 
 pub fn read_entry<D: EntryData>(
-    data: D,
+    mut data: D,
 ) -> Result<(
     u64,
     Hash,
-    impl ExactSizeIterator<Item = Result<TransactionView<false, EntryTransactionData<D>>>>,
+    impl ExactSizeIterator<Item = Result<TransactionView<false, D::Tx>>>,
 )> {
-    let mut offset = 0;
-    let (num_hashes, hash, num_transactions) = read_entry_header(data.data(), &mut offset)?;
-    let transactions = (0..num_transactions as usize)
-        .map(move |_| read_transaction_view(data.clone(), &mut offset));
-
-    Ok((num_hashes, hash, transactions))
+    let (num_hashes, hash, num_transactions) = read_entry_header(&mut data)?;
+    let transactions_iterator =
+        (0..num_transactions as usize).map(move |_| read_transaction_view(&mut data));
+    Ok((num_hashes, hash, transactions_iterator))
 }
 
 /// Read the header information from an entry.
@@ -54,12 +43,15 @@ pub fn read_entry<D: EntryData>(
 /// - `hash` - Hash
 /// - `num_transactions` - u64
 #[inline]
-fn read_entry_header(bytes: &[u8], offset: &mut usize) -> Result<(u64, Hash, u64)> {
-    Ok((
-        read_u64(bytes, offset)?,
-        *unsafe { read_type::<Hash>(bytes, offset)? },
-        read_u64(bytes, offset)?,
-    ))
+fn read_entry_header(entry_data: &mut impl EntryData) -> Result<(u64, Hash, u64)> {
+    let mut offset = 0;
+    let bytes = entry_data.data();
+    let num_hashes = read_u64(bytes, &mut offset)?;
+    let hash = *unsafe { read_type::<Hash>(bytes, &mut offset)? };
+    let num_transactions = read_u64(bytes, &mut offset)?;
+    entry_data.move_offset(offset);
+
+    Ok((num_hashes, hash, num_transactions))
 }
 
 /// This function reads a `u64` WITHOUT assuming the alignment of the data.
@@ -75,32 +67,41 @@ fn read_u64(bytes: &[u8], offset: &mut usize) -> Result<u64> {
     Ok(value)
 }
 
-/// This will clone the `data` for each transaction, but this should
-/// be relatively cheap.
 #[inline]
-fn read_transaction_view<D: EntryData>(
-    data: D,
-    offset: &mut usize,
-) -> Result<UnsanitizedTransactionView<EntryTransactionData<D>>> {
-    let (frame, bytes_read) = TransactionFrame::try_new(&data.data()[*offset..])?;
+fn read_transaction_view<D: EntryData>(data: &mut D) -> Result<UnsanitizedTransactionView<D::Tx>> {
+    let (frame, bytes_read) = TransactionFrame::try_new(&data.data())?;
+    let transaction_data = data.split_to(bytes_read);
     // SAFETY: The format was verified by `TransactionFrame::try_new`.
-    let view = unsafe {
-        UnsanitizedTransactionView::from_data_unchecked(
-            EntryTransactionData {
-                data,
-                offset: *offset,
-            },
-            frame,
-        )
-    };
-    *offset += bytes_read;
+    let view = unsafe { UnsanitizedTransactionView::from_data_unchecked(transaction_data, frame) };
     Ok(view)
+}
+
+// Implement `EntryData` for `Bytes`.
+impl EntryData for Bytes {
+    type Tx = Bytes;
+
+    #[inline]
+    fn data(&self) -> &[u8] {
+        self
+    }
+
+    #[inline]
+    fn move_offset(&mut self, index: usize) {
+        self.advance(index);
+    }
+
+    #[inline]
+    fn split_to(&mut self, index: usize) -> Self::Tx {
+        let data = self.split_to(index);
+        data
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use {
         super::*,
+        bytes::BufMut,
         solana_entry::entry::Entry,
         solana_sdk::{
             message::{Message, VersionedMessage},
@@ -126,16 +127,14 @@ mod tests {
         }
     }
 
-    fn create_entry_and_serialize(
-        transactions: Vec<VersionedTransaction>,
-    ) -> (Entry, Arc<Vec<u8>>) {
+    fn create_entry_and_serialize(transactions: Vec<VersionedTransaction>) -> (Entry, Bytes) {
         let entry = Entry {
             num_hashes: 42,
             hash: Hash::default(),
             transactions,
         };
 
-        let serialized_entry = Arc::new(bincode::serialize(&entry).unwrap());
+        let serialized_entry = Bytes::copy_from_slice(&bincode::serialize(&entry).unwrap());
         (entry, serialized_entry)
     }
 
@@ -201,8 +200,10 @@ mod tests {
 
     #[test]
     fn test_trailing_bytes() {
-        let (entry, mut bytes) = create_entry_and_serialize(vec![simple_transfer()]);
-        Arc::make_mut(&mut bytes).push(0); // trailing bytes are okay for entries.
+        let (entry, bytes) = create_entry_and_serialize(vec![simple_transfer()]);
+        let mut bytes = bytes.try_into_mut().unwrap();
+        bytes.put_u8(0); // trailing bytes are okay for entries
+        let bytes = bytes.freeze();
 
         let (num_hashes, hash, transactions) = read_entry(bytes).unwrap();
         let transactions = transactions.collect::<Result<Vec<_>>>().unwrap();
