@@ -17,8 +17,8 @@ pub trait EntryData: Clone {
     /// Get the remaining data slice for the entry.
     fn data(&self) -> &[u8];
 
-    /// Move read offset to specific index.
-    fn move_offset(&mut self, index: usize);
+    /// Move offset forward `num_bytes`.
+    fn advance(&mut self, num_bytes: usize);
 
     /// Split the a `TransactionData` off the front of the entry.
     fn split_to(&mut self, index: usize) -> Self::Tx;
@@ -56,7 +56,7 @@ fn read_entry_header(entry_data: &mut impl EntryData) -> Result<(u64, Hash, u64)
         let ptr = bytes.as_ptr();
         read_entry_header_unchecked(ptr)
     };
-    entry_data.move_offset(HEADER_SIZE);
+    entry_data.advance(HEADER_SIZE);
 
     Ok((num_hashes, hash, num_transactions))
 }
@@ -94,7 +94,7 @@ fn read_entry_header_unchecked(ptr: *const u8) -> (u64, Hash, u64) {
 
 #[inline]
 fn read_transaction_view<D: EntryData>(data: &mut D) -> Result<UnsanitizedTransactionView<D::Tx>> {
-    let (frame, bytes_read) = TransactionFrame::try_new(&data.data())?;
+    let (frame, bytes_read) = TransactionFrame::try_new(data.data())?;
     let transaction_data = data.split_to(bytes_read);
     // SAFETY: The format was verified by `TransactionFrame::try_new`.
     let view = unsafe { UnsanitizedTransactionView::from_data_unchecked(transaction_data, frame) };
@@ -111,14 +111,13 @@ impl EntryData for Bytes {
     }
 
     #[inline]
-    fn move_offset(&mut self, index: usize) {
-        self.advance(index);
+    fn advance(&mut self, index: usize) {
+        Buf::advance(self, index);
     }
 
     #[inline]
     fn split_to(&mut self, index: usize) -> Self::Tx {
-        let data = self.split_to(index);
-        data
+        Bytes::split_to(self, index)
     }
 }
 

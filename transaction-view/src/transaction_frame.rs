@@ -4,7 +4,7 @@ use {
         bytes::advance_offset_for_type,
         instructions_frame::{InstructionsFrame, InstructionsIterator},
         message_header_frame::MessageHeaderFrame,
-        result::{Result, TransactionViewError},
+        result::Result,
         signature_frame::SignatureFrame,
         static_account_keys_frame::StaticAccountKeysFrame,
         transaction_version::TransactionVersion,
