@@ -60,7 +60,7 @@ fn read_entry_header(entry_data: &mut impl EntryData) -> Result<(u64, Hash, u64)
             .cast::<Hash>()
             .read_unaligned();
         let num_transactions = u64::from_le_bytes(
-            ptr.add(core::mem::size_of::<u64>() + core::mem::size_of::<Hash>())
+            ptr.add(core::mem::size_of::<u64>().wrapping_add(core::mem::size_of::<Hash>()))
                 .cast::<[u8; 8]>()
                 .read_unaligned(),
         );
