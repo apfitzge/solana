@@ -266,6 +266,13 @@ impl solana_runtime_transaction::transaction_meta::StaticMeta for WritableKeysTr
     ) -> &solana_runtime_transaction::builtin_instruction_details::BuiltinInstructionDetails {
         unimplemented!("WritableKeysTransaction::builtin_instruction_details")
     }
+
+    fn allocation_instruction_details(
+        &self,
+    ) -> &solana_runtime_transaction::allocation_instruction_details::AllocationInstructionDetails
+    {
+        unimplemented!("WritableKeysTransaction::allocation_instruction_details")
+    }
 }
 
 #[cfg(feature = "dev-context-only-utils")]

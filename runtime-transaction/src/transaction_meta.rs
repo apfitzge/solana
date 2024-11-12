@@ -13,6 +13,7 @@
 //!
 use {
     crate::{
+        allocation_instruction_details::AllocationInstructionDetails,
         builtin_instruction_details::BuiltinInstructionDetails,
         compute_budget_instruction_details::ComputeBudgetInstructionDetails,
     },
@@ -32,6 +33,7 @@ pub trait StaticMeta {
     fn compute_budget_limits(&self, feature_set: &FeatureSet) -> Result<ComputeBudgetLimits>;
     fn is_compute_budget_limit_set(&self) -> bool;
     fn builtin_instruction_details(&self) -> &BuiltinInstructionDetails;
+    fn allocation_instruction_details(&self) -> &AllocationInstructionDetails;
 }
 
 /// Statically loaded meta is a supertrait of Dynamically loaded meta, when
@@ -49,4 +51,5 @@ pub struct TransactionMeta {
     pub(crate) signature_details: TransactionSignatureDetails,
     pub(crate) compute_budget_instruction_details: ComputeBudgetInstructionDetails,
     pub(crate) builtin_instruction_details: BuiltinInstructionDetails,
+    pub(crate) allocation_instruction_details: AllocationInstructionDetails,
 }

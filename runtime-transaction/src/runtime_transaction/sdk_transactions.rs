@@ -1,6 +1,7 @@
 use {
     super::{ComputeBudgetInstructionDetails, RuntimeTransaction},
     crate::{
+        allocation_instruction_details::AllocationInstructionDetails,
         builtin_instruction_details::BuiltinInstructionDetails,
         signature_details::get_precompile_signature_details,
         transaction_meta::{StaticMeta, TransactionMeta},
@@ -62,6 +63,12 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
                 .program_instructions_iter()
                 .map(|(program_id, ix)| (program_id, SVMInstruction::from(ix))),
         );
+        let allocation_instruction_details = AllocationInstructionDetails::process_instructions(
+            sanitized_versioned_tx
+                .get_message()
+                .program_instructions_iter()
+                .map(|(program_id, ix)| (program_id, SVMInstruction::from(ix))),
+        );
 
         Ok(Self {
             transaction: sanitized_versioned_tx,
@@ -71,6 +78,7 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
                 signature_details,
                 compute_budget_instruction_details,
                 builtin_instruction_details,
+                allocation_instruction_details,
             },
         })
     }

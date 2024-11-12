@@ -1,6 +1,7 @@
 use {
     super::{ComputeBudgetInstructionDetails, RuntimeTransaction},
     crate::{
+        allocation_instruction_details::AllocationInstructionDetails,
         builtin_instruction_details::BuiltinInstructionDetails,
         signature_details::get_precompile_signature_details, transaction_meta::TransactionMeta,
     },
@@ -54,6 +55,9 @@ impl<D: TransactionData> RuntimeTransaction<SanitizedTransactionView<D>> {
         let builtin_instruction_details = BuiltinInstructionDetails::process_instructions(
             transaction.program_instructions_iter(),
         );
+        let allocation_instruction_details = AllocationInstructionDetails::process_instructions(
+            transaction.program_instructions_iter(),
+        );
 
         Ok(Self {
             transaction,
@@ -63,6 +67,7 @@ impl<D: TransactionData> RuntimeTransaction<SanitizedTransactionView<D>> {
                 signature_details,
                 compute_budget_instruction_details,
                 builtin_instruction_details,
+                allocation_instruction_details,
             },
         })
     }

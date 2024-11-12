@@ -11,6 +11,7 @@
 //!    with its dynamic metadata loaded.
 use {
     crate::{
+        allocation_instruction_details::AllocationInstructionDetails,
         builtin_instruction_details::BuiltinInstructionDetails,
         compute_budget_instruction_details::*,
         transaction_meta::{DynamicMeta, StaticMeta, TransactionMeta},
@@ -65,6 +66,9 @@ impl<T> StaticMeta for RuntimeTransaction<T> {
     }
     fn builtin_instruction_details(&self) -> &BuiltinInstructionDetails {
         &self.meta.builtin_instruction_details
+    }
+    fn allocation_instruction_details(&self) -> &AllocationInstructionDetails {
+        &self.meta.allocation_instruction_details
     }
 }
 

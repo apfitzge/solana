@@ -5,7 +5,7 @@ use {
     solana_svm_transaction::instruction::SVMInstruction,
 };
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct AllocationInstructionDetails {
     pub total_space: u64,
 }
