@@ -1,4 +1,62 @@
-use solana_pubkey::Pubkey;
+use {
+    agave_transaction_view::static_account_keys_frame::MAX_STATIC_ACCOUNTS_PER_PACKET as FILTER_SIZE,
+    solana_pubkey::Pubkey,
+    solana_sdk::{system_instruction::MAX_PERMITTED_DATA_LENGTH, system_program},
+    solana_svm_transaction::instruction::SVMInstruction,
+};
+
+#[derive(Default)]
+pub struct AllocationInstructionDetails {
+    pub total_space: u64,
+}
+
+impl AllocationInstructionDetails {
+    pub fn process_instructions<'a>(
+        instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)>,
+    ) -> Self {
+        let mut filter = SystemProgramIdFilter::default();
+        let mut details = AllocationInstructionDetails::default();
+
+        for (program_id, instruction) in instructions {
+            if filter.is_system_program(usize::from(instruction.program_id_index), program_id) {
+                let requested_space = parse_system_instruction_allocation(instruction.data);
+                if requested_space > MAX_PERMITTED_DATA_LENGTH {
+                    details.total_space = 0;
+                    return details;
+                }
+                details.total_space = details.total_space.saturating_add(requested_space);
+            }
+        }
+
+        details
+    }
+}
+
+pub(crate) struct SystemProgramIdFilter {
+    // array of slots for all possible static and sanitized program_id_index,
+    // each slot indicates if a program_id_index has not been checked (eg, None),
+    // or already checked with result (eg, Some(result)) that can be reused.
+    flags: [Option<bool>; FILTER_SIZE as usize],
+}
+
+impl Default for SystemProgramIdFilter {
+    fn default() -> Self {
+        SystemProgramIdFilter {
+            flags: [None; FILTER_SIZE as usize],
+        }
+    }
+}
+
+impl SystemProgramIdFilter {
+    #[inline]
+    fn is_system_program(&mut self, index: usize, program_id: &Pubkey) -> bool {
+        *self
+            .flags
+            .get_mut(index)
+            .expect("program id index is sanitized")
+            .get_or_insert_with(|| program_id == &system_program::ID)
+    }
+}
 
 const CREATE_ACCOUNT: u32 = 0;
 const CREATE_ACCOUNT_SERIALIZED_SIZE: usize = {
@@ -33,7 +91,7 @@ const ALLOCATE_WITH_SEED_MIN_SERIALIZED_SIZE: usize = {
     core::mem::size_of::<Pubkey>() // owner
 };
 
-pub fn parse_system_instruction_allocation(instruction_data: &[u8]) -> u64 {
+fn parse_system_instruction_allocation(instruction_data: &[u8]) -> u64 {
     match read_discriminant(instruction_data) {
         CREATE_ACCOUNT => {
             if instruction_data.len() < CREATE_ACCOUNT_SERIALIZED_SIZE {
