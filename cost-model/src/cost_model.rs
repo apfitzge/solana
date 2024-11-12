@@ -152,6 +152,9 @@ impl CostModel {
     ) -> (u64, u64, u64) {
         let builtin_instruction_details = transaction.builtin_instruction_details();
 
+        // if failed to process compute budget instructions, the transaction
+        // will not be executed by `bank`, therefore it should be considered
+        // as no execution cost by cost model.
         let (programs_execution_costs, loaded_accounts_data_size_cost) = match transaction
             .compute_budget_limits(feature_set)
         {
