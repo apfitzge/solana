@@ -8,7 +8,8 @@ use {
     solana_svm_transaction::instruction::SVMInstruction,
 };
 
-#[derive(Default)]
+#[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
+#[derive(Debug, Default)]
 pub struct BuiltinInstructionDetails {
     /// Whether the transaction has user space instructions.
     pub has_user_space_instructions: bool,
@@ -105,7 +106,7 @@ mod tests {
     fn test_builtin_instruction_details_empty() {
         let instructions = [].into_iter();
         let details = BuiltinInstructionDetails::process_instructions(instructions);
-        assert_eq!(details.has_user_space_instructions, false);
+        assert!(!details.has_user_space_instructions);
         assert_eq!(details.instruction_execution_costs, 0);
         assert_eq!(details.data_bytes_len_total, 0);
     }
@@ -124,7 +125,7 @@ mod tests {
         .into_iter();
         let details = BuiltinInstructionDetails::process_instructions(instructions);
 
-        assert_eq!(details.has_user_space_instructions, true);
+        assert!(details.has_user_space_instructions);
         assert_eq!(
             details.instruction_execution_costs,
             u64::from(DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT)
@@ -155,15 +156,13 @@ mod tests {
         .into_iter();
         let details = BuiltinInstructionDetails::process_instructions(instructions);
 
-        assert_eq!(details.has_user_space_instructions, false);
+        assert!(!details.has_user_space_instructions);
         assert_eq!(
             details.instruction_execution_costs,
-            u64::from(
-                BUILTIN_INSTRUCTION_COSTS
-                    .get(&system_program::ID)
-                    .unwrap()
-                    .saturating_add(*BUILTIN_INSTRUCTION_COSTS.get(&compute_budget::ID).unwrap())
-            )
+            BUILTIN_INSTRUCTION_COSTS
+                .get(&system_program::ID)
+                .unwrap()
+                .saturating_add(*BUILTIN_INSTRUCTION_COSTS.get(&compute_budget::ID).unwrap())
         );
         assert_eq!(details.data_bytes_len_total, 5);
     }
@@ -192,12 +191,11 @@ mod tests {
         .into_iter();
         let details = BuiltinInstructionDetails::process_instructions(instructions);
 
-        assert_eq!(details.has_user_space_instructions, true);
+        assert!(details.has_user_space_instructions);
         assert_eq!(
             details.instruction_execution_costs,
-            u64::from(DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT).saturating_add(u64::from(
-                *BUILTIN_INSTRUCTION_COSTS.get(&system_program::ID).unwrap()
-            ))
+            u64::from(DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT)
+                .saturating_add(*BUILTIN_INSTRUCTION_COSTS.get(&system_program::ID).unwrap())
         );
         assert_eq!(details.data_bytes_len_total, 5);
     }

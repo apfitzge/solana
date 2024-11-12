@@ -256,6 +256,12 @@ impl solana_runtime_transaction::transaction_meta::StaticMeta for WritableKeysTr
     > {
         unimplemented!("WritableKeysTransaction::compute_budget_limits")
     }
+
+    fn builtin_instruction_details(
+        &self,
+    ) -> &solana_runtime_transaction::builtin_instruction_details::BuiltinInstructionDetails {
+        unimplemented!("WritableKeysTransaction::builtin_instruction_details")
+    }
 }
 
 #[cfg(feature = "dev-context-only-utils")]

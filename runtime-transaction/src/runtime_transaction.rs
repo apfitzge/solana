@@ -11,6 +11,7 @@
 //!    with its dynamic metadata loaded.
 use {
     crate::{
+        builtin_instruction_details::BuiltinInstructionDetails,
         compute_budget_instruction_details::*,
         transaction_meta::{DynamicMeta, StaticMeta, TransactionMeta},
     },
@@ -56,6 +57,9 @@ impl<T> StaticMeta for RuntimeTransaction<T> {
         self.meta
             .compute_budget_instruction_details
             .sanitize_and_convert_to_compute_budget_limits()
+    }
+    fn builtin_instruction_details(&self) -> &BuiltinInstructionDetails {
+        &self.meta.builtin_instruction_details
     }
 }
 
