@@ -257,6 +257,10 @@ impl solana_runtime_transaction::transaction_meta::StaticMeta for WritableKeysTr
         unimplemented!("WritableKeysTransaction::compute_budget_limits")
     }
 
+    fn is_compute_budget_limit_set(&self) -> bool {
+        unimplemented!("WritableKeysTransaction::is_compute_budget_limit_set")
+    }
+
     fn builtin_instruction_details(
         &self,
     ) -> &solana_runtime_transaction::builtin_instruction_details::BuiltinInstructionDetails {

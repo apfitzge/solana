@@ -7,15 +7,10 @@
 
 use {
     crate::{block_cost_limits::*, transaction_cost::*},
-    solana_builtins_default_costs::BUILTIN_INSTRUCTION_COSTS,
-    solana_compute_budget::compute_budget_limits::{
-        DEFAULT_HEAP_COST, DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_LIMIT,
-    },
+    solana_compute_budget::compute_budget_limits::DEFAULT_HEAP_COST,
     solana_feature_set::{self as feature_set, FeatureSet},
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_sdk::{
-        borsh1::try_from_slice_unchecked,
-        compute_budget::{self, ComputeBudgetInstruction},
         fee::FeeStructure,
         program_utils::limited_deserialize,
         pubkey::Pubkey,
@@ -155,41 +150,11 @@ impl CostModel {
         transaction: &impl TransactionWithMeta,
         feature_set: &FeatureSet,
     ) -> (u64, u64, u64) {
-        let mut programs_execution_costs = 0u64;
-        let mut loaded_accounts_data_size_cost = 0u64;
-        let mut data_bytes_len_total = 0u64;
-        let mut compute_unit_limit_is_set = false;
-        let mut has_user_space_instructions = false;
+        let builtin_instruction_details = transaction.builtin_instruction_details();
 
-        for (program_id, instruction) in transaction.program_instructions_iter() {
-            let ix_execution_cost =
-                if let Some(builtin_cost) = BUILTIN_INSTRUCTION_COSTS.get(program_id) {
-                    *builtin_cost
-                } else {
-                    has_user_space_instructions = true;
-                    u64::from(DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT)
-                };
-
-            programs_execution_costs = programs_execution_costs
-                .saturating_add(ix_execution_cost)
-                .min(u64::from(MAX_COMPUTE_UNIT_LIMIT));
-
-            data_bytes_len_total =
-                data_bytes_len_total.saturating_add(instruction.data.len() as u64);
-
-            if compute_budget::check_id(program_id) {
-                if let Ok(ComputeBudgetInstruction::SetComputeUnitLimit(_)) =
-                    try_from_slice_unchecked(instruction.data)
-                {
-                    compute_unit_limit_is_set = true;
-                }
-            }
-        }
-
-        // if failed to process compute budget instructions, the transaction
-        // will not be executed by `bank`, therefore it should be considered
-        // as no execution cost by cost model.
-        match transaction.compute_budget_limits(feature_set) {
+        let (programs_execution_costs, loaded_accounts_data_size_cost) = match transaction
+            .compute_budget_limits(feature_set)
+        {
             Ok(compute_budget_limits) => {
                 // if tx contained user-space instructions and a more accurate
                 // estimate available correct it, where
@@ -200,24 +165,27 @@ impl CostModel {
                 //
                 // (see compute_budget.rs test
                 // `test_process_mixed_instructions_without_compute_budget`)
-                if has_user_space_instructions && compute_unit_limit_is_set {
-                    programs_execution_costs = u64::from(compute_budget_limits.compute_unit_limit);
-                }
-
-                loaded_accounts_data_size_cost = Self::calculate_loaded_accounts_data_size_cost(
+                let programs_execution_costs = if transaction.is_compute_budget_limit_set()
+                    && builtin_instruction_details.has_user_space_instructions
+                {
+                    u64::from(compute_budget_limits.compute_unit_limit)
+                } else {
+                    builtin_instruction_details.instruction_execution_costs
+                };
+                let loaded_accounts_data_size_cost = Self::calculate_loaded_accounts_data_size_cost(
                     compute_budget_limits.loaded_accounts_bytes.get(),
                     feature_set,
                 );
+
+                (programs_execution_costs, loaded_accounts_data_size_cost)
             }
-            Err(_) => {
-                programs_execution_costs = 0;
-            }
-        }
+            Err(_) => (0, 0),
+        };
 
         (
             programs_execution_costs,
             loaded_accounts_data_size_cost,
-            data_bytes_len_total / INSTRUCTION_DATA_BYTES_COST,
+            builtin_instruction_details.data_bytes_len_total / INSTRUCTION_DATA_BYTES_COST,
         )
     }
 
@@ -314,6 +282,8 @@ mod tests {
         super::*,
         itertools::Itertools,
         log::debug,
+        solana_builtins_default_costs::BUILTIN_INSTRUCTION_COSTS,
+        solana_compute_budget::compute_budget_limits::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT,
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_sdk::{
             compute_budget::{self, ComputeBudgetInstruction},

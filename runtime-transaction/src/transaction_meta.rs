@@ -30,6 +30,7 @@ pub trait StaticMeta {
     fn is_simple_vote_transaction(&self) -> bool;
     fn signature_details(&self) -> &TransactionSignatureDetails;
     fn compute_budget_limits(&self, feature_set: &FeatureSet) -> Result<ComputeBudgetLimits>;
+    fn is_compute_budget_limit_set(&self) -> bool;
     fn builtin_instruction_details(&self) -> &BuiltinInstructionDetails;
 }
 

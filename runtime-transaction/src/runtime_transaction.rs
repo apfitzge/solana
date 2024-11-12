@@ -58,6 +58,11 @@ impl<T> StaticMeta for RuntimeTransaction<T> {
             .compute_budget_instruction_details
             .sanitize_and_convert_to_compute_budget_limits()
     }
+    fn is_compute_budget_limit_set(&self) -> bool {
+        self.meta
+            .compute_budget_instruction_details
+            .is_compute_budget_limit_set()
+    }
     fn builtin_instruction_details(&self) -> &BuiltinInstructionDetails {
         &self.meta.builtin_instruction_details
     }
