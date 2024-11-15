@@ -3,7 +3,10 @@ use {
     solana_pubkey::Pubkey,
     solana_sdk::{
         program_utils::limited_deserialize,
-        system_instruction::{SystemInstruction, MAX_PERMITTED_DATA_LENGTH},
+        system_instruction::{
+            SystemInstruction, MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION,
+            MAX_PERMITTED_DATA_LENGTH,
+        },
         system_program,
     },
     solana_svm_transaction::instruction::SVMInstruction,
@@ -32,6 +35,17 @@ impl AllocationInstructionDetails {
                 details.total_space = details.total_space.saturating_add(requested_space);
             }
         }
+
+        // The runtime prevents transactions from allocating too much account
+        // data so clamp the attempted allocation size to the max amount.
+        //
+        // Note that if there are any custom bpf instructions in the transaction
+        // it's tricky to know whether a newly allocated account will be freed
+        // or not during an intermediate instruction in the transaction so we
+        // shouldn't assume that a large sum of allocations will necessarily
+        // lead to transaction failure.
+        details.total_space = (MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION as u64)
+            .min(details.total_space);
 
         Some(details)
     }
@@ -92,7 +106,10 @@ fn parse_system_instruction_allocation(data: &[u8]) -> SystemProgramAccountAlloc
 
 #[cfg(test)]
 mod tests {
-    use {super::*, solana_sdk::system_instruction};
+    use {
+        super::*,
+        solana_sdk::{instruction::Instruction, system_instruction},
+    };
 
     #[test]
     fn test_transfer() {
@@ -201,6 +218,70 @@ mod tests {
         assert_eq!(
             parse_system_instruction_allocation(&instruction.data),
             SystemProgramAccountAllocation::Failed
+        );
+    }
+
+    #[test]
+    fn test_multiple_allocations() {
+        fn allocate_space(space: u64) -> Instruction {
+            system_instruction::allocate(&Pubkey::new_unique(), space)
+        }
+        fn map_instructions(
+            instructions: &[Instruction],
+        ) -> impl Iterator<Item = (&Pubkey, SVMInstruction)> + '_ {
+            instructions.iter().map(|i| {
+                (
+                    &system_program::ID,
+                    SVMInstruction {
+                        program_id_index: 0,
+                        accounts: &[], // we don't need to copy this
+                        data: &i.data,
+                    },
+                )
+            })
+        }
+
+        // Valid allocations - sum
+        let size_1 = 100;
+        let size_2 = 200;
+        let instructions = [allocate_space(size_1), allocate_space(size_2)];
+
+        let allocation_details =
+            AllocationInstructionDetails::process_instructions(map_instructions(&instructions))
+                .unwrap();
+        assert_eq!(allocation_details.total_space, size_1 + size_2);
+
+        // max permitted allocations
+        let instructions = [
+            allocate_space(MAX_PERMITTED_DATA_LENGTH),
+            allocate_space(MAX_PERMITTED_DATA_LENGTH),
+            allocate_space(100),
+        ];
+        let allocation_details =
+            AllocationInstructionDetails::process_instructions(map_instructions(&instructions))
+                .unwrap();
+        assert_eq!(
+            allocation_details.total_space,
+            MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION as u64
+        );
+
+        // invalid allocations
+        let instructions = [
+            allocate_space(100),
+            allocate_space(MAX_PERMITTED_DATA_LENGTH + 1),
+            allocate_space(200),
+        ];
+
+        assert!(
+            AllocationInstructionDetails::process_instructions(map_instructions(&instructions))
+                .is_none()
+        );
+
+        // overflow
+        let instructions = [allocate_space(100), allocate_space(u64::MAX)];
+        assert!(
+            AllocationInstructionDetails::process_instructions(map_instructions(&instructions))
+                .is_none()
         );
     }
 }
