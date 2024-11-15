@@ -68,7 +68,8 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
                 .get_message()
                 .program_instructions_iter()
                 .map(|(program_id, ix)| (program_id, SVMInstruction::from(ix))),
-        );
+        )
+        .unwrap_or_default();
 
         Ok(Self {
             transaction: sanitized_versioned_tx,

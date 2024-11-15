@@ -57,7 +57,8 @@ impl<D: TransactionData> RuntimeTransaction<SanitizedTransactionView<D>> {
         );
         let allocation_instruction_details = AllocationInstructionDetails::process_instructions(
             transaction.program_instructions_iter(),
-        );
+        )
+        .unwrap_or_default();
 
         Ok(Self {
             transaction,

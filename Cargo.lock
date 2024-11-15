@@ -8253,7 +8253,6 @@ dependencies = [
  "rand 0.8.5",
  "solana-builtins-default-costs",
  "solana-compute-budget",
- "solana-frozen-abi",
  "solana-program",
  "solana-pubkey",
  "solana-sdk",
