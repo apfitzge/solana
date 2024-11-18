@@ -1,10 +1,6 @@
 use {
-    crate::block_cost_limits,
-    solana_runtime_transaction::{
-        transaction_meta::StaticMeta, transaction_with_meta::TransactionWithMeta,
-    },
-    solana_sdk::pubkey::Pubkey,
-    solana_svm_transaction::svm_message::SVMMessage,
+    crate::block_cost_limits, solana_runtime_transaction::transaction_meta::StaticMeta,
+    solana_sdk::pubkey::Pubkey, solana_svm_transaction::svm_message::SVMMessage,
 };
 
 /// TransactionCost is used to represent resources required to process
