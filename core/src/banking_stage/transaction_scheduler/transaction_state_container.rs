@@ -232,14 +232,14 @@ impl TransactionStateContainerWithBytes {
     /// Returns an index and a `BytesMut` to copy packet data into.
     /// The caller **must** return this space to the container either by
     /// calling `return_space` or `freeze`ing and pushing the transaction.
-    pub fn reserve_space(&mut self) -> Option<(u32, BytesMut)> {
+    pub fn reserve_space(&mut self) -> Option<(TransactionId, BytesMut)> {
         self.index_stack
             .pop()
             .map(|index| (index, self.bytes_buffer[index as usize].reserve()))
     }
 
     /// Return space that is will not be used for now.
-    pub fn return_space(&mut self, index: u32, bytes: BytesMut) {
+    pub fn return_space(&mut self, index: TransactionId, bytes: BytesMut) {
         self.bytes_buffer[index as usize] = MaybeBytes::BytesMut(bytes);
         self.index_stack.push(index);
     }
@@ -248,7 +248,7 @@ impl TransactionStateContainerWithBytes {
     /// This is only used to store a copy of the `Bytes` which can be
     /// re-used when a transaction is eventually removed via
     /// `remove_by_id`.
-    pub fn freeze(&mut self, index: u32, bytes: Bytes) {
+    pub fn freeze(&mut self, index: TransactionId, bytes: Bytes) {
         self.bytes_buffer[index as usize] = MaybeBytes::Bytes(bytes);
     }
 }
