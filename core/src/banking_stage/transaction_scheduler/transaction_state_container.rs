@@ -7,9 +7,14 @@ use {
         immutable_deserialized_packet::ImmutableDeserializedPacket,
         scheduler_messages::TransactionId,
     },
+    agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
+    bytes::{Bytes, BytesMut},
     itertools::MinMaxResult,
     min_max_heap::MinMaxHeap,
-    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+    solana_runtime_transaction::{
+        runtime_transaction::RuntimeTransaction, transaction_with_meta::TransactionWithMeta,
+    },
+    solana_sdk::packet::PACKET_DATA_SIZE,
     std::{collections::HashMap, sync::Arc},
 };
 
@@ -186,6 +191,159 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
     }
 }
 
+/// A wrapper around `TransactionStateContainer` that allows re-uses
+/// pre-allocated `Bytes` to copy packet data into and use for serialization.
+/// This is used to avoid allocations in parsing transactions.
+pub struct TransactionStateContainerWithBytes {
+    inner: TransactionStateContainer<RuntimeTransaction<ResolvedTransactionView<Bytes>>>,
+    bytes_buffer: Box<[MaybeBytes]>,
+    index_stack: Vec<u32>,
+}
+
+enum MaybeBytes {
+    None,
+    Bytes(Bytes),
+    BytesMut(BytesMut),
+}
+
+impl MaybeBytes {
+    fn reserve(&mut self) -> BytesMut {
+        match core::mem::replace(self, MaybeBytes::None) {
+            MaybeBytes::BytesMut(bytes_mut) => bytes_mut,
+            _ => panic!("invalid state to reserve"),
+        }
+    }
+
+    fn as_mut(&mut self) {
+        match core::mem::replace(self, MaybeBytes::None) {
+            MaybeBytes::Bytes(bytes) => {
+                *self = MaybeBytes::BytesMut(
+                    bytes
+                        .try_into_mut()
+                        .expect("all `Bytes` copies should be dropped before this call"),
+                );
+            }
+            _ => panic!("invalid state to as_mut"),
+        }
+    }
+}
+
+impl TransactionStateContainerWithBytes {
+    /// Returns an index and a `BytesMut` to copy packet data into.
+    /// The caller **must** return this space to the container either by
+    /// calling `return_space` or `freeze`ing and pushing the transaction.
+    pub fn reserve_space(&mut self) -> Option<(u32, BytesMut)> {
+        self.index_stack
+            .pop()
+            .map(|index| (index, self.bytes_buffer[index as usize].reserve()))
+    }
+
+    /// Return space that is will not be used for now.
+    pub fn return_space(&mut self, index: u32, bytes: BytesMut) {
+        self.bytes_buffer[index as usize] = MaybeBytes::BytesMut(bytes);
+        self.index_stack.push(index);
+    }
+
+    /// Freeze the space and push the transaction into the container.
+    /// This is only used to store a copy of the `Bytes` which can be
+    /// re-used when a transaction is eventually removed via
+    /// `remove_by_id`.
+    pub fn freeze(&mut self, index: u32, bytes: Bytes) {
+        self.bytes_buffer[index as usize] = MaybeBytes::Bytes(bytes);
+    }
+}
+
+type TxB = RuntimeTransaction<ResolvedTransactionView<Bytes>>;
+impl StateContainer<TxB> for TransactionStateContainerWithBytes {
+    fn with_capacity(capacity: usize) -> Self {
+        const EXTRA_CAPACITY: usize = 256;
+        assert!(capacity + EXTRA_CAPACITY < u32::MAX as usize);
+        let mut bytes = BytesMut::with_capacity(PACKET_DATA_SIZE * (capacity + EXTRA_CAPACITY));
+        let bytes_buffer = (0..capacity)
+            .map(|_| bytes.split_to(PACKET_DATA_SIZE))
+            .map(MaybeBytes::BytesMut)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let index_stack = (0..capacity).rev().map(|index| index as u32).collect();
+
+        Self {
+            inner: TransactionStateContainer::with_capacity(capacity),
+            bytes_buffer,
+            index_stack,
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    #[inline]
+    fn remaining_queue_capacity(&self) -> usize {
+        self.inner.remaining_queue_capacity()
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<TransactionPriorityId> {
+        self.inner.pop()
+    }
+
+    #[inline]
+    fn get_mut_transaction_state(
+        &mut self,
+        id: &TransactionId,
+    ) -> Option<&mut TransactionState<TxB>> {
+        self.inner.get_mut_transaction_state(id)
+    }
+
+    #[inline]
+    fn get_transaction_ttl(&self, id: &TransactionId) -> Option<&SanitizedTransactionTTL<TxB>> {
+        self.inner.get_transaction_ttl(id)
+    }
+
+    #[inline]
+    fn insert_new_transaction(
+        &mut self,
+        transaction_id: TransactionId,
+        transaction_ttl: SanitizedTransactionTTL<TxB>,
+        packet: Arc<ImmutableDeserializedPacket>,
+        priority: u64,
+        cost: u64,
+    ) -> bool {
+        self.inner
+            .insert_new_transaction(transaction_id, transaction_ttl, packet, priority, cost)
+    }
+
+    #[inline]
+    fn retry_transaction(
+        &mut self,
+        transaction_id: TransactionId,
+        transaction_ttl: SanitizedTransactionTTL<TxB>,
+    ) {
+        self.inner
+            .retry_transaction(transaction_id, transaction_ttl);
+    }
+
+    #[inline]
+    fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
+        self.inner.push_id_into_queue(priority_id)
+    }
+
+    fn remove_by_id(&mut self, id: &TransactionId) {
+        // Removing the transaction from the map will drop the `Bytes` copy.
+        self.inner.remove_by_id(id);
+
+        // Re-use the `Bytes` copy by pushing the index back to the stack.
+        let index = *id;
+        self.bytes_buffer[index as usize].as_mut();
+    }
+
+    #[inline]
+    fn get_min_max_priority(&self) -> MinMaxResult<u64> {
+        self.inner.get_min_max_priority()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -246,16 +404,10 @@ mod tests {
         container: &mut TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
         num: usize,
     ) {
-        for id in 0..num as u64 {
-            let priority = id;
+        for id in 0..num as u32 {
+            let priority = id as u64;
             let (transaction_ttl, packet, priority, cost) = test_transaction(priority);
-            container.insert_new_transaction(
-                TransactionId::new(id),
-                transaction_ttl,
-                packet,
-                priority,
-                cost,
-            );
+            container.insert_new_transaction(id, transaction_ttl, packet, priority, cost);
         }
     }
 
@@ -291,8 +443,8 @@ mod tests {
         let mut container = TransactionStateContainer::with_capacity(5);
         push_to_container(&mut container, 5);
 
-        let existing_id = TransactionId::new(3);
-        let non_existing_id = TransactionId::new(7);
+        let existing_id = 3;
+        let non_existing_id = 7;
         assert!(container.get_mut_transaction_state(&existing_id).is_some());
         assert!(container.get_mut_transaction_state(&existing_id).is_some());
         assert!(container
