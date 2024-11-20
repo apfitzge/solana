@@ -2,7 +2,7 @@
 #![feature(test)]
 
 use {
-    solana_core::validator::BlockProductionMethod,
+    solana_core::validator::{BlockProductionMethod, TransactionStruct},
     solana_vote_program::{vote_state::TowerSync, vote_transaction::new_tower_sync_transaction},
 };
 
@@ -292,6 +292,7 @@ fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
     let (s, _r) = unbounded();
     let _banking_stage = BankingStage::new(
         BlockProductionMethod::ThreadLocalMultiIterator,
+        TransactionStruct::default(),
         &cluster_info,
         &poh_recorder,
         non_vote_receiver,

@@ -33,8 +33,8 @@ use {
         system_monitor_service::SystemMonitorService,
         tpu::DEFAULT_TPU_COALESCE,
         validator::{
-            is_snapshot_config_valid, BlockProductionMethod, BlockVerificationMethod, Validator,
-            ValidatorConfig, ValidatorError, ValidatorStartProgress,
+            is_snapshot_config_valid, BlockProductionMethod, BlockVerificationMethod,
+            TransactionStruct, Validator, ValidatorConfig, ValidatorError, ValidatorStartProgress,
         },
     },
     solana_gossip::{
@@ -1840,6 +1840,12 @@ pub fn main() {
         matches, // comment to align formatting...
         "block_production_method",
         BlockProductionMethod
+    )
+    .unwrap_or_default();
+    validator_config.transaction_struct = value_t!(
+        matches, // comment to align formatting...
+        "transaction_struct",
+        TransactionStruct
     )
     .unwrap_or_default();
     validator_config.enable_block_production_forwarding = staked_nodes_overrides_path.is_some();

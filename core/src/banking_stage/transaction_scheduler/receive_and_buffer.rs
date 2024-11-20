@@ -48,8 +48,8 @@ use {
 };
 
 pub(crate) trait ReceiveAndBuffer {
-    type Transaction: TransactionWithMeta;
-    type Container: StateContainer<Self::Transaction>;
+    type Transaction: TransactionWithMeta + Send + Sync;
+    type Container: StateContainer<Self::Transaction> + Send + Sync;
 
     /// Returns whether the packet receiver is still connected.
     fn receive_and_buffer_packets(
@@ -302,9 +302,9 @@ impl SanitizedTransactionReceiveAndBuffer {
     }
 }
 
-struct TransactionViewReceiveAndBuffer {
-    receiver: BankingPacketReceiver,
-    bank_forks: Arc<RwLock<BankForks>>,
+pub(crate) struct TransactionViewReceiveAndBuffer {
+    pub receiver: BankingPacketReceiver,
+    pub bank_forks: Arc<RwLock<BankForks>>,
 }
 
 impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
@@ -371,8 +371,8 @@ impl TransactionViewReceiveAndBuffer {
     fn handle_message(
         &mut self,
         container: &mut TransactionStateContainerWithBytes,
-        timing_metrics: &mut SchedulerTimingMetrics,
-        count_metrics: &mut SchedulerCountMetrics,
+        _timing_metrics: &mut SchedulerTimingMetrics,
+        _count_metrics: &mut SchedulerCountMetrics,
         _decision: &BufferedPacketsDecision,
         packet_batch_message: BankingPacketBatch,
     ) {
@@ -504,6 +504,8 @@ impl TransactionViewReceiveAndBuffer {
                 let (priority, cost) =
                     calculate_priority_and_cost(&transaction, &fee_budget_limits, &working_bank);
 
+                // Freeze the packets in container.
+                container.freeze(index, bytes);
                 container.insert_new_transaction(
                     index,
                     SanitizedTransactionTTL {

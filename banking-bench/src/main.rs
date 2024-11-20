@@ -9,7 +9,7 @@ use {
     solana_core::{
         banking_stage::BankingStage,
         banking_trace::{BankingPacketBatch, BankingTracer, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT},
-        validator::BlockProductionMethod,
+        validator::{BlockProductionMethod, TransactionStruct},
     },
     solana_gossip::cluster_info::{ClusterInfo, Node},
     solana_ledger::{
@@ -289,6 +289,14 @@ fn main() {
                 .help(BlockProductionMethod::cli_message()),
         )
         .arg(
+            Arg::with_name("transaction_struct")
+                .long("transaction-struct")
+                .value_name("type")
+                .takes_value(true)
+                .possible_values(TransactionStruct::cli_names())
+                .help(TransactionStruct::cli_message()),
+        )
+        .arg(
             Arg::new("num_banking_threads")
                 .long("num-banking-threads")
                 .takes_value(true)
@@ -317,6 +325,9 @@ fn main() {
 
     let block_production_method = matches
         .value_of_t::<BlockProductionMethod>("block_production_method")
+        .unwrap_or_default();
+    let transaction_struct = matches
+        .value_of_t::<TransactionStruct>("transaction_struct")
         .unwrap_or_default();
     let num_banking_threads = matches
         .value_of_t::<u32>("num_banking_threads")
@@ -462,6 +473,7 @@ fn main() {
     };
     let banking_stage = BankingStage::new_num_threads(
         block_production_method,
+        transaction_struct,
         &cluster_info,
         &poh_recorder,
         non_vote_receiver,

@@ -6,7 +6,7 @@ use {
             BankingPacketBatch, BankingTracer, ChannelLabel, TimedTracedEvent, TracedEvent,
             TracedSender, TracerThread, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT, BASENAME,
         },
-        validator::BlockProductionMethod,
+        validator::{BlockProductionMethod, TransactionStruct},
     },
     bincode::deserialize_from,
     crossbeam_channel::{unbounded, Sender},
@@ -802,6 +802,7 @@ impl BankingSimulator {
         let prioritization_fee_cache = &Arc::new(PrioritizationFeeCache::new(0u64));
         let banking_stage = BankingStage::new_num_threads(
             block_production_method.clone(),
+            TransactionStruct::default(),
             &cluster_info,
             &poh_recorder,
             non_vote_receiver,

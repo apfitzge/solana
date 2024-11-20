@@ -21,7 +21,7 @@ use {
     },
     solana_core::{
         banking_trace::{DirByteLimit, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT},
-        validator::{BlockProductionMethod, BlockVerificationMethod},
+        validator::{BlockProductionMethod, BlockVerificationMethod, TransactionStruct},
     },
     solana_faucet::faucet::{self, FAUCET_PORT},
     solana_ledger::use_snapshot_archives_at_startup,
@@ -1595,6 +1595,14 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                 .takes_value(true)
                 .possible_values(BlockProductionMethod::cli_names())
                 .help(BlockProductionMethod::cli_message()),
+        )
+        .arg(
+            Arg::with_name("transaction_struct")
+                .long("transaction-struct")
+                .value_name("struct")
+                .takes_value(true)
+                .possible_values(TransactionStruct::cli_names())
+                .help(TransactionStruct::cli_message()),
         )
         .arg(
             Arg::with_name("unified_scheduler_handler_threads")
