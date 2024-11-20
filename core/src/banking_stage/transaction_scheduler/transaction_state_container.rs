@@ -217,11 +217,11 @@ impl MaybeBytes {
     fn as_mut(&mut self) {
         match core::mem::replace(self, MaybeBytes::None) {
             MaybeBytes::Bytes(bytes) => {
-                *self = MaybeBytes::BytesMut(
-                    bytes
-                        .try_into_mut()
-                        .expect("all `Bytes` copies should be dropped before this call"),
-                );
+                let mut bytes = bytes
+                    .try_into_mut()
+                    .expect("all `Bytes` copies should be dropped before this call");
+                bytes.clear();
+                *self = MaybeBytes::BytesMut(bytes);
             }
             _ => panic!("invalid state to as_mut"),
         }
@@ -239,7 +239,8 @@ impl TransactionStateContainerWithBytes {
     }
 
     /// Return space that is will not be used for now.
-    pub fn return_space(&mut self, index: TransactionId, bytes: BytesMut) {
+    pub fn return_space(&mut self, index: TransactionId, mut bytes: BytesMut) {
+        bytes.clear();
         self.bytes_buffer[index as usize] = MaybeBytes::BytesMut(bytes);
         self.index_stack.push(index);
     }
