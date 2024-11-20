@@ -48,7 +48,8 @@ impl Bank {
             .transaction_processor
             .sysvar_cache()
             .get_slot_hashes()
-            .map_err(|_| AddressLoaderError::SlotHashesSysvarNotFound)?;
+            .unwrap_or_default();
+        // .map_err(|_| AddressLoaderError::SlotHashesSysvarNotFound)?;
 
         let mut deactivation_slot = u64::MAX;
         let mut loaded_addresses = LoadedAddresses::default();

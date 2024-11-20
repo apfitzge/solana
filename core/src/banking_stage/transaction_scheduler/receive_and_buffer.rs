@@ -388,12 +388,12 @@ impl TransactionViewReceiveAndBuffer {
         let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
 
         let mut error_metrics = TransactionErrorMetrics::default();
-        const CHUNK_SIZE: usize = 128;
-        let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
-        let mut transactions = ArrayVec::<_, CHUNK_SIZE>::new();
-        let mut max_ages = ArrayVec::<_, CHUNK_SIZE>::new();
-        let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
-        let mut index_bytes_vec = ArrayVec::<_, CHUNK_SIZE>::new();
+        // const CHUNK_SIZE: usize = 128;
+        // let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
+        // let mut transactions = ArrayVec::<_, CHUNK_SIZE>::new();
+        // let mut max_ages = ArrayVec::<_, CHUNK_SIZE>::new();
+        // let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
+        // let mut index_bytes_vec = ArrayVec::<_, CHUNK_SIZE>::new();
 
         for packet_batch in packet_batch_message.0.iter() {
             for packet in packet_batch.iter() {
@@ -464,42 +464,24 @@ impl TransactionViewReceiveAndBuffer {
                     continue;
                 };
 
-                // put transaction into the batch
-                transactions.push(transaction);
-                max_ages.push(calculate_max_age(
-                    sanitized_epoch,
-                    deactivation_slot,
-                    alt_resolved_slot,
-                ));
-                fee_budget_limits_vec.push(FeeBudgetLimits::from(compute_budget_limits));
-                index_bytes_vec.push((index, bytes));
+                let max_age =
+                    calculate_max_age(sanitized_epoch, deactivation_slot, alt_resolved_slot);
+                let fee_budget_limits = FeeBudgetLimits::from(compute_budget_limits);
 
-                // TODO: make sure this isn't dumb as fuck.
-                if transactions.len() == CHUNK_SIZE {
-                    break;
-                }
-            }
+                // // put transaction into the batch
+                // transactions.push(transaction);
+                // max_ages.push(calculate_max_age(
+                //     sanitized_epoch,
+                //     deactivation_slot,
+                //     alt_resolved_slot,
+                // ));
+                // fee_budget_limits_vec.push(FeeBudgetLimits::from(compute_budget_limits));
+                // index_bytes_vec.push((index, bytes));
 
-            let check_results = working_bank.check_transactions(
-                &transactions[..],
-                &lock_results[..transactions.len()],
-                MAX_PROCESSING_AGE,
-                &mut error_metrics,
-            );
-
-            for ((((transaction, max_age), fee_budget_limits), (index, bytes)), check_result) in
-                transactions
-                    .drain(..)
-                    .zip(max_ages.drain(..))
-                    .zip(fee_budget_limits_vec.drain(..))
-                    .zip(index_bytes_vec.drain(..))
-                    .zip(check_results)
-            {
-                if check_result.is_err() {
-                    drop(transaction);
-                    container.return_space(index, bytes.try_into_mut().expect("no leaks"));
-                    continue;
-                }
+                // // TODO: make sure this isn't dumb as fuck.
+                // if transactions.len() == CHUNK_SIZE {
+                //     break;
+                // }
 
                 let (priority, cost) =
                     calculate_priority_and_cost(&transaction, &fee_budget_limits, &working_bank);
@@ -517,6 +499,44 @@ impl TransactionViewReceiveAndBuffer {
                     cost,
                 );
             }
+
+            // let check_results = working_bank.check_transactions(
+            //     &transactions[..],
+            //     &lock_results[..transactions.len()],
+            //     MAX_PROCESSING_AGE,
+            //     &mut error_metrics,
+            // );
+
+            // for ((((transaction, max_age), fee_budget_limits), (index, bytes)), check_result) in
+            //     transactions
+            //         .drain(..)
+            //         .zip(max_ages.drain(..))
+            //         .zip(fee_budget_limits_vec.drain(..))
+            //         .zip(index_bytes_vec.drain(..))
+            //         .zip(check_results)
+            // {
+            //     if check_result.is_err() {
+            //         drop(transaction);
+            //         container.return_space(index, bytes.try_into_mut().expect("no leaks"));
+            //         continue;
+            //     }
+
+            //     let (priority, cost) =
+            //         calculate_priority_and_cost(&transaction, &fee_budget_limits, &working_bank);
+
+            //     // Freeze the packets in container.
+            //     container.freeze(index, bytes);
+            //     container.insert_new_transaction(
+            //         index,
+            //         SanitizedTransactionTTL {
+            //             transaction,
+            //             max_age,
+            //         },
+            //         None,
+            //         priority,
+            //         cost,
+            //     );
+            // }
         }
     }
 }

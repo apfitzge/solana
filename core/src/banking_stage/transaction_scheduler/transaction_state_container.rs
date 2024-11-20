@@ -114,7 +114,8 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
     }
 
     fn remaining_queue_capacity(&self) -> usize {
-        self.priority_queue.capacity() - self.priority_queue.len()
+        // self.priority_queue.capacity() - self.priority_queue.len()
+        self.priority_queue.capacity() - self.id_to_transaction_state.len()
     }
 
     fn pop(&mut self) -> Option<TransactionPriorityId> {
@@ -257,12 +258,10 @@ impl TransactionStateContainerWithBytes {
 type TxB = RuntimeTransaction<ResolvedTransactionView<Bytes>>;
 impl StateContainer<TxB> for TransactionStateContainerWithBytes {
     fn with_capacity(capacity: usize) -> Self {
-        const EXTRA_CAPACITY: usize = 256;
-        assert!(capacity + EXTRA_CAPACITY < u32::MAX as usize);
-        let extra_capacity = capacity + EXTRA_CAPACITY;
-        let mut bytes = BytesMut::zeroed(extra_capacity * PACKET_DATA_SIZE);
+        assert!(2 * capacity < u32::MAX as usize);
+        let extra_capacity = 2 * capacity;
         let bytes_buffer = (0..extra_capacity)
-            .map(|_| bytes.split_to(PACKET_DATA_SIZE))
+            .map(|_| BytesMut::with_capacity(PACKET_DATA_SIZE))
             .map(MaybeBytes::BytesMut)
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -271,8 +270,11 @@ impl StateContainer<TxB> for TransactionStateContainerWithBytes {
             .map(|index| index as u32)
             .collect();
 
+        let inner = TransactionStateContainer::with_capacity(capacity);
+        assert_eq!(inner.remaining_queue_capacity(), capacity);
+
         Self {
-            inner: TransactionStateContainer::with_capacity(capacity),
+            inner,
             bytes_buffer,
             index_stack,
         }
@@ -315,8 +317,12 @@ impl StateContainer<TxB> for TransactionStateContainerWithBytes {
         priority: u64,
         cost: u64,
     ) -> bool {
-        self.inner
-            .insert_new_transaction(transaction_id, transaction_ttl, packet, priority, cost)
+        let priority_id = TransactionPriorityId::new(priority, transaction_id);
+        self.inner.id_to_transaction_state.insert(
+            transaction_id,
+            TransactionState::new(transaction_ttl, packet, priority, cost),
+        );
+        self.push_id_into_queue(priority_id)
     }
 
     #[inline]
@@ -325,13 +331,25 @@ impl StateContainer<TxB> for TransactionStateContainerWithBytes {
         transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL<TxB>,
     ) {
-        self.inner
-            .retry_transaction(transaction_id, transaction_ttl);
+        let transaction_state = self
+            .get_mut_transaction_state(&transaction_id)
+            .expect("transaction must exist");
+        let priority_id = TransactionPriorityId::new(transaction_state.priority(), transaction_id);
+        transaction_state.transition_to_unprocessed(transaction_ttl);
+        self.push_id_into_queue(priority_id);
     }
 
-    #[inline]
+    // This **cannot** be a simple wrapper because we need to call `remove_by_id`
+    // on the "outer" container in order to actually free bytes on capacity drops.
     fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
-        self.inner.push_id_into_queue(priority_id)
+        if self.remaining_queue_capacity() == 0 {
+            let popped_id = self.inner.priority_queue.push_pop_min(priority_id);
+            self.remove_by_id(&popped_id.id);
+            true
+        } else {
+            self.inner.priority_queue.push(priority_id);
+            false
+        }
     }
 
     fn remove_by_id(&mut self, id: &TransactionId) {
@@ -341,6 +359,7 @@ impl StateContainer<TxB> for TransactionStateContainerWithBytes {
         // Re-use the `Bytes` copy by pushing the index back to the stack.
         let index = *id;
         self.bytes_buffer[index as usize].as_mut();
+        self.index_stack.push(index);
     }
 
     #[inline]
