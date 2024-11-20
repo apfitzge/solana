@@ -259,13 +259,17 @@ impl StateContainer<TxB> for TransactionStateContainerWithBytes {
     fn with_capacity(capacity: usize) -> Self {
         const EXTRA_CAPACITY: usize = 256;
         assert!(capacity + EXTRA_CAPACITY < u32::MAX as usize);
-        let mut bytes = BytesMut::with_capacity(PACKET_DATA_SIZE * (capacity + EXTRA_CAPACITY));
-        let bytes_buffer = (0..capacity)
+        let extra_capacity = capacity + EXTRA_CAPACITY;
+        let mut bytes = BytesMut::zeroed(extra_capacity * PACKET_DATA_SIZE);
+        let bytes_buffer = (0..extra_capacity)
             .map(|_| bytes.split_to(PACKET_DATA_SIZE))
             .map(MaybeBytes::BytesMut)
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let index_stack = (0..capacity).rev().map(|index| index as u32).collect();
+        let index_stack = (0..extra_capacity)
+            .rev()
+            .map(|index| index as u32)
+            .collect();
 
         Self {
             inner: TransactionStateContainer::with_capacity(capacity),
