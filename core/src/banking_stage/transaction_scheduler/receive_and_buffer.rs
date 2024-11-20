@@ -404,7 +404,7 @@ impl TransactionViewReceiveAndBuffer {
                 // The container has extra capacity, so as long as we are not
                 // leaking indexes this can never fail.
                 let (index, mut bytes) = container.reserve_space().expect("reserve_space failed");
-                bytes.copy_from_slice(packet_data);
+                bytes.extend_from_slice(packet_data);
                 let bytes = bytes.freeze();
 
                 let Ok(view) = SanitizedTransactionView::try_new_sanitized(bytes.clone()) else {

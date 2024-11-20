@@ -358,6 +358,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
                             continue;
                         }
                     }
+                    drop(transaction);
                     container.remove_by_id(&id);
                 }
 

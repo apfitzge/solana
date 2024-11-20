@@ -386,6 +386,7 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
                 &mut error_counters,
             );
 
+            drop(sanitized_txs);
             for (result, id) in check_results.into_iter().zip(chunk.iter()) {
                 if result.is_err() {
                     saturating_add_assign!(num_dropped_on_age_and_status, 1);
