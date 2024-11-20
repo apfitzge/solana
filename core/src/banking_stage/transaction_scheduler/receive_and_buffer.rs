@@ -371,11 +371,12 @@ impl TransactionViewReceiveAndBuffer {
     fn handle_message(
         &mut self,
         container: &mut TransactionStateContainerWithBytes,
-        _timing_metrics: &mut SchedulerTimingMetrics,
-        _count_metrics: &mut SchedulerCountMetrics,
+        timing_metrics: &mut SchedulerTimingMetrics,
+        count_metrics: &mut SchedulerCountMetrics,
         _decision: &BufferedPacketsDecision,
         packet_batch_message: BankingPacketBatch,
     ) {
+        let start = Instant::now();
         // Sanitize packets, generate IDs, and insert into the container.
         let (root_bank, working_bank) = {
             let bank_forks = self.bank_forks.read().unwrap();
@@ -387,7 +388,7 @@ impl TransactionViewReceiveAndBuffer {
         let sanitized_epoch = root_bank.epoch();
         let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
 
-        let mut error_metrics = TransactionErrorMetrics::default();
+        // let mut error_metrics = TransactionErrorMetrics::default();
         // const CHUNK_SIZE: usize = 128;
         // let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
         // let mut transactions = ArrayVec::<_, CHUNK_SIZE>::new();
@@ -395,11 +396,17 @@ impl TransactionViewReceiveAndBuffer {
         // let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
         // let mut index_bytes_vec = ArrayVec::<_, CHUNK_SIZE>::new();
 
+        let mut num_received = 0usize;
+        let mut num_buffered = 0usize;
+        let mut num_dropped_on_capacity = 0usize;
+        let mut num_dropped_on_receive = 0usize;
         for packet_batch in packet_batch_message.0.iter() {
             for packet in packet_batch.iter() {
                 let Some(packet_data) = packet.data(..) else {
                     continue;
                 };
+
+                num_received += 1;
 
                 // The container has extra capacity, so as long as we are not
                 // leaking indexes this can never fail.
@@ -408,11 +415,13 @@ impl TransactionViewReceiveAndBuffer {
                 let bytes = bytes.freeze();
 
                 let Ok(view) = SanitizedTransactionView::try_new_sanitized(bytes.clone()) else {
+                    num_dropped_on_receive += 1;
                     container.return_space(index, bytes.try_into_mut().expect("no leaks"));
                     continue;
                 };
 
                 if check_excessive_precompiles(view.program_instructions_iter()).is_err() {
+                    num_dropped_on_receive += 1;
                     drop(view);
                     container.return_space(index, bytes.try_into_mut().expect("no leaks"));
                     continue;
@@ -423,6 +432,7 @@ impl TransactionViewReceiveAndBuffer {
                     MessageHash::Compute,
                     None,
                 ) else {
+                    num_dropped_on_receive += 1;
                     container.return_space(index, bytes.try_into_mut().expect("no leaks"));
                     continue;
                 };
@@ -431,6 +441,7 @@ impl TransactionViewReceiveAndBuffer {
                 let Ok((loaded_addresses, deactivation_slot)) =
                     root_bank.load_addresses_from_ref(transaction.address_table_lookup_iter())
                 else {
+                    num_dropped_on_receive += 1;
                     drop(transaction);
                     container.return_space(index, bytes.try_into_mut().expect("no leaks"));
                     continue;
@@ -441,6 +452,7 @@ impl TransactionViewReceiveAndBuffer {
                     Some(loaded_addresses),
                     root_bank.get_reserved_account_keys(),
                 ) else {
+                    num_dropped_on_receive += 1;
                     container.return_space(index, bytes.try_into_mut().expect("no leaks"));
                     continue;
                 };
@@ -451,6 +463,7 @@ impl TransactionViewReceiveAndBuffer {
                 )
                 .is_err()
                 {
+                    num_dropped_on_receive += 1;
                     drop(transaction);
                     container.return_space(index, bytes.try_into_mut().expect("no leaks"));
                     continue;
@@ -459,6 +472,7 @@ impl TransactionViewReceiveAndBuffer {
                 let Ok(compute_budget_limits) =
                     transaction.compute_budget_limits(&working_bank.feature_set)
                 else {
+                    num_dropped_on_receive += 1;
                     drop(transaction);
                     container.return_space(index, bytes.try_into_mut().expect("no leaks"));
                     continue;
@@ -488,7 +502,8 @@ impl TransactionViewReceiveAndBuffer {
 
                 // Freeze the packets in container.
                 container.freeze(index, bytes);
-                container.insert_new_transaction(
+                num_buffered += 1;
+                if container.insert_new_transaction(
                     index,
                     SanitizedTransactionTTL {
                         transaction,
@@ -497,7 +512,9 @@ impl TransactionViewReceiveAndBuffer {
                     None,
                     priority,
                     cost,
-                );
+                ) {
+                    num_dropped_on_capacity += 1;
+                }
             }
 
             // let check_results = working_bank.check_transactions(
@@ -538,6 +555,22 @@ impl TransactionViewReceiveAndBuffer {
             //     );
             // }
         }
+
+        timing_metrics.update(|timing_metrics| {
+            saturating_add_assign!(
+                timing_metrics.buffer_time_us,
+                start.elapsed().as_micros() as u64
+            );
+        });
+        count_metrics.update(|count_metrics| {
+            saturating_add_assign!(count_metrics.num_received, num_received);
+            saturating_add_assign!(count_metrics.num_buffered, num_buffered);
+            saturating_add_assign!(
+                count_metrics.num_dropped_on_capacity,
+                num_dropped_on_capacity
+            );
+            saturating_add_assign!(count_metrics.num_dropped_on_receive, num_dropped_on_receive);
+        });
     }
 }
 
