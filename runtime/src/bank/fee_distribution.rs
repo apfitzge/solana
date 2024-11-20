@@ -10,9 +10,9 @@ use {
         reward_info::RewardInfo,
         reward_type::RewardType,
         system_program,
-        transaction::SanitizedTransaction,
     },
     solana_svm_rent_collector::svm_rent_collector::SVMRentCollector,
+    solana_svm_transaction::svm_message::SVMMessage,
     solana_vote::vote_account::VoteAccountsHashMap,
     std::{result::Result, sync::atomic::Ordering::Relaxed},
     thiserror::Error,
@@ -73,7 +73,7 @@ impl Bank {
 
     pub fn calculate_reward_for_transaction(
         &self,
-        transaction: &SanitizedTransaction,
+        transaction: &impl SVMMessage,
         fee_budget_limits: &FeeBudgetLimits,
     ) -> u64 {
         let fee_details = solana_fee::calculate_fee_details(

@@ -2,36 +2,49 @@ use {
     super::{
         scheduler_metrics::{SchedulerCountMetrics, SchedulerTimingMetrics},
         transaction_id_generator::TransactionIdGenerator,
-        transaction_state_container::StateContainer,
+        transaction_state_container::{StateContainer, TransactionStateContainerWithBytes},
     },
-    crate::banking_stage::{
-        decision_maker::BufferedPacketsDecision,
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
-        packet_deserializer::PacketDeserializer, scheduler_messages::MaxAge,
-        transaction_scheduler::transaction_state::SanitizedTransactionTTL,
-        TransactionStateContainer,
+    crate::{
+        banking_stage::{
+            decision_maker::BufferedPacketsDecision,
+            immutable_deserialized_packet::ImmutableDeserializedPacket,
+            packet_deserializer::PacketDeserializer, packet_filter::check_excessive_precompiles,
+            scheduler_messages::MaxAge,
+            transaction_scheduler::transaction_state::SanitizedTransactionTTL,
+            TransactionStateContainer,
+        },
+        banking_trace::{BankingPacketBatch, BankingPacketReceiver},
+    },
+    agave_transaction_view::{
+        resolved_transaction_view::ResolvedTransactionView,
+        transaction_view::SanitizedTransactionView,
     },
     arrayvec::ArrayVec,
+    bytes::Bytes,
     core::time::Duration,
-    crossbeam_channel::RecvTimeoutError,
+    crossbeam_channel::{RecvTimeoutError, TryRecvError},
     solana_accounts_db::account_locks::validate_account_locks,
     solana_cost_model::cost_model::CostModel,
     solana_measure::measure_us,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_runtime_transaction::{
         instructions_processor::process_compute_budget_instructions,
-        runtime_transaction::RuntimeTransaction, transaction_with_meta::TransactionWithMeta,
+        runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
+        transaction_with_meta::TransactionWithMeta,
     },
     solana_sdk::{
         address_lookup_table::state::estimate_last_valid_slot,
         clock::{Epoch, Slot, MAX_PROCESSING_AGE},
         fee::FeeBudgetLimits,
         saturating_add_assign,
-        transaction::SanitizedTransaction,
+        transaction::{MessageHash, SanitizedTransaction},
     },
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     solana_svm_transaction::svm_message::SVMMessage,
-    std::sync::{Arc, RwLock},
+    std::{
+        sync::{Arc, RwLock},
+        time::Instant,
+    },
 };
 
 pub(crate) trait ReceiveAndBuffer {
@@ -289,6 +302,223 @@ impl SanitizedTransactionReceiveAndBuffer {
     }
 }
 
+struct TransactionViewReceiveAndBuffer {
+    receiver: BankingPacketReceiver,
+    bank_forks: Arc<RwLock<BankForks>>,
+}
+
+impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
+    type Transaction = RuntimeTransaction<ResolvedTransactionView<Bytes>>;
+    type Container = TransactionStateContainerWithBytes;
+
+    fn receive_and_buffer_packets(
+        &mut self,
+        container: &mut Self::Container,
+        timing_metrics: &mut SchedulerTimingMetrics,
+        count_metrics: &mut SchedulerCountMetrics,
+        decision: &BufferedPacketsDecision,
+    ) -> bool {
+        // Receive packet batches.
+        const TIMEOUT: Duration = Duration::from_millis(10);
+        let start = Instant::now();
+
+        match decision {
+            BufferedPacketsDecision::Consume(_) => {
+                // We have a bank we should be working on.
+                // Do not do a blocking wait, under any circumstances.
+                while start.elapsed() < TIMEOUT {
+                    match self.receiver.try_recv() {
+                        Ok(packet_batch_message) => {
+                            self.handle_message(
+                                container,
+                                timing_metrics,
+                                count_metrics,
+                                decision,
+                                packet_batch_message,
+                            );
+                        }
+                        Err(TryRecvError::Empty) => return true,
+                        Err(TryRecvError::Disconnected) => return false,
+                    };
+                }
+            }
+            BufferedPacketsDecision::Forward
+            | BufferedPacketsDecision::ForwardAndHold
+            | BufferedPacketsDecision::Hold => {
+                while start.elapsed() < TIMEOUT {
+                    match self.receiver.recv_timeout(TIMEOUT) {
+                        Ok(packet_batch_message) => {
+                            self.handle_message(
+                                container,
+                                timing_metrics,
+                                count_metrics,
+                                decision,
+                                packet_batch_message,
+                            );
+                        }
+                        Err(RecvTimeoutError::Timeout) => return true,
+                        Err(RecvTimeoutError::Disconnected) => return false,
+                    };
+                }
+            }
+        }
+
+        true
+    }
+}
+
+impl TransactionViewReceiveAndBuffer {
+    fn handle_message(
+        &mut self,
+        container: &mut TransactionStateContainerWithBytes,
+        timing_metrics: &mut SchedulerTimingMetrics,
+        count_metrics: &mut SchedulerCountMetrics,
+        _decision: &BufferedPacketsDecision,
+        packet_batch_message: BankingPacketBatch,
+    ) {
+        // Sanitize packets, generate IDs, and insert into the container.
+        let (root_bank, working_bank) = {
+            let bank_forks = self.bank_forks.read().unwrap();
+            let root_bank = bank_forks.root_bank();
+            let working_bank = bank_forks.working_bank();
+            (root_bank, working_bank)
+        };
+        let alt_resolved_slot = root_bank.slot();
+        let sanitized_epoch = root_bank.epoch();
+        let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
+
+        let mut error_metrics = TransactionErrorMetrics::default();
+        const CHUNK_SIZE: usize = 128;
+        let lock_results: [_; CHUNK_SIZE] = core::array::from_fn(|_| Ok(()));
+        let mut transactions = ArrayVec::<_, CHUNK_SIZE>::new();
+        let mut max_ages = ArrayVec::<_, CHUNK_SIZE>::new();
+        let mut fee_budget_limits_vec = ArrayVec::<_, CHUNK_SIZE>::new();
+        let mut index_bytes_vec = ArrayVec::<_, CHUNK_SIZE>::new();
+
+        for packet_batch in packet_batch_message.0.iter() {
+            for packet in packet_batch.iter() {
+                let Some(packet_data) = packet.data(..) else {
+                    continue;
+                };
+
+                // The container has extra capacity, so as long as we are not
+                // leaking indexes this can never fail.
+                let (index, mut bytes) = container.reserve_space().expect("reserve_space failed");
+                bytes.copy_from_slice(packet_data);
+                let bytes = bytes.freeze();
+
+                let Ok(view) = SanitizedTransactionView::try_new_sanitized(bytes.clone()) else {
+                    container.return_space(index, bytes.try_into_mut().expect("no leaks"));
+                    continue;
+                };
+
+                if check_excessive_precompiles(view.program_instructions_iter()).is_err() {
+                    drop(view);
+                    container.return_space(index, bytes.try_into_mut().expect("no leaks"));
+                    continue;
+                }
+
+                let Ok(transaction) = RuntimeTransaction::<SanitizedTransactionView<_>>::try_from(
+                    view,
+                    MessageHash::Compute,
+                    None,
+                ) else {
+                    container.return_space(index, bytes.try_into_mut().expect("no leaks"));
+                    continue;
+                };
+
+                // Load addresses for the transaction.
+                let Ok((loaded_addresses, deactivation_slot)) =
+                    root_bank.load_addresses_from_ref(transaction.address_table_lookup_iter())
+                else {
+                    drop(transaction);
+                    container.return_space(index, bytes.try_into_mut().expect("no leaks"));
+                    continue;
+                };
+
+                let Ok(transaction) = RuntimeTransaction::<ResolvedTransactionView<_>>::try_from(
+                    transaction,
+                    Some(loaded_addresses),
+                    root_bank.get_reserved_account_keys(),
+                ) else {
+                    container.return_space(index, bytes.try_into_mut().expect("no leaks"));
+                    continue;
+                };
+
+                if validate_account_locks(
+                    transaction.account_keys(),
+                    transaction_account_lock_limit,
+                )
+                .is_err()
+                {
+                    drop(transaction);
+                    container.return_space(index, bytes.try_into_mut().expect("no leaks"));
+                    continue;
+                }
+
+                let Ok(compute_budget_limits) =
+                    transaction.compute_budget_limits(&working_bank.feature_set)
+                else {
+                    drop(transaction);
+                    container.return_space(index, bytes.try_into_mut().expect("no leaks"));
+                    continue;
+                };
+
+                // put transaction into the batch
+                transactions.push(transaction);
+                max_ages.push(calculate_max_age(
+                    sanitized_epoch,
+                    deactivation_slot,
+                    alt_resolved_slot,
+                ));
+                fee_budget_limits_vec.push(FeeBudgetLimits::from(compute_budget_limits));
+                index_bytes_vec.push((index, bytes));
+
+                // TODO: make sure this isn't dumb as fuck.
+                if transactions.len() == CHUNK_SIZE {
+                    break;
+                }
+            }
+
+            let check_results = working_bank.check_transactions(
+                &transactions[..],
+                &lock_results[..transactions.len()],
+                MAX_PROCESSING_AGE,
+                &mut error_metrics,
+            );
+
+            for ((((transaction, max_age), fee_budget_limits), (index, bytes)), check_result) in
+                transactions
+                    .drain(..)
+                    .zip(max_ages.drain(..))
+                    .zip(fee_budget_limits_vec.drain(..))
+                    .zip(index_bytes_vec.drain(..))
+                    .zip(check_results)
+            {
+                if check_result.is_err() {
+                    drop(transaction);
+                    container.return_space(index, bytes.try_into_mut().expect("no leaks"));
+                    continue;
+                }
+
+                let (priority, cost) =
+                    calculate_priority_and_cost(&transaction, &fee_budget_limits, &working_bank);
+
+                container.insert_new_transaction(
+                    index,
+                    SanitizedTransactionTTL {
+                        transaction,
+                        max_age,
+                    },
+                    None,
+                    priority,
+                    cost,
+                );
+            }
+        }
+    }
+}
+
 /// Calculate priority and cost for a transaction:
 ///
 /// Cost is calculated through the `CostModel`,
@@ -308,7 +538,7 @@ impl SanitizedTransactionReceiveAndBuffer {
 /// Any difference in the prioritization is negligible for
 /// the current transaction costs.
 fn calculate_priority_and_cost(
-    transaction: &RuntimeTransaction<SanitizedTransaction>,
+    transaction: &impl TransactionWithMeta,
     fee_budget_limits: &FeeBudgetLimits,
     bank: &Bank,
 ) -> (u64, u64) {

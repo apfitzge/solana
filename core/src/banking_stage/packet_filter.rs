@@ -1,7 +1,8 @@
 use {
     super::immutable_deserialized_packet::ImmutableDeserializedPacket,
     solana_builtins_default_costs::BUILTIN_INSTRUCTION_COSTS,
-    solana_sdk::{ed25519_program, saturating_add_assign, secp256k1_program},
+    solana_sdk::{ed25519_program, pubkey::Pubkey, saturating_add_assign, secp256k1_program},
+    solana_svm_transaction::instruction::SVMInstruction,
     thiserror::Error,
 };
 
@@ -37,19 +38,30 @@ impl ImmutableDeserializedPacket {
     /// Returns ok if the number of precompile signature verifications
     /// performed by the transaction is not excessive.
     pub fn check_excessive_precompiles(&self) -> Result<(), PacketFilterFailure> {
-        let mut num_precompile_signatures: u64 = 0;
-        for (program_id, ix) in self.transaction().get_message().program_instructions_iter() {
-            if secp256k1_program::check_id(program_id) || ed25519_program::check_id(program_id) {
-                let num_signatures = ix.data.first().map_or(0, |byte| u64::from(*byte));
-                saturating_add_assign!(num_precompile_signatures, num_signatures);
-            }
-        }
+        check_excessive_precompiles(
+            self.transaction()
+                .get_message()
+                .program_instructions_iter()
+                .map(|(id, ix)| (id, SVMInstruction::from(ix))),
+        )
+    }
+}
 
-        const MAX_ALLOWED_PRECOMPILE_SIGNATURES: u64 = 8;
-        if num_precompile_signatures <= MAX_ALLOWED_PRECOMPILE_SIGNATURES {
-            Ok(())
-        } else {
-            Err(PacketFilterFailure::ExcessivePrecompiles)
+pub fn check_excessive_precompiles<'a>(
+    instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)>,
+) -> Result<(), PacketFilterFailure> {
+    let mut num_precompile_signatures: u64 = 0;
+    for (program_id, ix) in instructions {
+        if secp256k1_program::check_id(program_id) || ed25519_program::check_id(program_id) {
+            let num_signatures = ix.data.first().map_or(0, |byte| u64::from(*byte));
+            saturating_add_assign!(num_precompile_signatures, num_signatures);
         }
+    }
+
+    const MAX_ALLOWED_PRECOMPILE_SIGNATURES: u64 = 8;
+    if num_precompile_signatures <= MAX_ALLOWED_PRECOMPILE_SIGNATURES {
+        Ok(())
+    } else {
+        Err(PacketFilterFailure::ExcessivePrecompiles)
     }
 }
