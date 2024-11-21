@@ -17,7 +17,7 @@ use {
     },
     agave_transaction_view::{
         resolved_transaction_view::ResolvedTransactionView,
-        transaction_view::SanitizedTransactionView,
+        transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
     },
     arrayvec::ArrayVec,
     bytes::Bytes,
@@ -438,9 +438,15 @@ impl TransactionViewReceiveAndBuffer {
                 };
 
                 // Load addresses for the transaction.
-                let Ok((loaded_addresses, deactivation_slot)) =
-                    root_bank.load_addresses_from_ref(transaction.address_table_lookup_iter())
-                else {
+                let load_addresses_result = match transaction.version() {
+                    TransactionVersion::Legacy => Ok((None, u64::MAX)),
+                    TransactionVersion::V0 => root_bank
+                        .load_addresses_from_ref(transaction.address_table_lookup_iter())
+                        .map(|(loaded_addresses, deactivation_slot)| {
+                            (Some(loaded_addresses), deactivation_slot)
+                        }),
+                };
+                let Ok((loaded_addresses, deactivation_slot)) = load_addresses_result else {
                     num_dropped_on_receive += 1;
                     drop(transaction);
                     container.return_space(index, bytes.try_into_mut().expect("no leaks"));
@@ -449,7 +455,7 @@ impl TransactionViewReceiveAndBuffer {
 
                 let Ok(transaction) = RuntimeTransaction::<ResolvedTransactionView<_>>::try_from(
                     transaction,
-                    Some(loaded_addresses),
+                    loaded_addresses,
                     root_bank.get_reserved_account_keys(),
                 ) else {
                     num_dropped_on_receive += 1;
