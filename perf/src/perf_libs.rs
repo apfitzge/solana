@@ -8,7 +8,7 @@ use {
         fs,
         os::raw::{c_int, c_uint},
         path::{Path, PathBuf},
-        sync::{Once, OnceLock},
+        sync::OnceLock,
     },
 };
 
@@ -168,17 +168,4 @@ pub fn init_cuda() {
 
     // Last resort!  Blindly load the shared object and hope it all works out
     init(OsStr::new("libcuda-crypt.so"))
-}
-
-pub fn api() -> Option<&'static Container<Api<'static>>> {
-    {
-        static INIT_HOOK: Once = Once::new();
-        INIT_HOOK.call_once(|| {
-            if std::env::var("TEST_PERF_LIBS_CUDA").is_ok() {
-                init_cuda();
-            }
-        });
-    }
-
-    API.get()
 }
