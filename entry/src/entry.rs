@@ -16,7 +16,7 @@ use {
     solana_metrics::*,
     solana_packet::Meta,
     solana_perf::{
-        cuda_runtime::PinnedVec,
+        cuda_runtime::RecycledVec,
         packet::{Packet, PacketBatch, PacketBatchRecycler, PACKETS_PER_BATCH},
         perf_libs,
         recycler::Recycler,
@@ -260,7 +260,7 @@ enum VerifyAction {
 
 pub struct GpuVerificationData {
     thread_h: Option<JoinHandle<u64>>,
-    hashes: Option<Arc<Mutex<PinnedVec<Hash>>>>,
+    hashes: Option<Arc<Mutex<RecycledVec<Hash>>>>,
     verifications: Option<Vec<(VerifyAction, Hash)>>,
 }
 
@@ -323,10 +323,10 @@ impl<Tx: TransactionWithMeta> EntrySigVerificationState<Tx> {
 
 #[derive(Default, Clone)]
 pub struct VerifyRecyclers {
-    hash_recycler: Recycler<PinnedVec<Hash>>,
-    tick_count_recycler: Recycler<PinnedVec<u64>>,
+    hash_recycler: Recycler<RecycledVec<Hash>>,
+    tick_count_recycler: Recycler<RecycledVec<u64>>,
     packet_recycler: PacketBatchRecycler,
-    out_recycler: Recycler<PinnedVec<u8>>,
+    out_recycler: Recycler<RecycledVec<u8>>,
     tx_offset_recycler: Recycler<sigverify::TxOffset>,
 }
 
