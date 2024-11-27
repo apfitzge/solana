@@ -1695,11 +1695,7 @@ fn confirm_slot_entries(
     let last_entry_hash = entries.last().map(|e| e.hash);
     let verifier = if !skip_verification {
         datapoint_debug!("verify-batch-size", ("size", num_entries as i64, i64));
-        let entry_state = entries.start_verify(
-            &progress.last_entry,
-            replay_tx_thread_pool,
-            recyclers.clone(),
-        );
+        let entry_state = entries.start_verify(&progress.last_entry, replay_tx_thread_pool);
         if entry_state.status() == EntryVerificationStatus::Failure {
             warn!("Ledger proof of history failed at slot: {}", slot);
             return Err(BlockError::InvalidEntryHash.into());
@@ -1788,7 +1784,7 @@ fn confirm_slot_entries(
     }
 
     if let Some(mut verifier) = verifier {
-        let verified = verifier.finish_verify(replay_tx_thread_pool);
+        let verified = verifier.finish_verify();
         *poh_verify_elapsed += verifier.poh_duration_us();
         if !verified {
             warn!("Ledger proof of history failed at slot: {}", bank.slot());
