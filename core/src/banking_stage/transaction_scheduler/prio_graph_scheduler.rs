@@ -172,7 +172,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
 
         let mut unblock_this_batch =
             Vec::with_capacity(self.consume_work_senders.len() * TARGET_NUM_TRANSACTIONS_PER_BATCH);
-        const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 100_000;
+        const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 10_000;
         let mut num_scheduled: usize = 0;
         let mut num_sent: usize = 0;
         let mut num_unschedulable: usize = 0;
