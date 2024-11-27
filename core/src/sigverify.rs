@@ -13,13 +13,13 @@ use {
         sigverify_stage::{SigVerifier, SigVerifyServiceError},
     },
     agave_banking_stage_ingress_types::BankingPacketBatch,
-    solana_perf::{cuda_runtime::PinnedVec, packet::PacketBatch, recycler::Recycler, sigverify},
+    solana_perf::{cuda_runtime::RecycledVec, packet::PacketBatch, recycler::Recycler, sigverify},
 };
 
 pub struct TransactionSigVerifier {
     packet_sender: BankingPacketSender,
     recycler: Recycler<TxOffset>,
-    recycler_out: Recycler<PinnedVec<u8>>,
+    recycler_out: Recycler<RecycledVec<u8>>,
     reject_non_vote: bool,
 }
 
