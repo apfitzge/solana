@@ -3532,7 +3532,7 @@ pub mod tests {
             Ok(())
         });
 
-        let mock_program_id = solana_sdk::pubkey::new_rand();
+        let mock_program_id = Pubkey::new_unique();
 
         let (bank, _bank_forks) = Bank::new_with_mockup_builtin_for_tests(
             &genesis_config,
@@ -3613,8 +3613,9 @@ pub mod tests {
                     .unwrap()
                     .last_blockhash
             );
-            // ... but should affect bank hash
-            assert_ne!(ok_bank_details, bank_details);
+            // AND should not affect bankhash IF the rent is collected during freeze
+            // for the mint account (it is in this case)
+            assert_eq!(ok_bank_details, bank_details);
             // Different types of transaction failure should not affect bank hash
             if let Some(prev_bank_details) = &err_bank_details {
                 assert_eq!(
