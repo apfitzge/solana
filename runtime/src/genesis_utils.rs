@@ -170,14 +170,28 @@ pub fn create_genesis_config_with_leader(
     validator_pubkey: &Pubkey,
     validator_stake_lamports: u64,
 ) -> GenesisConfigInfo {
-    // Use deterministic keypairs so we don't get confused by randomness in tests
-    // These specific keypair seeds were chosen without specific reason and only
-    // for determinism.
+    // Use deterministic keypair so we don't get confused by randomness in tests
     let mint_keypair = Keypair::from_seed(&[
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
         25, 26, 27, 28, 29, 30, 31,
     ])
     .unwrap();
+
+    create_genesis_config_with_leader_with_mint_keypair(
+        mint_keypair,
+        mint_lamports,
+        validator_pubkey,
+        validator_stake_lamports,
+    )
+}
+
+pub fn create_genesis_config_with_leader_with_mint_keypair(
+    mint_keypair: Keypair,
+    mint_lamports: u64,
+    validator_pubkey: &Pubkey,
+    validator_stake_lamports: u64,
+) -> GenesisConfigInfo {
+    // Use deterministic keypair so we don't get confused by randomness in tests
     let voting_keypair = Keypair::from_seed(&[
         32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
         55, 56, 57, 58, 59, 60, 61, 62, 63,
