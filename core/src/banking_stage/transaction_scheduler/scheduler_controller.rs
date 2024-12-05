@@ -55,6 +55,8 @@ pub(crate) struct SchedulerController<C: LikeClusterInfo, R: ReceiveAndBuffer> {
     worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
     /// State for forwarding packets to the leader, if enabled.
     forwarder: Option<Forwarder<C>>,
+    /// Enable or disable pre-graph filtering.
+    pre_graph_filtered_enabled: bool,
 }
 
 impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
@@ -77,6 +79,7 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
             timing_metrics: SchedulerTimingMetrics::default(),
             worker_metrics,
             forwarder,
+            pre_graph_filtered_enabled: Self::pre_graph_filter_enabled(),
         }
     }
 
@@ -137,9 +140,8 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
         let forwarding_enabled = self.forwarder.is_some();
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {
-                let pre_graph_filtered_enabled = true;
                 let (scheduling_summary, schedule_time_us) =
-                    measure_us!(if pre_graph_filtered_enabled {
+                    measure_us!(if self.pre_graph_filtered_enabled {
                         let pre_graph_filter = |txs: &[&R::Transaction], results: &mut [bool]| {
                             Self::pre_graph_filter(
                                 txs,
@@ -440,6 +442,22 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
             &mut self.count_metrics,
             decision,
         )
+    }
+
+    fn pre_graph_filter_enabled() -> bool {
+        #[cfg(not(test))]
+        {
+            // Return true if the env-var is not set, false if it is set.
+            std::env::var("SOLANA_CENTRAL_SCHEDULER_DISABLE_PRE_GRAPH_FILTER")
+                .map(|_| false)
+                .is_err()
+        }
+
+        // For tests, always enable this instead of reading from the env-var.
+        #[cfg(test)]
+        {
+            true
+        }
     }
 }
 
