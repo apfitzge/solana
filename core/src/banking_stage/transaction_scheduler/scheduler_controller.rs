@@ -24,6 +24,7 @@ use {
         self,
         clock::{FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
         saturating_add_assign,
+        transaction::TransactionError,
     },
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
@@ -143,7 +144,7 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
                 let (scheduling_summary, schedule_time_us) =
                     measure_us!(if self.pre_graph_filtered_enabled {
                         let pre_graph_filter = |txs: &[&R::Transaction], results: &mut [bool]| {
-                            Self::pre_graph_filter(
+                            Self::filter_invalid_fee_payers_and_aged_transactions(
                                 txs,
                                 results,
                                 &bank_start.working_bank,
@@ -156,7 +157,15 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
                             |_| true, // no pre-lock filter for now
                         )?
                     } else {
-                        let pre_graph_filter = |_: &[&R::Transaction], _: &mut [bool]| {};
+                        let pre_graph_filter = |txs: &[&R::Transaction], results: &mut [bool]| {
+                            Self::filter_aged_transactions_with_additional_check(
+                                txs,
+                                results,
+                                &bank_start.working_bank,
+                                MAX_PROCESSING_AGE,
+                                |_, _| Ok(()),
+                            )
+                        };
                         self.scheduler.schedule(
                             &mut self.container,
                             pre_graph_filter,
@@ -219,11 +228,34 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
         Ok(())
     }
 
-    fn pre_graph_filter(
+    fn filter_invalid_fee_payers_and_aged_transactions(
         transactions: &[&R::Transaction],
         results: &mut [bool],
         bank: &Bank,
         max_age: usize,
+    ) {
+        let invalid_fee_payer_filter =
+            |tx: &R::Transaction, error_counters: &mut TransactionErrorMetrics| {
+                Consumer::check_fee_payer_unlocked(bank, tx, error_counters)
+            };
+        Self::filter_aged_transactions_with_additional_check(
+            transactions,
+            results,
+            bank,
+            max_age,
+            invalid_fee_payer_filter,
+        );
+    }
+
+    fn filter_aged_transactions_with_additional_check(
+        transactions: &[&R::Transaction],
+        results: &mut [bool],
+        bank: &Bank,
+        max_age: usize,
+        additional_check: impl Fn(
+            &R::Transaction,
+            &mut TransactionErrorMetrics,
+        ) -> Result<(), TransactionError>,
     ) {
         let lock_results = vec![Ok(()); transactions.len()];
         let mut error_counters = TransactionErrorMetrics::default();
@@ -233,14 +265,13 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
             max_age,
             &mut error_counters,
         );
-
         for ((check_result, tx), result) in check_results
             .into_iter()
             .zip(transactions)
             .zip(results.iter_mut())
         {
             *result = check_result
-                .and_then(|_| Consumer::check_fee_payer_unlocked(bank, *tx, &mut error_counters))
+                .and_then(|_| additional_check(*tx, &mut error_counters))
                 .is_ok();
         }
     }
@@ -279,7 +310,7 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
 
             // use same filter we use for processing transactions:
             // age, already processed, fee-check.
-            Self::pre_graph_filter(
+            Self::filter_invalid_fee_payers_and_aged_transactions(
                 &txs,
                 &mut filter_array,
                 &bank,
