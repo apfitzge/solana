@@ -137,20 +137,30 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
         let forwarding_enabled = self.forwarder.is_some();
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {
-                let pre_graph_filter = |txs: &[&R::Transaction], results: &mut [bool]| {
-                    Self::pre_graph_filter(
-                        txs,
-                        results,
-                        &bank_start.working_bank,
-                        MAX_PROCESSING_AGE,
-                    )
-                };
-
-                let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
-                    &mut self.container,
-                    pre_graph_filter,
-                    |_| true // no pre-lock filter for now
-                )?);
+                let pre_graph_filtered_enabled = true;
+                let (scheduling_summary, schedule_time_us) =
+                    measure_us!(if pre_graph_filtered_enabled {
+                        let pre_graph_filter = |txs: &[&R::Transaction], results: &mut [bool]| {
+                            Self::pre_graph_filter(
+                                txs,
+                                results,
+                                &bank_start.working_bank,
+                                MAX_PROCESSING_AGE,
+                            )
+                        };
+                        self.scheduler.schedule(
+                            &mut self.container,
+                            pre_graph_filter,
+                            |_| true, // no pre-lock filter for now
+                        )?
+                    } else {
+                        let pre_graph_filter = |_: &[&R::Transaction], _: &mut [bool]| {};
+                        self.scheduler.schedule(
+                            &mut self.container,
+                            pre_graph_filter,
+                            |_| true, // no pre-lock filter for now
+                        )?
+                    });
 
                 self.count_metrics.update(|count_metrics| {
                     saturating_add_assign!(
