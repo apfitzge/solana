@@ -137,16 +137,18 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
         let forwarding_enabled = self.forwarder.is_some();
         match decision {
             BufferedPacketsDecision::Consume(bank_start) => {
+                let pre_graph_filter = |txs: &[&R::Transaction], results: &mut [bool]| {
+                    Self::pre_graph_filter(
+                        txs,
+                        results,
+                        &bank_start.working_bank,
+                        MAX_PROCESSING_AGE,
+                    )
+                };
+
                 let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
                     &mut self.container,
-                    |txs, results| {
-                        Self::pre_graph_filter(
-                            txs,
-                            results,
-                            &bank_start.working_bank,
-                            MAX_PROCESSING_AGE,
-                        )
-                    },
+                    pre_graph_filter,
                     |_| true // no pre-lock filter for now
                 )?);
 
