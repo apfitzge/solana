@@ -1239,12 +1239,14 @@ impl FeatureSet {
     pub fn activate(&mut self, feature_id: &Pubkey, slot: u64) {
         self.inactive.remove(feature_id);
         self.active.insert(*feature_id, slot);
+        self.fast_set[FEATURE_NAMES.get(feature_id).unwrap().0] = true;
     }
 
     /// Deactivate a feature
     pub fn deactivate(&mut self, feature_id: &Pubkey) {
         self.active.remove(feature_id);
         self.inactive.insert(*feature_id);
+        self.fast_set[FEATURE_NAMES.get(feature_id).unwrap().0] = false;
     }
 
     pub fn new_warmup_cooldown_rate_epoch(&self, epoch_schedule: &EpochSchedule) -> Option<u64> {
