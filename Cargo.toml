@@ -123,7 +123,7 @@ members = [
     "sdk/epoch-rewards",
     "sdk/epoch-schedule",
     "sdk/feature-gate-interface",
-    "sdk/feature-set",
+    "sdk/feature-set/macro",
     "sdk/fee-calculator",
     "sdk/fee-structure",
     "sdk/file-download",

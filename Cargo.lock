@@ -7046,6 +7046,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-feature-set-macro"
+version = "2.2.0"
+
+[[package]]
 name = "solana-fee"
 version = "2.2.0"
 dependencies = [
