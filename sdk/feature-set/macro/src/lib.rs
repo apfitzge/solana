@@ -14,3 +14,11 @@ pub fn unique_index(_input: TokenStream) -> TokenStream {
     // Return the unique index as a literal
     id.to_string().parse().unwrap()
 }
+
+#[proc_macro]
+pub fn get_count(_input: TokenStream) -> TokenStream {
+    // Get the current value of the counter
+    let id = COUNTER.load(Ordering::SeqCst);
+    // Return the current value of the counter as a literal
+    id.to_string().parse().unwrap()
+}
