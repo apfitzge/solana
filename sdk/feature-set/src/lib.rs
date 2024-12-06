@@ -1196,6 +1196,13 @@ impl FeatureSet {
         self.active.contains_key(feature_id)
     }
 
+    pub fn is_active_fast(&self, feature_set_index: usize) -> bool {
+        self.fast_set
+            .get(feature_set_index)
+            .copied()
+            .unwrap_or(false)
+    }
+
     pub fn activated_slot(&self, feature_id: &Pubkey) -> Option<u64> {
         self.active.get(feature_id).copied()
     }
