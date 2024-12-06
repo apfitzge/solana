@@ -7038,6 +7038,7 @@ dependencies = [
  "ahash 0.8.11",
  "lazy_static",
  "solana-epoch-schedule",
+ "solana-feature-set-macro",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
  "solana-hash",
