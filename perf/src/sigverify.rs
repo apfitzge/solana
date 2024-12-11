@@ -146,24 +146,10 @@ pub fn count_packets_in_batches(batches: &[PacketBatch]) -> usize {
     batches.iter().map(|batch| batch.len()).sum()
 }
 
-pub fn count_valid_packets(
-    batches: &[PacketBatch],
-    mut process_valid_packet: impl FnMut(&Packet),
-) -> usize {
+pub fn count_valid_packets(batches: &[PacketBatch]) -> usize {
     batches
         .iter()
-        .map(|batch| {
-            batch
-                .iter()
-                .filter(|p| {
-                    let should_keep = !p.meta().discard();
-                    if should_keep {
-                        process_valid_packet(p);
-                    }
-                    should_keep
-                })
-                .count()
-        })
+        .map(|batch| batch.iter().filter(|p| !p.meta().discard()).count())
         .sum()
 }
 
@@ -1462,7 +1448,7 @@ mod tests {
             });
             start.sort_by(|a, b| a.data(..).cmp(&b.data(..)));
 
-            let packet_count = count_valid_packets(&batches, |_| ());
+            let packet_count = count_valid_packets(&batches);
             shrink_batches(&mut batches);
 
             //make sure all the non discarded packets are the same
@@ -1473,7 +1459,7 @@ mod tests {
                     .for_each(|p| end.push(p.clone()))
             });
             end.sort_by(|a, b| a.data(..).cmp(&b.data(..)));
-            let packet_count2 = count_valid_packets(&batches, |_| ());
+            let packet_count2 = count_valid_packets(&batches);
             assert_eq!(packet_count, packet_count2);
             assert_eq!(start, end);
         }
@@ -1637,13 +1623,13 @@ mod tests {
                 PACKETS_PER_BATCH,
             );
             assert_eq!(batches.len(), BATCH_COUNT);
-            assert_eq!(count_valid_packets(&batches, |_| ()), PACKET_COUNT);
+            assert_eq!(count_valid_packets(&batches), PACKET_COUNT);
             batches.iter_mut().enumerate().for_each(|(i, b)| {
                 b.iter_mut()
                     .enumerate()
                     .for_each(|(j, p)| p.meta_mut().set_discard(set_discard(i, j)))
             });
-            assert_eq!(count_valid_packets(&batches, |_| ()), *expect_valid_packets);
+            assert_eq!(count_valid_packets(&batches), *expect_valid_packets);
             debug!("show valid packets for case {}", i);
             batches.iter_mut().enumerate().for_each(|(i, b)| {
                 b.iter_mut().enumerate().for_each(|(j, p)| {
@@ -1657,7 +1643,7 @@ mod tests {
             let shrunken_batch_count = batches.len();
             debug!("shrunk batch test {} count: {}", i, shrunken_batch_count);
             assert_eq!(shrunken_batch_count, *expect_batch_count);
-            assert_eq!(count_valid_packets(&batches, |_| ()), *expect_valid_packets);
+            assert_eq!(count_valid_packets(&batches), *expect_valid_packets);
         }
     }
 }

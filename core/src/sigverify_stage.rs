@@ -13,7 +13,7 @@ use {
     solana_measure::measure::Measure,
     solana_perf::{
         deduper::{self, Deduper},
-        packet::{Packet, PacketBatch},
+        packet::PacketBatch,
         sigverify::{
             count_discarded_packets, count_packets_in_batches, count_valid_packets, shrink_batches,
         },
@@ -57,7 +57,6 @@ pub struct SigVerifyStage {
 pub trait SigVerifier {
     type SendType: std::fmt::Debug;
     fn verify_batches(&self, batches: Vec<PacketBatch>, valid_packets: usize) -> Vec<PacketBatch>;
-    fn process_passed_sigverify_packet(&mut self, _packet: &Packet) {}
     fn send_packets(&mut self, packet_batches: Vec<PacketBatch>) -> Result<(), Self::SendType>;
 }
 
@@ -328,11 +327,7 @@ impl SigVerifyStage {
 
         let mut verify_time = Measure::start("sigverify_batch_time");
         let mut batches = verifier.verify_batches(batches, num_packets_to_verify);
-        let num_valid_packets = count_valid_packets(
-            &batches,
-            #[inline(always)]
-            |valid_packet| verifier.process_passed_sigverify_packet(valid_packet),
-        );
+        let num_valid_packets = count_valid_packets(&batches);
         verify_time.stop();
 
         // Post-shrink packet batches if many packets are discarded from sigverify
