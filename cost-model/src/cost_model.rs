@@ -45,13 +45,26 @@ impl CostModel {
         transaction: &'a Tx,
         feature_set: &FeatureSet,
     ) -> TransactionCost<'a, Tx> {
-        let num_write_locks = Self::num_write_locks(transaction, feature_set);
-        Self::estimate_cost(
-            transaction,
-            transaction.program_instructions_iter(),
-            num_write_locks,
-            feature_set,
-        )
+        if transaction.is_simple_vote_transaction() {
+            TransactionCost::SimpleVote { transaction }
+        } else {
+            let num_write_locks = Self::num_write_locks(transaction, feature_set);
+            let (programs_execution_cost, loaded_accounts_data_size_cost, data_bytes_cost) =
+                Self::get_transaction_cost(
+                    transaction,
+                    transaction.program_instructions_iter(),
+                    feature_set,
+                );
+            Self::calculate_non_vote_transaction_cost(
+                transaction,
+                transaction.program_instructions_iter(),
+                num_write_locks,
+                programs_execution_cost,
+                loaded_accounts_data_size_cost,
+                data_bytes_cost,
+                feature_set,
+            )
+        }
     }
 
     // Calculate executed transaction CU cost, with actual execution and loaded accounts size
