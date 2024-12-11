@@ -13,7 +13,6 @@ use {
         sigverify_stage::{SigVerifier, SigVerifyServiceError},
     },
     solana_perf::{cuda_runtime::PinnedVec, packet::PacketBatch, recycler::Recycler, sigverify},
-    solana_sdk::packet::Packet,
 };
 
 pub struct TransactionSigVerifier {
@@ -43,21 +42,6 @@ impl TransactionSigVerifier {
 
 impl SigVerifier for TransactionSigVerifier {
     type SendType = BankingPacketBatch;
-
-    #[inline(always)]
-    fn process_received_packet(
-        &mut self,
-        _packet: &mut Packet,
-        _removed_before_sigverify_stage: bool,
-        _is_dup: bool,
-    ) {
-    }
-
-    #[inline(always)]
-    fn process_excess_packet(&mut self, _packet: &Packet) {}
-
-    #[inline(always)]
-    fn process_passed_sigverify_packet(&mut self, _packet: &Packet) {}
 
     fn send_packets(
         &mut self,
