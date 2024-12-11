@@ -57,7 +57,6 @@ pub struct SigVerifyStage {
 pub trait SigVerifier {
     type SendType: std::fmt::Debug;
     fn verify_batches(&self, batches: Vec<PacketBatch>, valid_packets: usize) -> Vec<PacketBatch>;
-    fn process_excess_packet(&mut self, _packet: &Packet) {}
     fn process_passed_sigverify_packet(&mut self, _packet: &Packet) {}
     fn send_packets(&mut self, packet_batches: Vec<PacketBatch>) -> Result<(), Self::SendType>;
 }
@@ -244,11 +243,7 @@ impl SigVerifyStage {
         Self { thread_hdl }
     }
 
-    pub fn discard_excess_packets(
-        batches: &mut [PacketBatch],
-        mut max_packets: usize,
-        mut process_excess_packet: impl FnMut(&Packet),
-    ) {
+    pub fn discard_excess_packets(batches: &mut [PacketBatch], mut max_packets: usize) {
         // Group packets by their incoming IP address.
         let mut addrs = batches
             .iter_mut()
@@ -269,7 +264,6 @@ impl SigVerifyStage {
         }
         // Discard excess packets from each address.
         for packet in addrs.into_values().flatten() {
-            process_excess_packet(packet);
             packet.meta_mut().set_discard(true);
         }
     }
@@ -323,12 +317,7 @@ impl SigVerifyStage {
         let mut discard_time = Measure::start("sigverify_discard_time");
         let mut num_packets_to_verify = num_unique;
         if num_unique > MAX_SIGVERIFY_BATCH {
-            Self::discard_excess_packets(
-                &mut batches,
-                MAX_SIGVERIFY_BATCH,
-                #[inline(always)]
-                |excess_packet| verifier.process_excess_packet(excess_packet),
-            );
+            Self::discard_excess_packets(&mut batches, MAX_SIGVERIFY_BATCH);
             num_packets_to_verify = MAX_SIGVERIFY_BATCH;
         }
         let excess_fail = num_unique.saturating_sub(MAX_SIGVERIFY_BATCH);
@@ -477,7 +466,7 @@ mod tests {
         batch[4].meta_mut().addr = std::net::IpAddr::from([2u16; 8]);
         let mut batches = vec![batch];
         let max = 3;
-        SigVerifyStage::discard_excess_packets(&mut batches, max, |_| {});
+        SigVerifyStage::discard_excess_packets(&mut batches, max);
         let total_non_discard = count_non_discard(&batches);
         assert_eq!(total_non_discard, max);
         assert!(!batches[0][0].meta().discard());
