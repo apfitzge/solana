@@ -226,7 +226,7 @@ impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
             .zip(results.iter_mut())
         {
             *result = check_result
-                .and_then(|_| Consumer::check_fee_payer_unlocked(bank, *tx, &mut error_counters))
+                // .and_then(|_| Consumer::check_fee_payer_unlocked(bank, *tx, &mut error_counters))
                 .is_ok();
         }
     }
