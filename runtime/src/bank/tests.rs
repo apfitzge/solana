@@ -8031,6 +8031,28 @@ fn test_block_limits() {
         MAX_BLOCK_UNITS_SIMD_0207,
         "child bank should have new limit"
     );
+
+    // If we manually set limits to some other value,
+    // they will get reset upon new_from_parent for new epoch.
+    bank.write_cost_tracker().unwrap().set_limits(1, 2, 0);
+    let slots_per_epoch = bank.epoch_schedule().slots_per_epoch;
+    let bank = Bank::new_from_parent(Arc::new(bank), &Pubkey::default(), slots_per_epoch);
+    assert_eq!(
+        bank.read_cost_tracker().unwrap().get_block_limit(),
+        MAX_BLOCK_UNITS_SIMD_0207,
+        "child bank ignores parent, uses feature-set to derive limits"
+    );
+
+    // Test that for tests/benches if set to u64::MAX, the limits will not reset on the epoch.
+    bank.write_cost_tracker()
+        .unwrap()
+        .set_limits(u64::MAX, u64::MAX, u64::MAX);
+    let bank = Bank::new_from_parent(Arc::new(bank), &Pubkey::default(), 2 * slots_per_epoch);
+    assert_eq!(
+        bank.read_cost_tracker().unwrap().get_block_limit(),
+        u64::MAX,
+        "child bank should have the same limit"
+    );
 }
 
 #[test]

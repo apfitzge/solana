@@ -6829,6 +6829,9 @@ impl Bank {
             Arc::new(reserved_keys)
         };
 
+        // Update the cost-tracker's block limits.
+        self.update_block_limits();
+
         if new_feature_activations.contains(&feature_set::pico_inflation::id()) {
             *self.inflation.write().unwrap() = Inflation::pico();
             self.fee_rate_governor.burn_percent = 50; // 50% fee burn
@@ -6917,15 +6920,6 @@ impl Bank {
                 );
             }
         }
-
-        if new_feature_activations.contains(&feature_set::raise_block_limits_to_50m::id()) {
-            let (account_cost_limit, block_cost_limit, vote_cost_limit) = simd_0207_block_limits();
-            self.write_cost_tracker().unwrap().set_limits(
-                account_cost_limit,
-                block_cost_limit,
-                vote_cost_limit,
-            );
-        }
     }
 
     fn apply_updated_hashes_per_tick(&mut self, hashes_per_tick: u64) {
@@ -6935,6 +6929,27 @@ impl Bank {
             self.slot(),
         );
         self.hashes_per_tick = Some(hashes_per_tick);
+    }
+
+    fn update_block_limits(&self) {
+        let mut cost_tracker = self.write_cost_tracker().unwrap();
+
+        // For tests and benches, if the limit is set to maximum then skip
+        // setting feature-specific limits.
+        #[cfg(feature = "dev-context-only-utils")]
+        {
+            if cost_tracker.get_block_limit() == u64::MAX {
+                return;
+            }
+        }
+
+        if self
+            .feature_set
+            .is_active(&feature_set::raise_block_limits_to_50m::id())
+        {
+            let (account_cost_limit, block_cost_limit, vote_cost_limit) = simd_0207_block_limits();
+            cost_tracker.set_limits(account_cost_limit, block_cost_limit, vote_cost_limit);
+        }
     }
 
     fn adjust_sysvar_balance_for_rent(&self, account: &mut AccountSharedData) {
