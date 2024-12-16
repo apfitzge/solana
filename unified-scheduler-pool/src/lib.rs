@@ -446,7 +446,7 @@ impl TaskHandler for DefaultTaskHandler {
             handler_context.replay_vote_sender.as_ref(),
             timings,
             handler_context.log_messages_bytes_limit,
-            &handler_context.prioritization_fee_cache,
+            &Some(handler_context.prioritization_fee_cache.clone()),
         );
         sleepless_testing::at(CheckPoint::TaskHandled(index));
     }
