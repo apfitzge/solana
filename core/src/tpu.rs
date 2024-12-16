@@ -279,7 +279,7 @@ impl Tpu {
             log_messages_bytes_limit,
             connection_cache.clone(),
             bank_forks.clone(),
-            prioritization_fee_cache,
+            Some(prioritization_fee_cache.clone()),
             enable_block_production_forwarding,
         );
 
