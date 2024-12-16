@@ -449,7 +449,7 @@ impl BankingStage {
         let committer = Committer::new(
             transaction_status_sender.clone(),
             replay_vote_sender.clone(),
-            prioritization_fee_cache.clone(),
+            Some(prioritization_fee_cache.clone()),
         );
         let transaction_recorder = poh_recorder.read().unwrap().new_recorder();
 
@@ -534,7 +534,7 @@ impl BankingStage {
         let committer = Committer::new(
             transaction_status_sender.clone(),
             replay_vote_sender.clone(),
-            prioritization_fee_cache.clone(),
+            Some(prioritization_fee_cache.clone()),
         );
         let transaction_recorder = poh_recorder.read().unwrap().new_recorder();
 

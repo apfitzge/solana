@@ -109,7 +109,7 @@ fn bench_consume_buffered(bencher: &mut Bencher) {
         ThreadType::Transactions,
     );
     let (s, _r) = unbounded();
-    let committer = Committer::new(None, s, Arc::new(PrioritizationFeeCache::new(0u64)));
+    let committer = Committer::new(None, s, None);
     let consumer = Consumer::new(committer, recorder, QosService::new(1), None);
     // This tests the performance of buffering packets.
     // If the packet buffers are copied, performance will be poor.
