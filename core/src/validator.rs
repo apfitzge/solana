@@ -1534,7 +1534,7 @@ impl Validator {
             tracer_thread,
             tpu_enable_udp,
             tpu_max_connections_per_ipaddr_per_minute,
-            &prioritization_fee_cache,
+            Some(prioritization_fee_cache),
             config.block_production_method.clone(),
             config.enable_block_production_forwarding,
             config.generator_config.clone(),
