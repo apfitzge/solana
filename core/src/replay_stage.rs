@@ -267,7 +267,7 @@ pub struct ReplayStageConfig {
     pub vote_tracker: Arc<VoteTracker>,
     pub cluster_slots: Arc<ClusterSlots>,
     pub log_messages_bytes_limit: Option<usize>,
-    pub prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+    pub prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
     pub banking_tracer: Arc<BankingTracer>,
 }
 
@@ -562,8 +562,6 @@ impl ReplayStage {
             prioritization_fee_cache,
             banking_tracer,
         } = config;
-
-        let prioritization_fee_cache = Some(prioritization_fee_cache);
 
         let ReplaySenders {
             rpc_subscriptions,
