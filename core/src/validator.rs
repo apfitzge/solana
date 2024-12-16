@@ -1171,7 +1171,7 @@ impl Validator {
                     optimistically_confirmed_bank,
                     rpc_subscriptions.clone(),
                     confirmed_bank_subscribers,
-                    prioritization_fee_cache.clone(),
+                    Some(prioritization_fee_cache.clone()),
                 ));
             let bank_notification_sender_config = Some(BankNotificationSenderConfig {
                 sender: bank_notification_sender,
