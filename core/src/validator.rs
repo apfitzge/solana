@@ -901,7 +901,7 @@ impl Validator {
                     config.runtime_config.log_messages_bytes_limit,
                     transaction_status_sender.clone(),
                     Some(replay_vote_sender.clone()),
-                    prioritization_fee_cache.clone(),
+                    Some(prioritization_fee_cache.clone()),
                 );
                 bank_forks
                     .write()
