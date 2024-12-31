@@ -1,4 +1,5 @@
 mod batch_id_generator;
+pub(crate) mod greedy_scheduler;
 mod in_flight_tracker;
 pub(crate) mod prio_graph_scheduler;
 pub(crate) mod receive_and_buffer;
