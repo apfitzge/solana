@@ -195,7 +195,9 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
         let mut num_scheduled: usize = 0;
         let mut num_sent: usize = 0;
         let mut num_unschedulable: usize = 0;
-        while num_scheduled < self.config.max_transactions_per_scheduling_pass {
+        while num_scheduled < self.config.max_transactions_per_scheduling_pass
+            && !schedulable_threads.is_empty()
+        {
             // If nothing is in the main-queue of the `PrioGraph` then there's nothing left to schedule.
             if self.prio_graph.is_empty() {
                 break;
