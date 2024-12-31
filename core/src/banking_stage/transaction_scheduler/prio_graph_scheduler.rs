@@ -215,7 +215,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
                     &pre_lock_filter,
                     &mut blocking_locks,
                     &mut self.account_locks,
-                    num_threads,
+                    schedulable_threads,
                     |thread_set| {
                         Self::select_thread(
                             thread_set,
@@ -576,7 +576,7 @@ fn try_schedule_transaction<Tx: TransactionWithMeta>(
     pre_lock_filter: impl Fn(&Tx) -> bool,
     blocking_locks: &mut ReadWriteAccountSet,
     account_locks: &mut ThreadAwareAccountLocks,
-    num_threads: usize,
+    schedulable_threads: ThreadSet,
     thread_selector: impl Fn(ThreadSet) -> ThreadId,
 ) -> Result<TransactionSchedulingInfo<Tx>, TransactionSchedulingError> {
     let transaction = &transaction_state.transaction_ttl().transaction;
@@ -604,7 +604,7 @@ fn try_schedule_transaction<Tx: TransactionWithMeta>(
     let Some(thread_id) = account_locks.try_lock_accounts(
         write_account_locks,
         read_account_locks,
-        ThreadSet::any(num_threads),
+        schedulable_threads,
         thread_selector,
     ) else {
         blocking_locks.take_locks(transaction);
