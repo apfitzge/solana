@@ -930,4 +930,25 @@ mod tests {
         assert_eq!(scheduling_summary.num_unschedulable, 0);
         assert_eq!(collect_work(&work_receivers[0]).1, vec![vec![2], vec![0]]);
     }
+
+    #[test]
+    fn test_schedulable_threads() {
+        let (mut scheduler, _work_receivers, _finished_work_sender) = create_test_frame(2);
+        scheduler.config.max_scheduled_cus = 2; // only allow 1 tx per thread
+        let pubkey = Pubkey::new_unique();
+        let keypair = Keypair::new();
+        let mut container = create_container([
+            (&Keypair::new(), &[pubkey], 1, 1),
+            (&keypair, &[pubkey], 1, 2),
+            (&Keypair::new(), &[Pubkey::new_unique()], 1, 3),
+        ]);
+
+        let scheduling_summary = scheduler
+            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .unwrap();
+        assert_eq!(scheduling_summary.num_scheduled, 2);
+
+        // remaining transaction not marked as unschedulable due to early exit
+        assert_eq!(scheduling_summary.num_unschedulable, 0);
+    }
 }
