@@ -620,7 +620,9 @@ impl BankingStage {
                 forwarder.is_some(),
             );
 
-            let use_greedy_scheduler = false;
+            let use_greedy_scheduler = env::var("SOLANA_USE_GREEDY_SCHEDULER")
+                .map(|_| true)
+                .unwrap_or(false);
             if use_greedy_scheduler {
                 let scheduler = GreedyScheduler::new(
                     work_senders,
