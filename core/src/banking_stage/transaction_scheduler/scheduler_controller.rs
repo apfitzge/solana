@@ -3,8 +3,8 @@
 
 use {
     super::{
-        prio_graph_scheduler::PrioGraphScheduler,
         receive_and_buffer::ReceiveAndBuffer,
+        scheduler::Scheduler,
         scheduler_error::SchedulerError,
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
@@ -33,7 +33,11 @@ use {
 };
 
 /// Controls packet and transaction flow into scheduler, and scheduling execution.
-pub(crate) struct SchedulerController<C: LikeClusterInfo, R: ReceiveAndBuffer> {
+pub(crate) struct SchedulerController<
+    C: LikeClusterInfo,
+    R: ReceiveAndBuffer,
+    S: Scheduler<R::Transaction>,
+> {
     /// Decision maker for determining what should be done with transactions.
     decision_maker: DecisionMaker,
     receive_and_buffer: R,
@@ -42,7 +46,7 @@ pub(crate) struct SchedulerController<C: LikeClusterInfo, R: ReceiveAndBuffer> {
     /// Shared resource between `packet_receiver` and `scheduler`.
     container: R::Container,
     /// State for scheduling and communicating with worker threads.
-    scheduler: PrioGraphScheduler<R::Transaction>,
+    scheduler: S,
     /// Metrics tracking time for leader bank detection.
     leader_detection_metrics: SchedulerLeaderDetectionMetrics,
     /// Metrics tracking counts on transactions in different states
@@ -57,12 +61,14 @@ pub(crate) struct SchedulerController<C: LikeClusterInfo, R: ReceiveAndBuffer> {
     forwarder: Option<Forwarder<C>>,
 }
 
-impl<C: LikeClusterInfo, R: ReceiveAndBuffer> SchedulerController<C, R> {
+impl<C: LikeClusterInfo, R: ReceiveAndBuffer, S: Scheduler<R::Transaction>>
+    SchedulerController<C, R, S>
+{
     pub fn new(
         decision_maker: DecisionMaker,
         receive_and_buffer: R,
         bank_forks: Arc<RwLock<BankForks>>,
-        scheduler: PrioGraphScheduler<R::Transaction>,
+        scheduler: S,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Option<Forwarder<C>>,
     ) -> Self {
@@ -445,6 +451,7 @@ mod tests {
                     prio_graph_scheduler::PrioGraphSchedulerConfig,
                     receive_and_buffer::SanitizedTransactionReceiveAndBuffer,
                 },
+                PrioGraphScheduler,
             },
             banking_trace::BankingPacketBatch,
         },
@@ -501,7 +508,11 @@ mod tests {
         num_threads: usize,
     ) -> (
         TestFrame,
-        SchedulerController<Arc<ClusterInfo>, SanitizedTransactionReceiveAndBuffer>,
+        SchedulerController<
+            Arc<ClusterInfo>,
+            SanitizedTransactionReceiveAndBuffer,
+            PrioGraphScheduler<RuntimeTransaction<SanitizedTransaction>>,
+        >,
     ) {
         let GenesisConfigInfo {
             mut genesis_config,
@@ -610,6 +621,7 @@ mod tests {
         scheduler_controller: &mut SchedulerController<
             Arc<ClusterInfo>,
             SanitizedTransactionReceiveAndBuffer,
+            PrioGraphScheduler<RuntimeTransaction<SanitizedTransaction>>,
         >,
     ) {
         let decision = scheduler_controller
