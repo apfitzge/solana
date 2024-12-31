@@ -85,7 +85,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
                 // we should immediately send out the batches, so this transaction may be scheduled.
                 if !self
                     .working_account_set
-                    .take_locks(&transaction_state.transaction_ttl().transaction)
+                    .check_locks(&transaction_state.transaction_ttl().transaction)
                 {
                     num_sent += self.send_batches(&mut batches)?;
                     self.working_account_set.clear();
@@ -122,6 +122,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
                         max_age,
                         cost,
                     }) => {
+                        assert!(self.working_account_set.take_locks(&transaction));
                         saturating_add_assign!(num_scheduled, 1);
                         batches.transactions[thread_id].push(transaction);
                         batches.ids[thread_id].push(id.id);
