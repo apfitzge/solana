@@ -51,7 +51,7 @@ use {
         time::{Duration, Instant},
     },
     transaction_scheduler::{
-        prio_graph_scheduler::PrioGraphSchedulerConfig,
+        greedy_scheduler::GreedyScheduler, prio_graph_scheduler::PrioGraphSchedulerConfig,
         receive_and_buffer::SanitizedTransactionReceiveAndBuffer,
         transaction_state_container::TransactionStateContainer,
     },
@@ -619,29 +619,57 @@ impl BankingStage {
                 bank_forks.clone(),
                 forwarder.is_some(),
             );
-            let scheduler = PrioGraphScheduler::new(
-                work_senders,
-                finished_work_receiver,
-                PrioGraphSchedulerConfig::default(),
-            );
-            let scheduler_controller = SchedulerController::new(
-                decision_maker.clone(),
-                receive_and_buffer,
-                bank_forks,
-                scheduler,
-                worker_metrics,
-                forwarder,
-            );
-            Builder::new()
-                .name("solBnkTxSched".to_string())
-                .spawn(move || match scheduler_controller.run() {
-                    Ok(_) => {}
-                    Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
-                    Err(SchedulerError::DisconnectedSendChannel(_)) => {
-                        warn!("Unexpected worker disconnect from scheduler")
-                    }
-                })
-                .unwrap()
+
+            let use_greedy_scheduler = false;
+            if use_greedy_scheduler {
+                let scheduler = GreedyScheduler::new(
+                    work_senders,
+                    finished_work_receiver,
+                    PrioGraphSchedulerConfig::default(),
+                );
+                let scheduler_controller = SchedulerController::new(
+                    decision_maker.clone(),
+                    receive_and_buffer,
+                    bank_forks,
+                    scheduler,
+                    worker_metrics,
+                    forwarder,
+                );
+                Builder::new()
+                    .name("solBnkTxSched".to_string())
+                    .spawn(move || match scheduler_controller.run() {
+                        Ok(_) => {}
+                        Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                        Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                            warn!("Unexpected worker disconnect from scheduler")
+                        }
+                    })
+                    .unwrap()
+            } else {
+                let scheduler = PrioGraphScheduler::new(
+                    work_senders,
+                    finished_work_receiver,
+                    PrioGraphSchedulerConfig::default(),
+                );
+                let scheduler_controller = SchedulerController::new(
+                    decision_maker.clone(),
+                    receive_and_buffer,
+                    bank_forks,
+                    scheduler,
+                    worker_metrics,
+                    forwarder,
+                );
+                Builder::new()
+                    .name("solBnkTxSched".to_string())
+                    .spawn(move || match scheduler_controller.run() {
+                        Ok(_) => {}
+                        Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                        Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                            warn!("Unexpected worker disconnect from scheduler")
+                        }
+                    })
+                    .unwrap()
+            }
         });
 
         Self { bank_thread_hdls }
