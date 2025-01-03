@@ -3,7 +3,7 @@
 
 use {
     super::{
-        prio_graph_scheduler::PrioGraphScheduler,
+        greedy_scheduler::GreedyScheduler,
         scheduler_error::SchedulerError,
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
@@ -55,7 +55,7 @@ pub(crate) struct SchedulerController {
     /// Shared resource between `packet_receiver` and `scheduler`.
     container: TransactionStateContainer,
     /// State for scheduling and communicating with worker threads.
-    scheduler: PrioGraphScheduler,
+    scheduler: GreedyScheduler,
     /// Metrics tracking time for leader bank detection.
     leader_detection_metrics: SchedulerLeaderDetectionMetrics,
     /// Metrics tracking counts on transactions in different states
@@ -75,7 +75,7 @@ impl SchedulerController {
         decision_maker: DecisionMaker,
         packet_deserializer: PacketDeserializer,
         bank_forks: Arc<RwLock<BankForks>>,
-        scheduler: PrioGraphScheduler,
+        scheduler: GreedyScheduler,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         forwarder: Option<Forwarder>,
     ) -> Self {
@@ -804,7 +804,7 @@ mod tests {
             decision_maker,
             packet_deserializer,
             bank_forks,
-            PrioGraphScheduler::new(consume_work_senders, finished_consume_work_receiver),
+            GreedyScheduler::new(consume_work_senders, finished_consume_work_receiver),
             vec![], // no actual workers with metrics to report, this can be empty
             None,
         );
