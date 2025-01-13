@@ -252,6 +252,10 @@ impl LocalCluster {
             }
         };
 
+        // Mint used to fund validator identities for non-genesis accounts.
+        // Verify we have enough lamports in the mint address to do those transfers.
+        let mut required_mint_lamports = 0;
+
         // Bootstrap leader should always be in genesis block
         validator_keys[0].1 = true;
         let (keys_in_genesis, stakes_in_genesis): (Vec<ValidatorVoteKeypairs>, Vec<u64>) =
@@ -276,10 +280,18 @@ impl LocalCluster {
                             stake,
                         ))
                     } else {
+                        required_mint_lamports += Self::required_validator_funding(*stake);
                         None
                     }
                 })
                 .unzip();
+
+        // Verify mint has enough lamports to fund all required validators.
+        assert!(
+            config.mint_lamports > required_mint_lamports,
+            "mint requires additional lamports to fund validators"
+        );
+
         let leader_keypair = &keys_in_genesis[0].node_keypair;
         let leader_vote_keypair = &keys_in_genesis[0].vote_keypair;
         let leader_pubkey = leader_keypair.pubkey();
@@ -517,7 +529,7 @@ impl LocalCluster {
                 &client,
                 &self.funding_keypair,
                 &validator_pubkey,
-                stake * 2 + 2,
+                Self::required_validator_funding(stake),
             );
             info!(
                 "validator {} balance {}",
@@ -969,6 +981,10 @@ impl LocalCluster {
         .map_err(|err| Error::new(ErrorKind::Other, format!("TpuSenderError: {}", err)))?;
 
         Ok(tpu_client)
+    }
+
+    fn required_validator_funding(stake: u64) -> u64 {
+        stake.saturating_mul(2).saturating_add(2)
     }
 }
 
