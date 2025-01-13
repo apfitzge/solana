@@ -35,6 +35,7 @@ use {
         epoch_schedule::EpochSchedule,
         genesis_config::{ClusterType, GenesisConfig},
         message::Message,
+        native_token::LAMPORTS_PER_SOL,
         poh_config::PohConfig,
         pubkey::Pubkey,
         signature::{Keypair, Signature, Signer},
@@ -68,6 +69,7 @@ use {
     },
 };
 
+pub const DEFAULT_MINT_LAMPORTS: u64 = 10_000_000 * LAMPORTS_PER_SOL;
 const DUMMY_SNAPSHOT_CONFIG_PATH_MARKER: &str = "dummy";
 
 pub struct ClusterConfig {
@@ -126,7 +128,7 @@ impl Default for ClusterConfig {
             validator_keys: None,
             node_stakes: vec![],
             node_vote_keys: None,
-            mint_lamports: 0,
+            mint_lamports: DEFAULT_MINT_LAMPORTS,
             ticks_per_slot: DEFAULT_TICKS_PER_SLOT,
             slots_per_epoch: DEFAULT_DEV_SLOTS_PER_EPOCH,
             stakers_slot_offset: DEFAULT_DEV_SLOTS_PER_EPOCH,
