@@ -288,7 +288,7 @@ impl LocalCluster {
 
         // Verify mint has enough lamports to fund all required validators.
         assert!(
-            config.mint_lamports > required_mint_lamports,
+            config.mint_lamports >= required_mint_lamports,
             "mint requires additional lamports to fund validators"
         );
 
