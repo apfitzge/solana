@@ -85,8 +85,8 @@ pub struct ClusterConfig {
     pub node_stakes: Vec<u64>,
     /// Optional vote keypairs to use for each node
     pub node_vote_keys: Option<Vec<Arc<Keypair>>>,
-    /// The total lamports available to the cluster
-    pub cluster_lamports: u64,
+    /// The number of lamports in the mint account
+    pub mint_lamports: u64,
     pub ticks_per_slot: u64,
     pub slots_per_epoch: u64,
     pub stakers_slot_offset: u64,
@@ -103,12 +103,12 @@ pub struct ClusterConfig {
 impl ClusterConfig {
     pub fn new_with_equal_stakes(
         num_nodes: usize,
-        cluster_lamports: u64,
+        mint_lamports: u64,
         lamports_per_node: u64,
     ) -> Self {
         Self {
             node_stakes: vec![lamports_per_node; num_nodes],
-            cluster_lamports,
+            mint_lamports,
             validator_configs: make_identical_validator_configs(
                 &ValidatorConfig::default_for_test(),
                 num_nodes,
@@ -126,7 +126,7 @@ impl Default for ClusterConfig {
             validator_keys: None,
             node_stakes: vec![],
             node_vote_keys: None,
-            cluster_lamports: 0,
+            mint_lamports: 0,
             ticks_per_slot: DEFAULT_TICKS_PER_SLOT,
             slots_per_epoch: DEFAULT_DEV_SLOTS_PER_EPOCH,
             stakers_slot_offset: DEFAULT_DEV_SLOTS_PER_EPOCH,
@@ -155,16 +155,12 @@ pub struct LocalCluster {
 impl LocalCluster {
     pub fn new_with_equal_stakes(
         num_nodes: usize,
-        cluster_lamports: u64,
+        mint_lamports: u64,
         lamports_per_node: u64,
         socket_addr_space: SocketAddrSpace,
     ) -> Self {
         Self::new(
-            &mut ClusterConfig::new_with_equal_stakes(
-                num_nodes,
-                cluster_lamports,
-                lamports_per_node,
-            ),
+            &mut ClusterConfig::new_with_equal_stakes(num_nodes, mint_lamports, lamports_per_node),
             socket_addr_space,
         )
     }
@@ -292,7 +288,7 @@ impl LocalCluster {
             mint_keypair,
             ..
         } = create_genesis_config_with_vote_accounts_and_cluster_type(
-            config.cluster_lamports,
+            config.mint_lamports,
             &keys_in_genesis,
             stakes_in_genesis,
             config.cluster_type,
