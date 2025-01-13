@@ -33,6 +33,7 @@ use {
         clock::{Slot, DEFAULT_DEV_SLOTS_PER_EPOCH, DEFAULT_TICKS_PER_SLOT, MAX_PROCESSING_AGE},
         commitment_config::CommitmentConfig,
         epoch_schedule::EpochSchedule,
+        fee::FeeStructure,
         genesis_config::{ClusterType, GenesisConfig},
         message::Message,
         native_token::LAMPORTS_PER_SOL,
@@ -254,7 +255,8 @@ impl LocalCluster {
 
         // Mint used to fund validator identities for non-genesis accounts.
         // Verify we have enough lamports in the mint address to do those transfers.
-        let mut required_mint_lamports = 0;
+        // 10 SOL for fees for all funding transactions.
+        let mut required_mint_lamports = 10 * LAMPORTS_PER_SOL;
 
         // Bootstrap leader should always be in genesis block
         validator_keys[0].1 = true;
@@ -270,6 +272,8 @@ impl LocalCluster {
                         vote_keypair.pubkey(),
                         stake
                     );
+                    required_mint_lamports += Self::required_validator_funding(*stake)
+                        + 10 * FeeStructure::default().lamports_per_signature;
                     if *in_genesis {
                         Some((
                             ValidatorVoteKeypairs {
@@ -280,7 +284,6 @@ impl LocalCluster {
                             stake,
                         ))
                     } else {
-                        required_mint_lamports += Self::required_validator_funding(*stake);
                         None
                     }
                 })
@@ -524,7 +527,8 @@ impl LocalCluster {
         if is_listener {
             // setup as a listener
             info!("listener {} ", validator_pubkey,);
-        } else if should_create_vote_pubkey {
+        } else {
+            // Fund identity account regardless of whether the voting keypair already exists.
             Self::transfer_with_client(
                 &client,
                 &self.funding_keypair,
@@ -540,13 +544,16 @@ impl LocalCluster {
                 "validator {} balance {}",
                 validator_pubkey, validator_balance
             );
-            Self::setup_vote_and_stake_accounts(
-                &client,
-                voting_keypair.as_ref().unwrap(),
-                &validator_keypair,
-                stake,
-            )
-            .unwrap();
+
+            if should_create_vote_pubkey {
+                Self::setup_vote_and_stake_accounts(
+                    &client,
+                    voting_keypair.as_ref().unwrap(),
+                    &validator_keypair,
+                    stake,
+                )
+                .unwrap();
+            }
         }
 
         let mut config = safe_clone_config(validator_config);
@@ -981,7 +988,11 @@ impl LocalCluster {
     }
 
     fn required_validator_funding(stake: u64) -> u64 {
-        stake.saturating_mul(2).saturating_add(2)
+        stake.saturating_mul(2).saturating_add(
+            FeeStructure::default()
+                .lamports_per_signature
+                .saturating_mul(1_000),
+        )
     }
 }
 
