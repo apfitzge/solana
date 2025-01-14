@@ -390,6 +390,17 @@ impl LocalCluster {
             connection_cache,
         };
 
+        // Begin with a transaction to fund the identity of the bootstrap node.
+        // For all other validators this is done in the `add_validator` loop below.
+        Self::transfer_with_client(
+            &cluster
+                .build_validator_tpu_quic_client(cluster.entry_point_info.pubkey())
+                .expect("tpu_client"),
+            &cluster.funding_keypair,
+            &validator_keys[0].0.pubkey(),
+            Self::required_validator_funding(config.node_stakes[0]),
+        );
+
         let node_pubkey_to_vote_key: HashMap<Pubkey, Arc<Keypair>> = keys_in_genesis
             .into_iter()
             .map(|keypairs| {
@@ -987,7 +998,7 @@ impl LocalCluster {
         Ok(tpu_client)
     }
 
-    fn required_validator_funding(stake: u64) -> u64 {
+    pub fn required_validator_funding(stake: u64) -> u64 {
         stake.saturating_mul(2).saturating_add(
             FeeStructure::default()
                 .lamports_per_signature
