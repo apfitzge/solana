@@ -199,9 +199,7 @@ impl<D: TransactionData> SVMMessage for ResolvedTransactionView<D> {
     }
 
     fn num_write_locks(&self) -> u64 {
-        self.account_keys()
-            .len()
-            .wrapping_sub(self.num_readonly_accounts()) as u64
+        self.view.num_requested_write_locks()
     }
 
     fn recent_blockhash(&self) -> &Hash {
