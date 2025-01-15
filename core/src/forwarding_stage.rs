@@ -1,6 +1,6 @@
 use {
     agave_banking_stage_ingress_types::BankingPacketBatch,
-    crossbeam_channel::Receiver,
+    crossbeam_channel::{Receiver, RecvTimeoutError},
     min_max_heap::MinMaxHeap,
     slab::Slab,
     solana_client::connection_cache::ConnectionCache,
@@ -10,6 +10,7 @@ use {
         net::UdpSocket,
         sync::Arc,
         thread::{Builder, JoinHandle},
+        time::{Duration, Instant},
     },
 };
 
@@ -59,8 +60,40 @@ impl ForwardingStage {
     }
 
     fn receive_and_buffer(&mut self) -> bool {
-        todo!()
+        let now = Instant::now();
+        const TIMEOUT: Duration = Duration::from_millis(10);
+        match self.receiver.recv_timeout(TIMEOUT) {
+            Ok((packet_batches, tpu_vote_batch)) => {
+                self.buffer_packet_batches(packet_batches, tpu_vote_batch);
+
+                // Drain the channel up to timeout
+                let timed_out = loop {
+                    if now.elapsed() >= TIMEOUT {
+                        break true;
+                    }
+                    match self.receiver.try_recv() {
+                        Ok((packet_batches, tpu_vote_batch)) => {
+                            self.buffer_packet_batches(packet_batches, tpu_vote_batch)
+                        }
+                        Err(_) => break false,
+                    }
+                };
+
+                // If timeout waas reached, prevent backup by draining all
+                // packets in the channel.
+                if timed_out {
+                    warn!("ForwardingStage is backed up, dropping packets");
+                    while self.receiver.try_recv().is_ok() {}
+                }
+
+                true
+            }
+            Err(RecvTimeoutError::Timeout) => true,
+            Err(RecvTimeoutError::Disconnected) => false,
+        }
     }
+
+    fn buffer_packet_batches(&mut self, packet_batches: BankingPacketBatch, tpu_vote_batch: bool) {}
 
     fn forward_buffered_packets(&mut self) {
         todo!()
