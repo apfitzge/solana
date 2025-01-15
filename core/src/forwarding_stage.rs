@@ -45,23 +45,30 @@ impl<T: LikeClusterInfo> ForwardAddressGetter for (T, Arc<RwLock<PohRecorder>>) 
     }
 }
 
-pub struct ForwardingStage {
+pub struct ForwardingStage<F: ForwardAddressGetter> {
     receiver: Receiver<(BankingPacketBatch, bool)>,
     packet_container: PacketContainer,
 
     root_bank_cache: RootBankCache,
+    forward_address_getter: F,
     connection_cache: Arc<ConnectionCache>,
     data_budget: DataBudget,
     udp_socket: UdpSocket,
 }
 
-impl ForwardingStage {
+impl<F: ForwardAddressGetter> ForwardingStage<F> {
     pub fn spawn(
         receiver: Receiver<(BankingPacketBatch, bool)>,
         connection_cache: Arc<ConnectionCache>,
         root_bank_cache: RootBankCache,
+        forward_address_getter: F,
     ) -> JoinHandle<()> {
-        let forwarding_stage = Self::new(receiver, connection_cache, root_bank_cache);
+        let forwarding_stage = Self::new(
+            receiver,
+            connection_cache,
+            root_bank_cache,
+            forward_address_getter,
+        );
         Builder::new()
             .name("solFwdStage".to_string())
             .spawn(move || forwarding_stage.run())
@@ -72,11 +79,13 @@ impl ForwardingStage {
         receiver: Receiver<(BankingPacketBatch, bool)>,
         connection_cache: Arc<ConnectionCache>,
         root_bank_cache: RootBankCache,
+        forward_address_getter: F,
     ) -> Self {
         Self {
             receiver,
             packet_container: PacketContainer::with_capacity(4 * 4096),
             root_bank_cache,
+            forward_address_getter,
             connection_cache,
             data_budget: DataBudget::default(),
             udp_socket: bind_to_unspecified().unwrap(),
