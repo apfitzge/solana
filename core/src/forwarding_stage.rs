@@ -19,7 +19,7 @@ use {
     solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
     },
-    solana_sdk::fee::FeeBudgetLimits,
+    solana_sdk::{fee::FeeBudgetLimits, transaction::MessageHash},
     solana_streamer::sendmmsg::batch_send,
     std::{
         net::{SocketAddr, UdpSocket},
@@ -159,7 +159,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
                 // are able to calculate fees for prioritization.
                 let Ok(transaction) = RuntimeTransaction::<SanitizedTransactionView<_>>::try_from(
                     transaction,
-                    solana_sdk::transaction::MessageHash::Compute,
+                    MessageHash::Compute,
                     Some(packet.meta().is_simple_vote_tx()),
                 ) else {
                     continue;
