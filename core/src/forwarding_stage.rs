@@ -1,4 +1,8 @@
 use {
+    crate::{
+        banking_stage::LikeClusterInfo,
+        next_leader::{next_leader, next_leader_tpu_vote},
+    },
     agave_banking_stage_ingress_types::BankingPacketBatch,
     agave_transaction_view::transaction_view::SanitizedTransactionView,
     crossbeam_channel::{Receiver, RecvTimeoutError},
@@ -6,20 +10,40 @@ use {
     slab::Slab,
     solana_client::connection_cache::ConnectionCache,
     solana_cost_model::cost_model::CostModel,
+    solana_gossip::contact_info::Protocol,
     solana_net_utils::bind_to_unspecified,
     solana_perf::{data_budget::DataBudget, packet::Packet},
+    solana_poh::poh_recorder::PohRecorder,
     solana_runtime::{bank::Bank, root_bank_cache::RootBankCache},
     solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
     },
     solana_sdk::fee::FeeBudgetLimits,
     std::{
-        net::UdpSocket,
-        sync::Arc,
+        net::{SocketAddr, UdpSocket},
+        sync::{Arc, RwLock},
         thread::{Builder, JoinHandle},
         time::{Duration, Instant},
     },
 };
+
+pub struct ForwardingAddresses {
+    pub tpu: Option<SocketAddr>,
+    pub tpu_vote: Option<SocketAddr>,
+}
+
+pub trait ForwardAddressGetter: Send + Sync + 'static {
+    fn get_forwarding_addresses(&self, protocol: Protocol) -> ForwardingAddresses;
+}
+
+impl<T: LikeClusterInfo> ForwardAddressGetter for (T, Arc<RwLock<PohRecorder>>) {
+    fn get_forwarding_addresses(&self, protocol: Protocol) -> ForwardingAddresses {
+        ForwardingAddresses {
+            tpu: next_leader(&self.0, &self.1, |node| node.tpu_forwards(protocol)).map(|(_, s)| s),
+            tpu_vote: next_leader_tpu_vote(&self.0, &self.1).map(|(_, s)| s),
+        }
+    }
+}
 
 pub struct ForwardingStage {
     receiver: Receiver<(BankingPacketBatch, bool)>,
