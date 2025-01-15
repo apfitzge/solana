@@ -23,8 +23,7 @@ use {
 
 pub struct ForwardingStage {
     receiver: Receiver<(BankingPacketBatch, bool)>,
-    vote_packet_container: PacketContainer,
-    non_vote_packet_container: PacketContainer,
+    packet_container: PacketContainer,
 
     root_bank_cache: RootBankCache,
     connection_cache: Arc<ConnectionCache>,
@@ -52,8 +51,7 @@ impl ForwardingStage {
     ) -> Self {
         Self {
             receiver,
-            vote_packet_container: PacketContainer::with_capacity(4096),
-            non_vote_packet_container: PacketContainer::with_capacity(4 * 4096),
+            packet_container: PacketContainer::with_capacity(4 * 4096),
             root_bank_cache,
             connection_cache,
             data_budget: DataBudget::default(),
@@ -75,8 +73,8 @@ impl ForwardingStage {
         let now = Instant::now();
         const TIMEOUT: Duration = Duration::from_millis(10);
         match self.receiver.recv_timeout(TIMEOUT) {
-            Ok((packet_batches, tpu_vote_batch)) => {
-                self.buffer_packet_batches(packet_batches, tpu_vote_batch, bank);
+            Ok((packet_batches, _tpu_vote_batch)) => {
+                self.buffer_packet_batches(packet_batches, bank);
 
                 // Drain the channel up to timeout
                 let timed_out = loop {
@@ -84,8 +82,8 @@ impl ForwardingStage {
                         break true;
                     }
                     match self.receiver.try_recv() {
-                        Ok((packet_batches, tpu_vote_batch)) => {
-                            self.buffer_packet_batches(packet_batches, tpu_vote_batch, bank)
+                        Ok((packet_batches, _tpu_vote_batch)) => {
+                            self.buffer_packet_batches(packet_batches, bank)
                         }
                         Err(_) => break false,
                     }
@@ -105,18 +103,7 @@ impl ForwardingStage {
         }
     }
 
-    fn buffer_packet_batches(
-        &mut self,
-        packet_batches: BankingPacketBatch,
-        tpu_vote_batch: bool,
-        bank: &Bank,
-    ) {
-        let packet_container = if tpu_vote_batch {
-            &mut self.vote_packet_container
-        } else {
-            &mut self.non_vote_packet_container
-        };
-
+    fn buffer_packet_batches(&mut self, packet_batches: BankingPacketBatch, bank: &Bank) {
         for batch in packet_batches.iter() {
             for packet in batch.iter().filter(|p| Self::initial_packet_meta_filter(p)) {
                 let Some(packet_data) = packet.data(..) else {
@@ -147,10 +134,11 @@ impl ForwardingStage {
                 };
 
                 // If at capacity, check lowest priority item.
-                if packet_container.priority_queue.len()
-                    == packet_container.priority_queue.capacity()
+                if self.packet_container.priority_queue.len()
+                    == self.packet_container.priority_queue.capacity()
                 {
-                    let min_priority = packet_container
+                    let min_priority = self
+                        .packet_container
                         .priority_queue
                         .peek_min()
                         .expect("not empty")
@@ -161,19 +149,20 @@ impl ForwardingStage {
                         continue;
                     }
 
-                    let dropped_index = packet_container
+                    let dropped_index = self
+                        .packet_container
                         .priority_queue
                         .pop_min()
                         .expect("not empty")
                         .index;
-                    packet_container.packets.remove(dropped_index);
+                    self.packet_container.packets.remove(dropped_index);
                 }
 
-                let entry = packet_container.packets.vacant_entry();
+                let entry = self.packet_container.packets.vacant_entry();
                 let index = entry.key();
                 entry.insert(packet.clone());
                 let priority_index = PriorityIndex { priority, index };
-                packet_container.priority_queue.push(priority_index);
+                self.packet_container.priority_queue.push(priority_index);
             }
         }
     }
@@ -222,8 +211,8 @@ struct PriorityIndex {
 /// from user input. They should never be zero.
 /// Any difference in the prioritization is negligible for
 /// the current transaction costs.
-fn calculate_priority<'a>(
-    transaction: &RuntimeTransaction<SanitizedTransactionView<&'a [u8]>>,
+fn calculate_priority(
+    transaction: &RuntimeTransaction<SanitizedTransactionView<&[u8]>>,
     bank: &Bank,
 ) -> Option<u64> {
     let compute_budget_limits = transaction
