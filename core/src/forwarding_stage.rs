@@ -9,6 +9,7 @@ use {
     min_max_heap::MinMaxHeap,
     slab::Slab,
     solana_client::connection_cache::ConnectionCache,
+    solana_connection_cache::client_connection::ClientConnection,
     solana_cost_model::cost_model::CostModel,
     solana_gossip::contact_info::Protocol,
     solana_net_utils::bind_to_unspecified,
@@ -19,6 +20,7 @@ use {
         runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
     },
     solana_sdk::fee::FeeBudgetLimits,
+    solana_streamer::sendmmsg::batch_send,
     std::{
         net::{SocketAddr, UdpSocket},
         sync::{Arc, RwLock},
@@ -26,6 +28,8 @@ use {
         time::{Duration, Instant},
     },
 };
+
+const FORWARD_BATCH_SIZE: usize = 128;
 
 pub struct ForwardingAddresses {
     pub tpu: Option<SocketAddr>,
@@ -200,13 +204,84 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         }
     }
 
-    fn forward_buffered_packets(&mut self) {
-        todo!()
-    }
-
     fn initial_packet_meta_filter(packet: &Packet) -> bool {
         let meta = packet.meta();
         !meta.discard() && !meta.forwarded() && meta.is_from_staked_node()
+    }
+
+    fn forward_buffered_packets(&mut self) {
+        self.refresh_data_budget();
+
+        // Get forwarding addresses otherwise return now.
+        let ForwardingAddresses {
+            tpu: Some(tpu),
+            tpu_vote: Some(tpu_vote),
+        } = self
+            .forward_address_getter
+            .get_forwarding_addresses(self.connection_cache.protocol())
+        else {
+            return;
+        };
+
+        let mut vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        let mut non_vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+
+        // Loop through packets creating batches of packets to forward.
+        while let Some(priority_index) = self.packet_container.priority_queue.pop_max() {
+            let packet = self
+                .packet_container
+                .packets
+                .get(priority_index.index)
+                .expect("packet exists");
+
+            // If it exceeds our data-budget, drop.
+            if !self.data_budget.take(packet.meta().size) {
+                self.packet_container.packets.remove(priority_index.index);
+                continue;
+            }
+
+            let packet_data_vec = packet.data(..).expect("packet has data").to_vec();
+
+            if packet.meta().is_simple_vote_tx() {
+                vote_batch.push(packet_data_vec);
+                if vote_batch.len() == vote_batch.capacity() {
+                    self.send_vote_batch(tpu_vote, &mut vote_batch);
+                }
+            } else {
+                non_vote_batch.push((packet_data_vec, tpu));
+                if non_vote_batch.len() == non_vote_batch.capacity() {
+                    self.send_non_vote_batch(&mut non_vote_batch);
+                }
+            }
+        }
+    }
+
+    /// Re-fill the data budget if enough time has passed
+    fn refresh_data_budget(&self) {
+        const INTERVAL_MS: u64 = 100;
+        // 12 MB outbound limit per second
+        const MAX_BYTES_PER_SECOND: usize = 12_000_000;
+        const MAX_BYTES_PER_INTERVAL: usize = MAX_BYTES_PER_SECOND * INTERVAL_MS as usize / 1000;
+        const MAX_BYTES_BUDGET: usize = MAX_BYTES_PER_INTERVAL * 5;
+        self.data_budget.update(INTERVAL_MS, |bytes| {
+            std::cmp::min(
+                bytes.saturating_add(MAX_BYTES_PER_INTERVAL),
+                MAX_BYTES_BUDGET,
+            )
+        });
+    }
+
+    fn send_vote_batch(&self, addr: SocketAddr, vote_batch: &mut Vec<Vec<u8>>) {
+        let conn = self.connection_cache.get_connection(&addr);
+        let mut batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        core::mem::swap(&mut batch, vote_batch);
+        let _res = conn.send_data_batch_async(batch);
+    }
+
+    fn send_non_vote_batch(&self, non_vote_batch: &mut Vec<(Vec<u8>, SocketAddr)>) {
+        let mut batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        core::mem::swap(&mut batch, non_vote_batch);
+        let _res = batch_send(&self.udp_socket, &batch);
     }
 }
 
