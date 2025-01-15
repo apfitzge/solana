@@ -148,14 +148,6 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
         is_writable_cache
     }
 
-    fn num_readonly_accounts(&self) -> usize {
-        usize::from(self.view.total_readonly_lookup_accounts())
-            .wrapping_add(usize::from(self.view.num_readonly_signed_static_accounts()))
-            .wrapping_add(usize::from(
-                self.view.num_readonly_unsigned_static_accounts(),
-            ))
-    }
-
     pub fn loaded_addresses(&self) -> Option<&LoadedAddresses> {
         self.resolved_addresses.as_ref()
     }
