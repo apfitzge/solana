@@ -502,9 +502,10 @@ mod tests {
     }
 
     fn meta_with_flags(packet_flags: PacketFlags) -> packet::Meta {
-        let mut meta = packet::Meta::default();
-        meta.flags = packet_flags;
-        meta
+        packet::Meta {
+            flags: packet_flags,
+            ..packet::Meta::default()
+        }
     }
 
     fn simple_transfer_with_flags(packet_flags: PacketFlags) -> Packet {
