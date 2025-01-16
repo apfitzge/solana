@@ -19,7 +19,7 @@ use {
     solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
     },
-    solana_sdk::{fee::FeeBudgetLimits, transaction::MessageHash},
+    solana_sdk::{fee::FeeBudgetLimits, packet, transaction::MessageHash},
     solana_streamer::sendmmsg::batch_send,
     std::{
         net::{SocketAddr, UdpSocket},
@@ -155,7 +155,10 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         bank: &Bank,
     ) {
         for batch in packet_batches.iter() {
-            for packet in batch.iter().filter(|p| Self::initial_packet_meta_filter(p)) {
+            for packet in batch
+                .iter()
+                .filter(|p| initial_packet_meta_filter(p.meta()))
+            {
                 let Some(packet_data) = packet.data(..) else {
                     // should never occur since we've already checked the
                     // packet is not marked for discard.
@@ -226,11 +229,6 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
                 self.packet_container.priority_queue.push(priority_index);
             }
         }
-    }
-
-    fn initial_packet_meta_filter(packet: &Packet) -> bool {
-        let meta = packet.meta();
-        !meta.discard() && !meta.forwarded() && meta.is_from_staked_node()
     }
 
     fn forward_buffered_packets(&mut self) {
@@ -477,5 +475,39 @@ impl Default for ForwardingStageMetrics {
             non_votes_forwarded: 0,
             dropped_on_timeout: 0,
         }
+    }
+}
+
+fn initial_packet_meta_filter(meta: &packet::Meta) -> bool {
+    !meta.discard() && !meta.forwarded() && meta.is_from_staked_node()
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, packet::PacketFlags};
+
+    #[test]
+    fn test_initial_packet_meta_filter() {
+        fn meta_with_flags(packet_flags: PacketFlags) -> packet::Meta {
+            let mut meta = packet::Meta::default();
+            meta.flags = packet_flags;
+            meta
+        }
+
+        assert!(!initial_packet_meta_filter(&meta_with_flags(
+            PacketFlags::empty()
+        )));
+        assert!(initial_packet_meta_filter(&meta_with_flags(
+            PacketFlags::FROM_STAKED_NODE
+        )));
+        assert!(!initial_packet_meta_filter(&meta_with_flags(
+            PacketFlags::DISCARD
+        )));
+        assert!(!initial_packet_meta_filter(&meta_with_flags(
+            PacketFlags::FORWARDED
+        )));
+        assert!(!initial_packet_meta_filter(&meta_with_flags(
+            PacketFlags::FROM_STAKED_NODE | PacketFlags::DISCARD
+        )));
     }
 }
