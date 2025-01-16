@@ -64,8 +64,6 @@ pub(crate) struct SanitizedTransactionReceiveAndBuffer {
     /// Packet/Transaction ingress.
     packet_receiver: PacketDeserializer,
     bank_forks: Arc<RwLock<BankForks>>,
-
-    forwarding_enabled: bool,
 }
 
 impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
@@ -91,7 +89,7 @@ impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
                 },
                 true,
             ),
-            BufferedPacketsDecision::Forward => (MAX_PACKET_RECEIVE_TIME, self.forwarding_enabled),
+            BufferedPacketsDecision::Forward => (MAX_PACKET_RECEIVE_TIME, false),
             BufferedPacketsDecision::ForwardAndHold => (MAX_PACKET_RECEIVE_TIME, true),
         };
 
@@ -143,15 +141,10 @@ impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
 }
 
 impl SanitizedTransactionReceiveAndBuffer {
-    pub fn new(
-        packet_receiver: PacketDeserializer,
-        bank_forks: Arc<RwLock<BankForks>>,
-        forwarding_enabled: bool,
-    ) -> Self {
+    pub fn new(packet_receiver: PacketDeserializer, bank_forks: Arc<RwLock<BankForks>>) -> Self {
         Self {
             packet_receiver,
             bank_forks,
-            forwarding_enabled,
         }
     }
 
