@@ -232,14 +232,12 @@ impl SanitizedTransactionReceiveAndBuffer {
             let mut post_transaction_check_count: usize = 0;
             let mut num_dropped_on_capacity: usize = 0;
             let mut num_buffered: usize = 0;
-            for ((((packet, transaction), max_age), fee_budget_limits), _check_result) in
-                arc_packets
-                    .drain(..)
-                    .zip(transactions.drain(..))
-                    .zip(max_ages.drain(..))
-                    .zip(fee_budget_limits_vec.drain(..))
-                    .zip(check_results)
-                    .filter(|(_, check_result)| check_result.is_ok())
+            for (((transaction, max_age), fee_budget_limits), _check_result) in transactions
+                .drain(..)
+                .zip(max_ages.drain(..))
+                .zip(fee_budget_limits_vec.drain(..))
+                .zip(check_results)
+                .filter(|(_, check_result)| check_result.is_ok())
             {
                 saturating_add_assign!(post_transaction_check_count, 1);
 
@@ -250,7 +248,7 @@ impl SanitizedTransactionReceiveAndBuffer {
                     max_age,
                 };
 
-                if container.insert_new_transaction(transaction_ttl, packet, priority, cost) {
+                if container.insert_new_transaction(transaction_ttl, priority, cost) {
                     saturating_add_assign!(num_dropped_on_capacity, 1);
                 }
                 saturating_add_assign!(num_buffered, 1);
@@ -527,7 +525,6 @@ impl TransactionViewReceiveAndBuffer {
                 transaction: view,
                 max_age,
             },
-            None,
             priority,
             cost,
         ))
