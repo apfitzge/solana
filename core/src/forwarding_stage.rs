@@ -31,6 +31,7 @@ use {
 
 const FORWARD_BATCH_SIZE: usize = 128;
 
+#[derive(Clone)]
 pub struct ForwardingAddresses {
     pub tpu: Option<SocketAddr>,
     pub tpu_vote: Option<SocketAddr>,
@@ -484,16 +485,42 @@ fn initial_packet_meta_filter(meta: &packet::Meta) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, packet::PacketFlags};
+    use {
+        super::*,
+        crossbeam_channel::unbounded,
+        packet::PacketFlags,
+        solana_perf::packet::PacketBatch,
+        solana_pubkey::Pubkey,
+        solana_runtime::genesis_utils::create_genesis_config,
+        solana_sdk::{hash::Hash, signature::Keypair, system_transaction},
+    };
+
+    impl ForwardAddressGetter for ForwardingAddresses {
+        fn get_forwarding_addresses(&self, _protocol: Protocol) -> ForwardingAddresses {
+            self.clone()
+        }
+    }
+
+    fn meta_with_flags(packet_flags: PacketFlags) -> packet::Meta {
+        let mut meta = packet::Meta::default();
+        meta.flags = packet_flags;
+        meta
+    }
+
+    fn simple_transfer_with_flags(packet_flags: PacketFlags) -> Packet {
+        let transaction = system_transaction::transfer(
+            &Keypair::new(),
+            &Pubkey::new_unique(),
+            1,
+            Hash::default(),
+        );
+        let mut packet = Packet::from_data(None, &transaction).unwrap();
+        packet.meta_mut().flags = packet_flags;
+        packet
+    }
 
     #[test]
     fn test_initial_packet_meta_filter() {
-        fn meta_with_flags(packet_flags: PacketFlags) -> packet::Meta {
-            let mut meta = packet::Meta::default();
-            meta.flags = packet_flags;
-            meta
-        }
-
         assert!(!initial_packet_meta_filter(&meta_with_flags(
             PacketFlags::empty()
         )));
@@ -509,5 +536,82 @@ mod tests {
         assert!(!initial_packet_meta_filter(&meta_with_flags(
             PacketFlags::FROM_STAKED_NODE | PacketFlags::DISCARD
         )));
+    }
+
+    #[test]
+    fn test_forwarding() {
+        let vote_socket = bind_to_unspecified().unwrap();
+        vote_socket
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        let non_vote_socket = bind_to_unspecified().unwrap();
+        non_vote_socket
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+
+        let forwarding_addresses = ForwardingAddresses {
+            tpu_vote: Some(vote_socket.local_addr().unwrap()),
+            tpu: Some(non_vote_socket.local_addr().unwrap()),
+        };
+
+        let (packet_batch_sender, packet_batch_receiver) = unbounded();
+        let connection_cache = Arc::new(ConnectionCache::with_udp("connection_cache_test", 1));
+        let (_bank, bank_forks) =
+            Bank::new_with_bank_forks_for_tests(&create_genesis_config(1).genesis_config);
+        let root_bank_cache = RootBankCache::new(bank_forks);
+        let mut forwarding_stage = ForwardingStage::new(
+            packet_batch_receiver,
+            connection_cache,
+            root_bank_cache,
+            forwarding_addresses,
+        );
+
+        // Send packet batches.
+        let non_vote_packets = BankingPacketBatch::new(vec![PacketBatch::new(vec![
+            simple_transfer_with_flags(PacketFlags::FROM_STAKED_NODE),
+            simple_transfer_with_flags(PacketFlags::FROM_STAKED_NODE | PacketFlags::DISCARD),
+            simple_transfer_with_flags(PacketFlags::FROM_STAKED_NODE | PacketFlags::FORWARDED),
+        ])]);
+        let vote_packets = BankingPacketBatch::new(vec![PacketBatch::new(vec![
+            simple_transfer_with_flags(PacketFlags::SIMPLE_VOTE_TX | PacketFlags::FROM_STAKED_NODE),
+            simple_transfer_with_flags(
+                PacketFlags::SIMPLE_VOTE_TX | PacketFlags::FROM_STAKED_NODE | PacketFlags::DISCARD,
+            ),
+            simple_transfer_with_flags(
+                PacketFlags::SIMPLE_VOTE_TX
+                    | PacketFlags::FROM_STAKED_NODE
+                    | PacketFlags::FORWARDED,
+            ),
+        ])]);
+
+        packet_batch_sender
+            .send((non_vote_packets.clone(), false))
+            .unwrap();
+        packet_batch_sender
+            .send((vote_packets.clone(), true))
+            .unwrap();
+
+        let bank = forwarding_stage.root_bank_cache.root_bank();
+        forwarding_stage.receive_and_buffer(&bank);
+        if !packet_batch_sender.is_empty() {
+            forwarding_stage.receive_and_buffer(&bank);
+        }
+        assert_eq!(forwarding_stage.packet_container.priority_queue.len(), 2); // only 2 valid packets
+        forwarding_stage.forward_buffered_packets();
+
+        let recv_buffer = &mut [0; 1024];
+        let (vote_packet_bytes, _) = vote_socket.recv_from(recv_buffer).unwrap();
+        assert_eq!(
+            &recv_buffer[..vote_packet_bytes],
+            vote_packets[0][0].data(..).unwrap()
+        );
+        assert!(vote_socket.recv_from(recv_buffer).is_err());
+
+        let (non_vote_packet_bytes, _) = non_vote_socket.recv_from(recv_buffer).unwrap();
+        assert_eq!(
+            &recv_buffer[..non_vote_packet_bytes],
+            non_vote_packets[0][0].data(..).unwrap()
+        );
+        assert!(non_vote_socket.recv_from(recv_buffer).is_err());
     }
 }
