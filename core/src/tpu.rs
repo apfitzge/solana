@@ -292,7 +292,6 @@ impl Tpu {
             connection_cache.clone(),
             bank_forks.clone(),
             prioritization_fee_cache,
-            enable_block_production_forwarding,
         );
 
         let forwarding_stage = ForwardingStage::spawn(
