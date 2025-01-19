@@ -43,7 +43,7 @@ impl PrioGraphScheduler {
             account_locks: ThreadAwareAccountLocks::new(num_threads),
             consume_work_senders,
             finished_consume_work_receiver,
-            look_ahead_window_size: 2048,
+            look_ahead_window_size: 256,
         }
     }
 
