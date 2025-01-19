@@ -86,6 +86,14 @@ impl PrioGraphScheduler {
                     Some(Ok(look_ahead_window_size)),
                 ) = (iter.next(), iter.next())
                 {
+                    if self.max_transactions_per_scheduling_pass
+                        != max_transactions_per_scheduling_pass
+                        || self.look_ahead_window_size != look_ahead_window_size
+                    {
+                        info!("Using new scheduler configuration. \
+                        max_transactions_per_scheduling_pass={max_transactions_per_scheduling_pass} \
+                        look_ahead_window_size={look_ahead_window_size}")
+                    }
                     self.max_transactions_per_scheduling_pass =
                         max_transactions_per_scheduling_pass;
                     self.look_ahead_window_size = look_ahead_window_size;
