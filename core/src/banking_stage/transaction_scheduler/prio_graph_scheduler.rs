@@ -24,11 +24,14 @@ use {
     solana_sdk::{pubkey::Pubkey, saturating_add_assign, transaction::SanitizedTransaction},
 };
 
+const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 1000;
+
 pub(crate) struct PrioGraphScheduler {
     in_flight_tracker: InFlightTracker,
     account_locks: ThreadAwareAccountLocks,
     consume_work_senders: Vec<Sender<ConsumeWork>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
+    max_transactions_per_scheduling_pass: usize,
     look_ahead_window_size: usize,
 }
 
@@ -43,6 +46,7 @@ impl PrioGraphScheduler {
             account_locks: ThreadAwareAccountLocks::new(num_threads),
             consume_work_senders,
             finished_consume_work_receiver,
+            max_transactions_per_scheduling_pass: MAX_TRANSACTIONS_PER_SCHEDULING_PASS,
             look_ahead_window_size: 256,
         }
     }
@@ -154,11 +158,11 @@ impl PrioGraphScheduler {
 
         let mut unblock_this_batch =
             Vec::with_capacity(self.consume_work_senders.len() * TARGET_NUM_TRANSACTIONS_PER_BATCH);
-        const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 1000;
+
         let mut num_scheduled: usize = 0;
         let mut num_sent: usize = 0;
         let mut num_unschedulable: usize = 0;
-        while num_scheduled < MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
+        while num_scheduled < self.max_transactions_per_scheduling_pass {
             // If nothing is in the main-queue of the `PrioGraph` then there's nothing left to schedule.
             if prio_graph.is_empty() {
                 break;
@@ -230,7 +234,7 @@ impl PrioGraphScheduler {
                             }
                         }
 
-                        if num_scheduled >= MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
+                        if num_scheduled >= self.max_transactions_per_scheduling_pass {
                             break;
                         }
                     }
