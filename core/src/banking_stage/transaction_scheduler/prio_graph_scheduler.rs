@@ -22,6 +22,7 @@ use {
     solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS,
     solana_measure::measure_us,
     solana_sdk::{pubkey::Pubkey, saturating_add_assign, transaction::SanitizedTransaction},
+    std::time::Instant,
 };
 
 const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 1000;
@@ -33,6 +34,7 @@ pub(crate) struct PrioGraphScheduler {
     finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
     max_transactions_per_scheduling_pass: usize,
     look_ahead_window_size: usize,
+    last_lookup_time: Instant,
 }
 
 impl PrioGraphScheduler {
@@ -48,6 +50,7 @@ impl PrioGraphScheduler {
             finished_consume_work_receiver,
             max_transactions_per_scheduling_pass: MAX_TRANSACTIONS_PER_SCHEDULING_PASS,
             look_ahead_window_size: 256,
+            last_lookup_time: Instant::now(),
         }
     }
 
@@ -73,6 +76,23 @@ impl PrioGraphScheduler {
         pre_graph_filter: impl Fn(&[&SanitizedTransaction], &mut [bool]),
         pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
+        if self.last_lookup_time.elapsed().as_secs() > 60 {
+            self.last_lookup_time = Instant::now();
+            if let Ok(str) = std::fs::read_to_string("/tmp/scheduler_config") {
+                let mut iter = str.split_whitespace().map(|s| s.parse::<usize>());
+
+                if let (
+                    Some(Ok(max_transactions_per_scheduling_pass)),
+                    Some(Ok(look_ahead_window_size)),
+                ) = (iter.next(), iter.next())
+                {
+                    self.max_transactions_per_scheduling_pass =
+                        max_transactions_per_scheduling_pass;
+                    self.look_ahead_window_size = look_ahead_window_size;
+                }
+            };
+        }
+
         let num_threads = self.consume_work_senders.len();
         let max_cu_per_thread = MAX_BLOCK_UNITS / num_threads as u64;
 
