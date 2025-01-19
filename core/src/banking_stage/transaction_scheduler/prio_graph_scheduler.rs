@@ -76,31 +76,6 @@ impl PrioGraphScheduler {
         pre_graph_filter: impl Fn(&[&SanitizedTransaction], &mut [bool]),
         pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
-        if self.last_lookup_time.elapsed().as_secs() > 60 {
-            self.last_lookup_time = Instant::now();
-            if let Ok(str) = std::fs::read_to_string("/tmp/scheduler_config") {
-                let mut iter = str.split_whitespace().map(|s| s.parse::<usize>());
-
-                if let (
-                    Some(Ok(max_transactions_per_scheduling_pass)),
-                    Some(Ok(look_ahead_window_size)),
-                ) = (iter.next(), iter.next())
-                {
-                    if self.max_transactions_per_scheduling_pass
-                        != max_transactions_per_scheduling_pass
-                        || self.look_ahead_window_size != look_ahead_window_size
-                    {
-                        info!("Using new scheduler configuration. \
-                        max_transactions_per_scheduling_pass={max_transactions_per_scheduling_pass} \
-                        look_ahead_window_size={look_ahead_window_size}")
-                    }
-                    self.max_transactions_per_scheduling_pass =
-                        max_transactions_per_scheduling_pass;
-                    self.look_ahead_window_size = look_ahead_window_size;
-                }
-            };
-        }
-
         let num_threads = self.consume_work_senders.len();
         let max_cu_per_thread = MAX_BLOCK_UNITS / num_threads as u64;
 
@@ -489,6 +464,33 @@ impl PrioGraphScheduler {
                     (*key, AccessKind::Read)
                 }
             })
+    }
+
+    pub fn maybe_read_config_file(&mut self) {
+        if self.last_lookup_time.elapsed().as_secs() > 60 {
+            self.last_lookup_time = Instant::now();
+            if let Ok(str) = std::fs::read_to_string("/tmp/scheduler_config") {
+                let mut iter = str.split_whitespace().map(|s| s.parse::<usize>());
+
+                if let (
+                    Some(Ok(max_transactions_per_scheduling_pass)),
+                    Some(Ok(look_ahead_window_size)),
+                ) = (iter.next(), iter.next())
+                {
+                    if self.max_transactions_per_scheduling_pass
+                        != max_transactions_per_scheduling_pass
+                        || self.look_ahead_window_size != look_ahead_window_size
+                    {
+                        info!("Using new scheduler configuration. \
+                        max_transactions_per_scheduling_pass={max_transactions_per_scheduling_pass} \
+                        look_ahead_window_size={look_ahead_window_size}")
+                    }
+                    self.max_transactions_per_scheduling_pass =
+                        max_transactions_per_scheduling_pass;
+                    self.look_ahead_window_size = look_ahead_window_size;
+                }
+            };
+        }
     }
 }
 

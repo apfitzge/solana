@@ -120,6 +120,7 @@ impl SchedulerController {
                 .maybe_report_and_reset_slot(new_leader_slot);
 
             self.receive_completed()?;
+            self.scheduler.maybe_read_config_file();
             self.process_transactions(&decision)?;
             if !self.receive_and_buffer_packets(&decision) {
                 break;
