@@ -80,8 +80,7 @@ impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
         count_metrics: &mut SchedulerCountMetrics,
         decision: &BufferedPacketsDecision,
     ) -> Result<usize, ()> {
-        let remaining_queue_capacity = container.remaining_capacity();
-
+        const MAX_RECEIVE_PACKETS: usize = 5_000;
         const MAX_PACKET_RECEIVE_TIME: Duration = Duration::from_millis(10);
         let (recv_timeout, should_buffer) = match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => (
@@ -98,7 +97,7 @@ impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
 
         let (received_packet_results, receive_time_us) = measure_us!(self
             .packet_receiver
-            .receive_packets(recv_timeout, remaining_queue_capacity, |packet| {
+            .receive_packets(recv_timeout, MAX_RECEIVE_PACKETS, |packet| {
                 packet.check_excessive_precompiles()?;
                 Ok(packet)
             }));
