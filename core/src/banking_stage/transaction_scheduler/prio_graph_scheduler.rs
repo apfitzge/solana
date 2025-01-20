@@ -22,17 +22,18 @@ use {
     solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS,
     solana_measure::measure_us,
     solana_sdk::{pubkey::Pubkey, saturating_add_assign, transaction::SanitizedTransaction},
+    solana_send_transaction_service::send_transaction_service::MAX_TRANSACTION_BATCH_SIZE,
     std::time::Instant,
 };
 
-const MAX_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 1000;
+const MAX_SCHEDULED_TRANSACTIONS_PER_SCHEDULING_PASS: usize = 1000;
 
 pub(crate) struct PrioGraphScheduler {
     in_flight_tracker: InFlightTracker,
     account_locks: ThreadAwareAccountLocks,
     consume_work_senders: Vec<Sender<ConsumeWork>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
-    max_transactions_per_scheduling_pass: usize,
+    max_scheduled_transactions_per_scheduling_pass: usize,
     look_ahead_window_size: usize,
     last_lookup_time: Instant,
 }
@@ -48,7 +49,8 @@ impl PrioGraphScheduler {
             account_locks: ThreadAwareAccountLocks::new(num_threads),
             consume_work_senders,
             finished_consume_work_receiver,
-            max_transactions_per_scheduling_pass: MAX_TRANSACTIONS_PER_SCHEDULING_PASS,
+            max_scheduled_transactions_per_scheduling_pass:
+                MAX_SCHEDULED_TRANSACTIONS_PER_SCHEDULING_PASS,
             look_ahead_window_size: 256,
             last_lookup_time: Instant::now(),
         }
@@ -165,7 +167,7 @@ impl PrioGraphScheduler {
         let mut num_scheduled: usize = 0;
         let mut num_sent: usize = 0;
         let mut num_unschedulable: usize = 0;
-        while num_scheduled < self.max_transactions_per_scheduling_pass {
+        while num_scheduled < self.max_scheduled_transactions_per_scheduling_pass {
             // If nothing is in the main-queue of the `PrioGraph` then there's nothing left to schedule.
             if prio_graph.is_empty() {
                 break;
@@ -237,7 +239,7 @@ impl PrioGraphScheduler {
                             }
                         }
 
-                        if num_scheduled >= self.max_transactions_per_scheduling_pass {
+                        if num_scheduled >= self.max_scheduled_transactions_per_scheduling_pass {
                             break;
                         }
                     }
@@ -473,20 +475,20 @@ impl PrioGraphScheduler {
                 let mut iter = str.split_whitespace().map(|s| s.parse::<usize>());
 
                 if let (
-                    Some(Ok(max_transactions_per_scheduling_pass)),
+                    Some(Ok(max_scheduled_transactions_per_scheduling_pass)),
                     Some(Ok(look_ahead_window_size)),
                 ) = (iter.next(), iter.next())
                 {
-                    if self.max_transactions_per_scheduling_pass
-                        != max_transactions_per_scheduling_pass
+                    if self.max_scheduled_transactions_per_scheduling_pass
+                        != max_scheduled_transactions_per_scheduling_pass
                         || self.look_ahead_window_size != look_ahead_window_size
                     {
                         info!("Using new scheduler configuration. \
-                        max_transactions_per_scheduling_pass={max_transactions_per_scheduling_pass} \
+                        max_scheduled_transactions_per_scheduling_pass={max_scheduled_transactions_per_scheduling_pass} \
                         look_ahead_window_size={look_ahead_window_size}")
                     }
-                    self.max_transactions_per_scheduling_pass =
-                        max_transactions_per_scheduling_pass;
+                    self.max_scheduled_transactions_per_scheduling_pass =
+                        max_scheduled_transactions_per_scheduling_pass;
                     self.look_ahead_window_size = look_ahead_window_size;
                 }
             };
