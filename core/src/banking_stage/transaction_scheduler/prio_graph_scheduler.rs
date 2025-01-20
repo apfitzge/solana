@@ -34,6 +34,7 @@ pub(crate) struct PrioGraphScheduler {
     consume_work_senders: Vec<Sender<ConsumeWork>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
     max_scheduled_transactions_per_scheduling_pass: usize,
+    max_scanned_transactions_per_scheduling_pass: usize,
     look_ahead_window_size: usize,
     last_lookup_time: Instant,
 }
@@ -51,6 +52,7 @@ impl PrioGraphScheduler {
             finished_consume_work_receiver,
             max_scheduled_transactions_per_scheduling_pass:
                 MAX_SCHEDULED_TRANSACTIONS_PER_SCHEDULING_PASS,
+            max_scanned_transactions_per_scheduling_pass: 1000,
             look_ahead_window_size: 256,
             last_lookup_time: Instant::now(),
         }
@@ -164,16 +166,20 @@ impl PrioGraphScheduler {
         let mut unblock_this_batch =
             Vec::with_capacity(self.consume_work_senders.len() * TARGET_NUM_TRANSACTIONS_PER_BATCH);
 
+        let mut num_scanned: usize = 0;
         let mut num_scheduled: usize = 0;
         let mut num_sent: usize = 0;
         let mut num_unschedulable: usize = 0;
-        while num_scheduled < self.max_scheduled_transactions_per_scheduling_pass {
+        while num_scheduled < self.max_scheduled_transactions_per_scheduling_pass
+            && num_scanned < self.max_scanned_transactions_per_scheduling_pass
+        {
             // If nothing is in the main-queue of the `PrioGraph` then there's nothing left to schedule.
             if prio_graph.is_empty() {
                 break;
             }
 
             while let Some(id) = prio_graph.pop() {
+                num_scanned += 1;
                 unblock_this_batch.push(id);
 
                 // Should always be in the container, during initial testing phase panic.
@@ -243,6 +249,10 @@ impl PrioGraphScheduler {
                             break;
                         }
                     }
+                }
+
+                if num_scanned > self.max_scanned_transactions_per_scheduling_pass {
+                    break;
                 }
             }
 
