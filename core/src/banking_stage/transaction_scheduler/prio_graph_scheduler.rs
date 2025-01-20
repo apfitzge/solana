@@ -52,8 +52,8 @@ impl Default for PrioGraphSchedulerConfig {
     fn default() -> Self {
         Self {
             max_scheduled_cus: MAX_BLOCK_UNITS,
-            max_transactions_per_scheduling_pass: 100_000,
-            look_ahead_window_size: 2048,
+            max_transactions_per_scheduling_pass: 1000,
+            look_ahead_window_size: 256,
             target_transactions_per_batch: TARGET_NUM_TRANSACTIONS_PER_BATCH,
         }
     }
