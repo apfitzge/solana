@@ -1,3 +1,6 @@
+//! `ForwardingStage` is a stage parallel to `BankingStage` that forwards
+//! packets to a node that is or will be leader soon.
+
 use {
     crate::{
         banking_stage::LikeClusterInfo,
@@ -29,11 +32,17 @@ use {
     },
 };
 
+/// Value chosen because it was used historically, at some point
+/// was found to be optimal. If we need to improve performance
+/// this should be evaluated with new stage.
 const FORWARD_BATCH_SIZE: usize = 128;
 
+/// Addresses to use for forwarding.
 #[derive(Clone)]
 pub struct ForwardingAddresses {
+    /// Forwarding address for TPU (non-votes)
     pub tpu: Option<SocketAddr>,
+    /// Forwarding address for votes
     pub tpu_vote: Option<SocketAddr>,
 }
 
@@ -50,6 +59,7 @@ impl<T: LikeClusterInfo> ForwardAddressGetter for (T, Arc<RwLock<PohRecorder>>) 
     }
 }
 
+/// Forwards packets to current/next leader.
 pub struct ForwardingStage<F: ForwardAddressGetter> {
     receiver: Receiver<(BankingPacketBatch, bool)>,
     packet_container: PacketContainer,
@@ -100,6 +110,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         }
     }
 
+    /// Runs `ForwardingStage`'s main loop, to receive, order, and forward packets.
     fn run(mut self) {
         loop {
             let root_bank = self.root_bank_cache.root_bank();
@@ -111,9 +122,13 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         }
     }
 
+    /// Receive packets from previous stage and insert them into the buffer.
     fn receive_and_buffer(&mut self, bank: &Bank) -> bool {
-        let now = Instant::now();
+        // Timeout is long enough to receive packets but not too long that we
+        // forward infrequently.
         const TIMEOUT: Duration = Duration::from_millis(10);
+
+        let now = Instant::now();
         match self.receiver.recv_timeout(TIMEOUT) {
             Ok((packet_batches, tpu_vote_batch)) => {
                 self.metrics.did_something = true;
@@ -149,6 +164,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         }
     }
 
+    /// Insert received packets into the packet container.
     fn buffer_packet_batches(
         &mut self,
         packet_batches: BankingPacketBatch,
@@ -232,6 +248,9 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         }
     }
 
+    /// Forwards packets that have been buffered. This will loop through all
+    /// packets. If the data budget is exceeded then remaining packets are
+    /// dropped.
     fn forward_buffered_packets(&mut self) {
         self.metrics.did_something |= !self.packet_container.priority_queue.is_empty();
         self.refresh_data_budget();
@@ -323,6 +342,9 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
     }
 }
 
+/// Container for storing packets.
+/// Packet IDs are stored with priority in a priority queue and the actual
+/// `Packet` are stored in a map.
 struct PacketContainer {
     priority_queue: MinMaxHeap<PriorityIndex>,
     packets: Slab<Packet>,
