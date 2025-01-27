@@ -12,7 +12,7 @@ use {
     solana_connection_cache::client_connection::ClientConnection,
     solana_cost_model::cost_model::CostModel,
     solana_gossip::contact_info::Protocol,
-    solana_net_utils::bind_to_unspecified,
+    solana_net_utils::bind_to,
     solana_perf::{data_budget::DataBudget, packet::Packet},
     solana_poh::poh_recorder::PohRecorder,
     solana_runtime::{bank::Bank, root_bank_cache::RootBankCache},
@@ -22,7 +22,7 @@ use {
     solana_sdk::{fee::FeeBudgetLimits, packet, transaction::MessageHash},
     solana_streamer::sendmmsg::batch_send,
     std::{
-        net::{SocketAddr, UdpSocket},
+        net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
         sync::{Arc, RwLock},
         thread::{Builder, JoinHandle},
         time::{Duration, Instant},
@@ -50,6 +50,24 @@ impl<T: LikeClusterInfo> ForwardAddressGetter for (T, Arc<RwLock<PohRecorder>>) 
     }
 }
 
+struct VoteClient {
+    udp_socket: UdpSocket,
+}
+
+impl VoteClient {
+    fn new() -> Self {
+        Self {
+            udp_socket: bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, false).unwrap(),
+        }
+    }
+
+    fn send_batch(&self, input_batch: &mut Vec<(Vec<u8>, SocketAddr)>) {
+        let mut batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        core::mem::swap(&mut batch, input_batch); // why do we swap?
+        let _res = batch_send(&self.udp_socket, &batch);
+    }
+}
+
 pub struct ForwardingStage<F: ForwardAddressGetter> {
     receiver: Receiver<(BankingPacketBatch, bool)>,
     packet_container: PacketContainer,
@@ -57,8 +75,8 @@ pub struct ForwardingStage<F: ForwardAddressGetter> {
     root_bank_cache: RootBankCache,
     forward_address_getter: F,
     connection_cache: Arc<ConnectionCache>,
+    vote_client: VoteClient,
     data_budget: DataBudget,
-    udp_socket: UdpSocket,
 
     metrics: ForwardingStageMetrics,
 }
@@ -94,8 +112,8 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
             root_bank_cache,
             forward_address_getter,
             connection_cache,
+            vote_client: VoteClient::new(),
             data_budget: DataBudget::default(),
-            udp_socket: bind_to_unspecified().unwrap(),
             metrics: ForwardingStageMetrics::default(),
         }
     }
@@ -247,8 +265,8 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
             return;
         };
 
-        let mut vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
         let mut non_vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        let mut vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
 
         // Loop through packets creating batches of packets to forward.
         while let Some(priority_index) = self.packet_container.priority_queue.pop_max() {
@@ -271,14 +289,14 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
             let packet_data_vec = packet.data(..).expect("packet has data").to_vec();
 
             if packet.meta().is_simple_vote_tx() {
-                vote_batch.push(packet_data_vec);
+                vote_batch.push((packet_data_vec, tpu_vote));
                 if vote_batch.len() == vote_batch.capacity() {
-                    self.send_vote_batch(tpu_vote, &mut vote_batch);
+                    self.vote_client.send_batch(&mut vote_batch);
                 }
             } else {
-                non_vote_batch.push((packet_data_vec, tpu));
+                non_vote_batch.push(packet_data_vec);
                 if non_vote_batch.len() == non_vote_batch.capacity() {
-                    self.send_non_vote_batch(&mut non_vote_batch);
+                    self.send_non_vote_batch(tpu, &mut non_vote_batch);
                 }
             }
         }
@@ -286,11 +304,11 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         // Send out remaining packets
         if !vote_batch.is_empty() {
             self.metrics.votes_forwarded += vote_batch.len();
-            self.send_vote_batch(tpu_vote, &mut vote_batch);
+            self.vote_client.send_batch(&mut vote_batch);
         }
         if !non_vote_batch.is_empty() {
             self.metrics.non_votes_forwarded += non_vote_batch.len();
-            self.send_non_vote_batch(&mut non_vote_batch);
+            self.send_non_vote_batch(tpu, &mut non_vote_batch);
         }
     }
 
@@ -309,17 +327,11 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         });
     }
 
-    fn send_vote_batch(&self, addr: SocketAddr, vote_batch: &mut Vec<Vec<u8>>) {
+    fn send_non_vote_batch(&self, addr: SocketAddr, vote_batch: &mut Vec<Vec<u8>>) {
         let conn = self.connection_cache.get_connection(&addr);
         let mut batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
         core::mem::swap(&mut batch, vote_batch);
         let _res = conn.send_data_batch_async(batch);
-    }
-
-    fn send_non_vote_batch(&self, non_vote_batch: &mut Vec<(Vec<u8>, SocketAddr)>) {
-        let mut batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
-        core::mem::swap(&mut batch, non_vote_batch);
-        let _res = batch_send(&self.udp_socket, &batch);
     }
 }
 
