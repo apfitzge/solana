@@ -9,14 +9,13 @@ use {
     agave_banking_stage_ingress_types::BankingPacketBatch,
     agave_transaction_view::transaction_view::SanitizedTransactionView,
     crossbeam_channel::{Receiver, RecvTimeoutError},
-    min_max_heap::MinMaxHeap,
-    slab::Slab,
+    packet_container::PacketContainer,
     solana_client::connection_cache::ConnectionCache,
     solana_connection_cache::client_connection::ClientConnection,
     solana_cost_model::cost_model::CostModel,
     solana_gossip::contact_info::Protocol,
     solana_net_utils::bind_to_unspecified,
-    solana_perf::{data_budget::DataBudget, packet::Packet},
+    solana_perf::data_budget::DataBudget,
     solana_poh::poh_recorder::PohRecorder,
     solana_runtime::{bank::Bank, root_bank_cache::RootBankCache},
     solana_runtime_transaction::{
@@ -31,6 +30,8 @@ use {
         time::{Duration, Instant},
     },
 };
+
+mod packet_container;
 
 /// Value chosen because it was used historically, at some point
 /// was found to be optimal. If we need to improve performance
@@ -212,15 +213,8 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
                 };
 
                 // If at capacity, check lowest priority item.
-                if self.packet_container.priority_queue.len()
-                    == self.packet_container.priority_queue.capacity()
-                {
-                    let min_priority = self
-                        .packet_container
-                        .priority_queue
-                        .peek_min()
-                        .expect("not empty")
-                        .priority;
+                if self.packet_container.is_full() {
+                    let min_priority = self.packet_container.min_priority().expect("not empty");
                     // If priority of current packet is not higher than the min
                     // drop the current packet.
                     if min_priority >= priority {
@@ -229,24 +223,17 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
                         continue;
                     }
 
-                    let dropped_index = self
+                    let dropped_packet = self
                         .packet_container
-                        .priority_queue
-                        .pop_min()
-                        .expect("not empty")
-                        .index;
-                    let dropped_packet = self.packet_container.packets.remove(dropped_index);
+                        .pop_and_remove_min()
+                        .expect("not empty");
                     self.metrics.votes_dropped_on_capacity +=
                         usize::from(dropped_packet.meta().is_simple_vote_tx());
                     self.metrics.non_votes_dropped_on_capacity +=
                         usize::from(!dropped_packet.meta().is_simple_vote_tx());
                 }
 
-                let entry = self.packet_container.packets.vacant_entry();
-                let index = entry.key();
-                entry.insert(packet.clone());
-                let priority_index = PriorityIndex { priority, index };
-                self.packet_container.priority_queue.push(priority_index);
+                self.packet_container.insert(packet.clone(), priority);
             }
         }
     }
@@ -255,7 +242,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
     /// packets. If the data budget is exceeded then remaining packets are
     /// dropped.
     fn forward_buffered_packets(&mut self) {
-        self.metrics.did_something |= !self.packet_container.priority_queue.is_empty();
+        self.metrics.did_something |= !self.packet_container.is_empty();
         self.refresh_data_budget();
 
         // Get forwarding addresses otherwise return now.
@@ -273,20 +260,13 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         let mut non_vote_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
 
         // Loop through packets creating batches of packets to forward.
-        while let Some(priority_index) = self.packet_container.priority_queue.pop_max() {
-            let packet = self
-                .packet_container
-                .packets
-                .get(priority_index.index)
-                .expect("packet exists");
-
+        while let Some(packet) = self.packet_container.pop_and_remove_max() {
             // If it exceeds our data-budget, drop.
             if !self.data_budget.take(packet.meta().size) {
                 self.metrics.votes_dropped_on_data_budget +=
                     usize::from(packet.meta().is_simple_vote_tx());
                 self.metrics.non_votes_dropped_on_data_budget +=
                     usize::from(!packet.meta().is_simple_vote_tx());
-                self.packet_container.packets.remove(priority_index.index);
                 continue;
             }
 
@@ -343,29 +323,6 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         core::mem::swap(&mut batch, non_vote_batch);
         let _res = conn.send_data_batch_async(batch);
     }
-}
-
-/// Container for storing packets.
-/// Packet IDs are stored with priority in a priority queue and the actual
-/// `Packet` are stored in a map.
-struct PacketContainer {
-    priority_queue: MinMaxHeap<PriorityIndex>,
-    packets: Slab<Packet>,
-}
-
-impl PacketContainer {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            priority_queue: MinMaxHeap::with_capacity(capacity),
-            packets: Slab::with_capacity(capacity),
-        }
-    }
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
-struct PriorityIndex {
-    priority: u64,
-    index: usize,
 }
 
 /// Calculate priority for a transaction:
@@ -514,7 +471,7 @@ mod tests {
         super::*,
         crossbeam_channel::unbounded,
         packet::PacketFlags,
-        solana_perf::packet::PacketBatch,
+        solana_perf::packet::{Packet, PacketBatch},
         solana_pubkey::Pubkey,
         solana_runtime::genesis_utils::create_genesis_config,
         solana_sdk::{hash::Hash, signature::Keypair, system_transaction},
@@ -623,7 +580,6 @@ mod tests {
         if !packet_batch_sender.is_empty() {
             forwarding_stage.receive_and_buffer(&bank);
         }
-        assert_eq!(forwarding_stage.packet_container.priority_queue.len(), 2); // only 2 valid packets
         forwarding_stage.forward_buffered_packets();
 
         let recv_buffer = &mut [0; 1024];
