@@ -54,3 +54,77 @@ struct PriorityIndex {
     priority: u64,
     index: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use {super::*, solana_sdk::packet::PacketFlags};
+
+    fn simple_packet_with_flags(packet_flags: PacketFlags) -> Packet {
+        let mut packet = Packet::default();
+        packet.meta_mut().flags = packet_flags;
+        packet
+    }
+
+    #[test]
+    fn test_packet_container_status() {
+        let mut container = PacketContainer::with_capacity(2);
+        assert!(container.is_empty());
+        assert!(!container.is_full());
+        container.insert(simple_packet_with_flags(PacketFlags::empty()), 1);
+        assert!(!container.is_empty());
+        assert!(!container.is_full());
+        container.insert(simple_packet_with_flags(PacketFlags::all()), 2);
+        assert!(!container.is_empty());
+        assert!(container.is_full());
+    }
+
+    #[test]
+    fn test_packet_container_pop_and_remove_min() {
+        let mut container = PacketContainer::with_capacity(2);
+        assert!(container.pop_and_remove_min().is_none());
+        container.insert(simple_packet_with_flags(PacketFlags::empty()), 1);
+        container.insert(simple_packet_with_flags(PacketFlags::all()), 2);
+        assert_eq!(
+            container
+                .pop_and_remove_min()
+                .expect("not empty")
+                .meta()
+                .flags,
+            PacketFlags::empty()
+        );
+        assert_eq!(
+            container
+                .pop_and_remove_min()
+                .expect("not empty")
+                .meta()
+                .flags,
+            PacketFlags::all()
+        );
+        assert!(container.pop_and_remove_min().is_none());
+    }
+
+    #[test]
+    fn test_packet_container_pop_and_remove_max() {
+        let mut container = PacketContainer::with_capacity(2);
+        assert!(container.pop_and_remove_max().is_none());
+        container.insert(simple_packet_with_flags(PacketFlags::empty()), 1);
+        container.insert(simple_packet_with_flags(PacketFlags::all()), 2);
+        assert_eq!(
+            container
+                .pop_and_remove_max()
+                .expect("not empty")
+                .meta()
+                .flags,
+            PacketFlags::all()
+        );
+        assert_eq!(
+            container
+                .pop_and_remove_max()
+                .expect("not empty")
+                .meta()
+                .flags,
+            PacketFlags::empty()
+        );
+        assert!(container.pop_and_remove_max().is_none());
+    }
+}
