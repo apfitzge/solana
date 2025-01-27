@@ -432,7 +432,7 @@ impl TransactionViewReceiveAndBuffer {
                     }));
                     working_bank.check_transactions::<RuntimeTransaction<_>>(
                         &transactions,
-                        &lock_results,
+                        &lock_results[..transactions.len()],
                         MAX_PROCESSING_AGE,
                         &mut error_counters,
                     )
