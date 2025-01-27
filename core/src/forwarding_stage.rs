@@ -79,12 +79,14 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         connection_cache: Arc<ConnectionCache>,
         root_bank_cache: RootBankCache,
         forward_address_getter: F,
+        data_budget: DataBudget,
     ) -> JoinHandle<()> {
         let forwarding_stage = Self::new(
             receiver,
             connection_cache,
             root_bank_cache,
             forward_address_getter,
+            data_budget,
         );
         Builder::new()
             .name("solFwdStage".to_string())
@@ -97,6 +99,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         connection_cache: Arc<ConnectionCache>,
         root_bank_cache: RootBankCache,
         forward_address_getter: F,
+        data_budget: DataBudget,
     ) -> Self {
         Self {
             receiver,
@@ -104,7 +107,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
             root_bank_cache,
             forward_address_getter,
             connection_cache,
-            data_budget: DataBudget::default(),
+            data_budget,
             udp_socket: bind_to_unspecified().unwrap(),
             metrics: ForwardingStageMetrics::default(),
         }
@@ -587,6 +590,7 @@ mod tests {
             connection_cache,
             root_bank_cache,
             forwarding_addresses,
+            DataBudget::default(),
         );
 
         // Send packet batches.
