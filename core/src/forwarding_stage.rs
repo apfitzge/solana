@@ -80,13 +80,48 @@ impl<F: ForwardAddressGetter> VoteClient<F> {
     }
 }
 
+struct ConnectionCacheClient<F: ForwardAddressGetter> {
+    connection_cache: Arc<ConnectionCache>,
+    forward_address_getter: F,
+    current_address: Option<SocketAddr>,
+}
+
+impl<F: ForwardAddressGetter> ConnectionCacheClient<F> {
+    fn new(connection_cache: Arc<ConnectionCache>, forward_address_getter: F) -> Self {
+        Self {
+            connection_cache,
+            forward_address_getter,
+            current_address: None,
+        }
+    }
+
+    fn update_address(&mut self) -> bool {
+        self.current_address = self
+            .forward_address_getter
+            .get_non_vote_forwarding_addresses(self.connection_cache.protocol());
+        self.current_address.is_some()
+    }
+
+    fn send_batch(&self, input_batch: &mut Vec<Vec<u8>>) {
+        assert!(
+            self.current_address.is_some(),
+            "current_address should be updated before send_batch call."
+        );
+        let conn = self
+            .connection_cache
+            .get_connection(&self.current_address.unwrap());
+        let mut batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
+        core::mem::swap(&mut batch, input_batch);
+        let _res = conn.send_data_batch_async(batch);
+    }
+}
+
 pub struct ForwardingStage<F: ForwardAddressGetter> {
     receiver: Receiver<(BankingPacketBatch, bool)>,
     packet_container: PacketContainer,
 
     root_bank_cache: RootBankCache,
-    forward_address_getter: F,
-    connection_cache: Arc<ConnectionCache>,
+    transaction_client: ConnectionCacheClient<F>,
     vote_client: VoteClient<F>,
     data_budget: DataBudget,
 
@@ -100,12 +135,11 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         root_bank_cache: RootBankCache,
         forward_address_getter: F,
     ) -> JoinHandle<()> {
-        let forwarding_stage = Self::new(
-            receiver,
-            connection_cache,
-            root_bank_cache,
-            forward_address_getter,
-        );
+        let transaction_client =
+            ConnectionCacheClient::new(connection_cache, forward_address_getter.clone());
+        let vote_client = VoteClient::new(forward_address_getter);
+        let forwarding_stage =
+            Self::new(receiver, transaction_client, vote_client, root_bank_cache);
         Builder::new()
             .name("solFwdStage".to_string())
             .spawn(move || forwarding_stage.run())
@@ -114,17 +148,16 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
 
     fn new(
         receiver: Receiver<(BankingPacketBatch, bool)>,
-        connection_cache: Arc<ConnectionCache>,
+        transaction_client: ConnectionCacheClient<F>,
+        vote_client: VoteClient<F>,
         root_bank_cache: RootBankCache,
-        forward_address_getter: F,
     ) -> Self {
         Self {
             receiver,
             packet_container: PacketContainer::with_capacity(4 * 4096),
             root_bank_cache,
-            forward_address_getter: forward_address_getter.clone(),
-            connection_cache,
-            vote_client: VoteClient::new(forward_address_getter),
+            transaction_client,
+            vote_client,
             data_budget: DataBudget::default(),
             metrics: ForwardingStageMetrics::default(),
         }
@@ -267,13 +300,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         self.refresh_data_budget();
 
         // Get forwarding addresses otherwise return now.
-        let Some(tpu) = self
-            .forward_address_getter
-            .get_non_vote_forwarding_addresses(self.connection_cache.protocol())
-        else {
-            return;
-        };
-        if !self.vote_client.update_address() {
+        if !self.vote_client.update_address() || !self.transaction_client.update_address() {
             return;
         }
 
@@ -308,7 +335,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
             } else {
                 non_vote_batch.push(packet_data_vec);
                 if non_vote_batch.len() == non_vote_batch.capacity() {
-                    self.send_non_vote_batch(tpu, &mut non_vote_batch);
+                    self.transaction_client.send_batch(&mut non_vote_batch);
                 }
             }
         }
@@ -320,7 +347,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
         }
         if !non_vote_batch.is_empty() {
             self.metrics.non_votes_forwarded += non_vote_batch.len();
-            self.send_non_vote_batch(tpu, &mut non_vote_batch);
+            self.transaction_client.send_batch(&mut non_vote_batch);
         }
     }
 
@@ -337,13 +364,6 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
                 MAX_BYTES_BUDGET,
             )
         });
-    }
-
-    fn send_non_vote_batch(&self, addr: SocketAddr, vote_batch: &mut Vec<Vec<u8>>) {
-        let conn = self.connection_cache.get_connection(&addr);
-        let mut batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
-        core::mem::swap(&mut batch, vote_batch);
-        let _res = conn.send_data_batch_async(batch);
     }
 }
 
