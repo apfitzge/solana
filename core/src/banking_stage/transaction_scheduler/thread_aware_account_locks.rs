@@ -553,6 +553,24 @@ mod tests {
     }
 
     #[test]
+    fn test_try_lock_accounts_none_write() {
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let mut locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
+        locks.write_lock_account(&pk1, 2);
+        locks.write_lock_account(&pk2, 3);
+        assert_eq!(
+            locks.try_lock_accounts(
+                [&pk1].into_iter(),
+                [&pk2].into_iter(),
+                TEST_ANY_THREADS,
+                test_thread_selector
+            ),
+            Err(thread_set_from_iter([2, 3]))
+        );
+    }
+
+    #[test]
     fn test_try_lock_accounts_one() {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
