@@ -4,7 +4,7 @@ use {
     std::{
         collections::hash_map::Entry,
         fmt::{Debug, Display},
-        ops::{BitAnd, BitAndAssign, Sub},
+        ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub},
     },
 };
 
@@ -68,7 +68,8 @@ impl ThreadAwareAccountLocks {
     }
 
     /// Returns the `ThreadId` if the accounts are able to be locked
-    /// for the given thread, otherwise `None` is returned.
+    /// for the given thread, otherwise an Err containing the set of conflicting
+    /// threads is returned.
     /// `allowed_threads` is a set of threads that the caller restricts locking to.
     /// If accounts are schedulable, then they are locked for the thread
     /// selected by the `thread_selector` function.
@@ -80,16 +81,19 @@ impl ThreadAwareAccountLocks {
         read_account_locks: impl Iterator<Item = &'a Pubkey> + Clone,
         allowed_threads: ThreadSet,
         thread_selector: impl FnOnce(ThreadSet) -> ThreadId,
-    ) -> Option<ThreadId> {
-        let schedulable_threads = self.accounts_schedulable_threads(
+    ) -> Result<ThreadId, ThreadSet> {
+        match self.accounts_schedulable_threads(
             write_account_locks.clone(),
             read_account_locks.clone(),
-        )? & allowed_threads;
-        (!schedulable_threads.is_empty()).then(|| {
-            let thread_id = thread_selector(schedulable_threads);
-            self.lock_accounts(write_account_locks, read_account_locks, thread_id);
-            thread_id
-        })
+            allowed_threads,
+        ) {
+            Ok(schedulable_threads) => {
+                let thread_id = thread_selector(schedulable_threads);
+                self.lock_accounts(write_account_locks, read_account_locks, thread_id);
+                Ok(thread_id)
+            }
+            Err(conflicting_threads) => Err(conflicting_threads),
+        }
     }
 
     /// Unlocks the accounts for the given thread.
@@ -109,28 +113,38 @@ impl ThreadAwareAccountLocks {
     }
 
     /// Returns `ThreadSet` that the given accounts can be scheduled on.
+    /// If it cannot be scheduled, return the set of threads there are
+    /// conflicts with.
     fn accounts_schedulable_threads<'a>(
         &self,
         write_account_locks: impl Iterator<Item = &'a Pubkey>,
         read_account_locks: impl Iterator<Item = &'a Pubkey>,
-    ) -> Option<ThreadSet> {
-        let mut schedulable_threads = ThreadSet::any(self.num_threads);
+        mut schedulable_threads: ThreadSet,
+    ) -> Result<ThreadSet, ThreadSet> {
+        let any_threads = ThreadSet::any(self.num_threads);
+        let mut conflicting_threads = ThreadSet::none();
 
         for account in write_account_locks {
-            schedulable_threads &= self.write_schedulable_threads(account);
-            if schedulable_threads.is_empty() {
-                return None;
+            let write_schedulable_threads = self.write_schedulable_threads(account);
+            schedulable_threads &= write_schedulable_threads;
+            if write_schedulable_threads != any_threads {
+                conflicting_threads |= self.active_threads(account);
             }
         }
 
         for account in read_account_locks {
-            schedulable_threads &= self.read_schedulable_threads(account);
-            if schedulable_threads.is_empty() {
-                return None;
+            let read_schedulable_threads = self.read_schedulable_threads(account);
+            schedulable_threads &= read_schedulable_threads;
+            if read_schedulable_threads != any_threads {
+                conflicting_threads |= self.active_threads(account);
             }
         }
 
-        Some(schedulable_threads)
+        if schedulable_threads.is_empty() {
+            Err(conflicting_threads)
+        } else {
+            Ok(schedulable_threads)
+        }
     }
 
     /// Returns `ThreadSet` of schedulable threads for the given readable account.
@@ -184,6 +198,25 @@ impl ThreadAwareAccountLocks {
             Some(AccountLocks {
                 write_locks: None,
                 read_locks: None,
+            }) => unreachable!(),
+        }
+    }
+
+    /// Returns the set of threads `account` is already scheduled on.
+    fn active_threads(&self, account: &Pubkey) -> ThreadSet {
+        match self.locks.get(account) {
+            None => ThreadSet::none(),
+            Some(AccountLocks {
+                read_locks: Some(read_locks),
+                write_locks: _,
+            }) => read_locks.thread_set,
+            Some(AccountLocks {
+                read_locks: None,
+                write_locks: Some(write_locks),
+            }) => ThreadSet::only(write_locks.thread_id),
+            Some(AccountLocks {
+                read_locks: None,
+                write_locks: None,
             }) => unreachable!(),
         }
     }
@@ -349,6 +382,20 @@ impl BitAndAssign for ThreadSet {
     }
 }
 
+impl BitOr for ThreadSet {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for ThreadSet {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
 impl Sub for ThreadSet {
     type Output = Self;
 
@@ -466,6 +513,15 @@ mod tests {
         thread_set.contained_threads_iter().next().unwrap()
     }
 
+    // Create thread-set from iterator
+    fn thread_set_from_iter(iter: impl IntoIterator<Item = usize>) -> ThreadSet {
+        let mut thread_set = ThreadSet::none();
+        for thread_id in iter.into_iter() {
+            thread_set.insert(thread_id);
+        }
+        thread_set
+    }
+
     #[test]
     #[should_panic(expected = "num threads must be > 0")]
     fn test_too_few_num_threads() {
@@ -492,7 +548,7 @@ mod tests {
                 TEST_ANY_THREADS,
                 test_thread_selector
             ),
-            None
+            Err(thread_set_from_iter([2, 3]))
         );
     }
 
@@ -510,7 +566,7 @@ mod tests {
                 TEST_ANY_THREADS,
                 test_thread_selector
             ),
-            Some(3)
+            Ok(3)
         );
     }
 
@@ -529,7 +585,7 @@ mod tests {
                 TEST_ANY_THREADS - ThreadSet::only(0), // exclude 0
                 test_thread_selector
             ),
-            Some(1)
+            Ok(1)
         );
     }
 
@@ -545,7 +601,7 @@ mod tests {
                 TEST_ANY_THREADS,
                 test_thread_selector
             ),
-            Some(0)
+            Ok(0)
         );
     }
 
@@ -555,12 +611,20 @@ mod tests {
         let locks = ThreadAwareAccountLocks::new(TEST_NUM_THREADS);
 
         assert_eq!(
-            locks.accounts_schedulable_threads([&pk1].into_iter(), std::iter::empty()),
-            Some(TEST_ANY_THREADS)
+            locks.accounts_schedulable_threads(
+                [&pk1].into_iter(),
+                std::iter::empty(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Ok(TEST_ANY_THREADS)
         );
         assert_eq!(
-            locks.accounts_schedulable_threads(std::iter::empty(), [&pk1].into_iter()),
-            Some(TEST_ANY_THREADS)
+            locks.accounts_schedulable_threads(
+                std::iter::empty(),
+                [&pk1].into_iter(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Ok(TEST_ANY_THREADS)
         );
     }
 
@@ -572,12 +636,20 @@ mod tests {
 
         locks.write_lock_account(&pk1, 2);
         assert_eq!(
-            locks.accounts_schedulable_threads([&pk1, &pk2].into_iter(), std::iter::empty()),
-            Some(ThreadSet::only(2))
+            locks.accounts_schedulable_threads(
+                [&pk1, &pk2].into_iter(),
+                std::iter::empty(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Ok(ThreadSet::only(2))
         );
         assert_eq!(
-            locks.accounts_schedulable_threads(std::iter::empty(), [&pk1, &pk2].into_iter()),
-            Some(ThreadSet::only(2))
+            locks.accounts_schedulable_threads(
+                std::iter::empty(),
+                [&pk1, &pk2].into_iter(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Ok(ThreadSet::only(2))
         );
     }
 
@@ -589,22 +661,38 @@ mod tests {
 
         locks.read_lock_account(&pk1, 2);
         assert_eq!(
-            locks.accounts_schedulable_threads([&pk1, &pk2].into_iter(), std::iter::empty()),
-            Some(ThreadSet::only(2))
+            locks.accounts_schedulable_threads(
+                [&pk1, &pk2].into_iter(),
+                std::iter::empty(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Ok(ThreadSet::only(2))
         );
         assert_eq!(
-            locks.accounts_schedulable_threads(std::iter::empty(), [&pk1, &pk2].into_iter()),
-            Some(TEST_ANY_THREADS)
+            locks.accounts_schedulable_threads(
+                std::iter::empty(),
+                [&pk1, &pk2].into_iter(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Ok(TEST_ANY_THREADS)
         );
 
         locks.read_lock_account(&pk1, 0);
         assert_eq!(
-            locks.accounts_schedulable_threads([&pk1, &pk2].into_iter(), std::iter::empty()),
-            None
+            locks.accounts_schedulable_threads(
+                [&pk1, &pk2].into_iter(),
+                std::iter::empty(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Err(thread_set_from_iter([0, 2]))
         );
         assert_eq!(
-            locks.accounts_schedulable_threads(std::iter::empty(), [&pk1, &pk2].into_iter()),
-            Some(TEST_ANY_THREADS)
+            locks.accounts_schedulable_threads(
+                std::iter::empty(),
+                [&pk1, &pk2].into_iter(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Ok(TEST_ANY_THREADS)
         );
     }
 
@@ -617,12 +705,20 @@ mod tests {
         locks.read_lock_account(&pk1, 2);
         locks.write_lock_account(&pk1, 2);
         assert_eq!(
-            locks.accounts_schedulable_threads([&pk1, &pk2].into_iter(), std::iter::empty()),
-            Some(ThreadSet::only(2))
+            locks.accounts_schedulable_threads(
+                [&pk1, &pk2].into_iter(),
+                std::iter::empty(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Ok(ThreadSet::only(2))
         );
         assert_eq!(
-            locks.accounts_schedulable_threads(std::iter::empty(), [&pk1, &pk2].into_iter()),
-            Some(ThreadSet::only(2))
+            locks.accounts_schedulable_threads(
+                std::iter::empty(),
+                [&pk1, &pk2].into_iter(),
+                ThreadSet::any(TEST_NUM_THREADS)
+            ),
+            Ok(ThreadSet::only(2))
         );
     }
 

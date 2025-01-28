@@ -603,7 +603,7 @@ fn try_schedule_transaction<Tx: TransactionWithMeta>(
         .enumerate()
         .filter_map(|(index, key)| (!transaction.is_writable(index)).then_some(key));
 
-    let Some(thread_id) = account_locks.try_lock_accounts(
+    let Ok(thread_id) = account_locks.try_lock_accounts(
         write_account_locks,
         read_account_locks,
         ThreadSet::any(num_threads),
