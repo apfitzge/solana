@@ -626,6 +626,14 @@ mod tests {
             ),
             Ok(TEST_ANY_THREADS)
         );
+        assert_eq!(
+            locks.accounts_schedulable_threads(
+                [&pk1].into_iter(),
+                std::iter::empty(),
+                ThreadSet::any(TEST_NUM_THREADS) - ThreadSet::only(3)
+            ),
+            Ok(TEST_ANY_THREADS - ThreadSet::only(3))
+        );
     }
 
     #[test]
