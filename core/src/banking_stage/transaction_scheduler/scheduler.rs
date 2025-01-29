@@ -23,7 +23,7 @@ pub(crate) trait Scheduler<Tx: TransactionWithMeta> {
 }
 
 /// Metrics from scheduling transactions.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub(crate) struct SchedulingSummary {
     /// Number of transactions scheduled.
     pub num_scheduled: usize,

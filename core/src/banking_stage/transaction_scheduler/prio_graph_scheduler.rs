@@ -465,7 +465,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
     ///
     /// Panics if the `thread_set` is empty. This should never happen, see comment
     /// on `ThreadAwareAccountLocks::try_lock_accounts`.
-    fn select_thread(
+    pub(crate) fn select_thread(
         thread_set: ThreadSet,
         batch_cus_per_thread: &[u64],
         in_flight_cus_per_thread: &[u64],
@@ -505,15 +505,15 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
     }
 }
 
-struct Batches<Tx> {
-    ids: Vec<Vec<TransactionId>>,
-    transactions: Vec<Vec<Tx>>,
-    max_ages: Vec<Vec<MaxAge>>,
-    total_cus: Vec<u64>,
+pub(crate) struct Batches<Tx> {
+    pub ids: Vec<Vec<TransactionId>>,
+    pub transactions: Vec<Vec<Tx>>,
+    pub max_ages: Vec<Vec<MaxAge>>,
+    pub total_cus: Vec<u64>,
 }
 
 impl<Tx> Batches<Tx> {
-    fn new(num_threads: usize, target_num_transactions_per_batch: usize) -> Self {
+    pub(crate) fn new(num_threads: usize, target_num_transactions_per_batch: usize) -> Self {
         Self {
             ids: vec![Vec::with_capacity(target_num_transactions_per_batch); num_threads],
 
@@ -525,7 +525,7 @@ impl<Tx> Batches<Tx> {
         }
     }
 
-    fn take_batch(
+    pub(crate) fn take_batch(
         &mut self,
         thread_id: ThreadId,
         target_num_transactions_per_batch: usize,
@@ -549,15 +549,15 @@ impl<Tx> Batches<Tx> {
 }
 
 /// A transaction has been scheduled to a thread.
-struct TransactionSchedulingInfo<Tx> {
-    thread_id: ThreadId,
-    transaction: Tx,
-    max_age: MaxAge,
-    cost: u64,
+pub(crate) struct TransactionSchedulingInfo<Tx> {
+    pub thread_id: ThreadId,
+    pub transaction: Tx,
+    pub max_age: MaxAge,
+    pub cost: u64,
 }
 
 /// Error type for reasons a transaction could not be scheduled.
-enum TransactionSchedulingError {
+pub(crate) enum TransactionSchedulingError {
     /// Transaction was filtered out before locking.
     Filtered,
     /// Transaction cannot be scheduled due to conflicts, or
