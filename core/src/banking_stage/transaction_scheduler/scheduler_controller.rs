@@ -4,6 +4,7 @@
 use {
     super::{
         prio_graph_scheduler::PrioGraphScheduler,
+        scheduler::Scheduler,
         scheduler_error::SchedulerError,
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
