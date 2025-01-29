@@ -386,3 +386,358 @@ fn try_schedule_transaction(
         cost,
     })
 }
+
+#[cfg(test)]
+mod test {
+    use {
+        super::*,
+        crate::banking_stage::{
+            immutable_deserialized_packet::ImmutableDeserializedPacket,
+            scheduler_messages::{MaxAge, TransactionId},
+            transaction_scheduler::{
+                transaction_state::SanitizedTransactionTTL,
+                transaction_state_container::TransactionStateContainer,
+            },
+        },
+        crossbeam_channel::unbounded,
+        itertools::Itertools,
+        solana_perf::packet::Packet,
+        solana_sdk::{
+            compute_budget::ComputeBudgetInstruction,
+            hash::Hash,
+            message::Message,
+            pubkey::Pubkey,
+            signature::Keypair,
+            signer::Signer,
+            system_instruction,
+            transaction::{SanitizedTransaction, Transaction},
+        },
+        std::{borrow::Borrow, sync::Arc},
+    };
+
+    macro_rules! txid {
+        ($value:expr) => {
+            TransactionId::new($value)
+        };
+    }
+
+    macro_rules! txids {
+        ([$($element:expr),*]) => {
+            vec![ $(txid!($element)),* ]
+        };
+    }
+
+    fn create_test_frame(
+        num_threads: usize,
+        config: GreedySchedulerConfig,
+    ) -> (
+        GreedyScheduler,
+        Vec<Receiver<ConsumeWork>>,
+        Sender<FinishedConsumeWork>,
+    ) {
+        let (consume_work_senders, consume_work_receivers) =
+            (0..num_threads).map(|_| unbounded()).unzip();
+        let (finished_consume_work_sender, finished_consume_work_receiver) = unbounded();
+        let scheduler =
+            GreedyScheduler::new(consume_work_senders, finished_consume_work_receiver, config);
+        (
+            scheduler,
+            consume_work_receivers,
+            finished_consume_work_sender,
+        )
+    }
+
+    fn prioritized_tranfers(
+        from_keypair: &Keypair,
+        to_pubkeys: impl IntoIterator<Item = impl Borrow<Pubkey>>,
+        lamports: u64,
+        priority: u64,
+    ) -> SanitizedTransaction {
+        let to_pubkeys_lamports = to_pubkeys
+            .into_iter()
+            .map(|pubkey| *pubkey.borrow())
+            .zip(std::iter::repeat(lamports))
+            .collect_vec();
+        let mut ixs =
+            system_instruction::transfer_many(&from_keypair.pubkey(), &to_pubkeys_lamports);
+        let prioritization = ComputeBudgetInstruction::set_compute_unit_price(priority);
+        ixs.push(prioritization);
+        let message = Message::new(&ixs, Some(&from_keypair.pubkey()));
+        let tx = Transaction::new(&[from_keypair], message, Hash::default());
+        SanitizedTransaction::from_transaction_for_tests(tx)
+    }
+
+    fn create_container(
+        tx_infos: impl IntoIterator<
+            Item = (
+                impl Borrow<Keypair>,
+                impl IntoIterator<Item = impl Borrow<Pubkey>>,
+                u64,
+                u64,
+            ),
+        >,
+    ) -> TransactionStateContainer {
+        let mut container = TransactionStateContainer::with_capacity(10 * 1024);
+        for (index, (from_keypair, to_pubkeys, lamports, compute_unit_price)) in
+            tx_infos.into_iter().enumerate()
+        {
+            let id = TransactionId::new(index as u64);
+            let transaction = prioritized_tranfers(
+                from_keypair.borrow(),
+                to_pubkeys,
+                lamports,
+                compute_unit_price,
+            );
+            let packet = Arc::new(
+                ImmutableDeserializedPacket::new(
+                    Packet::from_data(None, transaction.to_versioned_transaction()).unwrap(),
+                )
+                .unwrap(),
+            );
+            let transaction_ttl = SanitizedTransactionTTL {
+                transaction,
+                max_age: MaxAge::MAX,
+            };
+            const TEST_TRANSACTION_COST: u64 = 5000;
+            container.insert_new_transaction(
+                id,
+                transaction_ttl,
+                packet,
+                compute_unit_price,
+                TEST_TRANSACTION_COST,
+            );
+        }
+
+        container
+    }
+
+    fn collect_work(
+        receiver: &Receiver<ConsumeWork>,
+    ) -> (Vec<ConsumeWork>, Vec<Vec<TransactionId>>) {
+        receiver
+            .try_iter()
+            .map(|work| {
+                let ids = work.ids.clone();
+                (work, ids)
+            })
+            .unzip()
+    }
+
+    fn test_pre_graph_filter(_txs: &[&SanitizedTransaction], results: &mut [bool]) {
+        results.fill(true);
+    }
+
+    fn test_pre_lock_filter(_tx: &SanitizedTransaction) -> bool {
+        true
+    }
+
+    #[test]
+    fn test_schedule_disconnected_channel() {
+        let (mut scheduler, work_receivers, _finished_work_sender) =
+            create_test_frame(1, GreedySchedulerConfig::default());
+        let mut container = create_container([(&Keypair::new(), &[Pubkey::new_unique()], 1, 1)]);
+
+        drop(work_receivers); // explicitly drop receivers
+        assert_matches!(
+            scheduler.schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter),
+            Err(SchedulerError::DisconnectedSendChannel(_))
+        );
+    }
+
+    #[test]
+    fn test_schedule_single_threaded_no_conflicts() {
+        let (mut scheduler, work_receivers, _finished_work_sender) =
+            create_test_frame(1, GreedySchedulerConfig::default());
+        let mut container = create_container([
+            (&Keypair::new(), &[Pubkey::new_unique()], 1, 1),
+            (&Keypair::new(), &[Pubkey::new_unique()], 2, 2),
+        ]);
+
+        let scheduling_summary = scheduler
+            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .unwrap();
+        assert_eq!(scheduling_summary.num_scheduled, 2);
+        assert_eq!(scheduling_summary.num_unschedulable, 0);
+        assert_eq!(collect_work(&work_receivers[0]).1, vec![txids!([1, 0])]);
+    }
+
+    #[test]
+    fn test_schedule_single_threaded_scheduling_cu_limit() {
+        let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(
+            1,
+            GreedySchedulerConfig {
+                max_scheduled_cus: 1, // only allow 1 transaction scheduled
+                ..GreedySchedulerConfig::default()
+            },
+        );
+        let mut container = create_container([
+            (&Keypair::new(), &[Pubkey::new_unique()], 1, 1),
+            (&Keypair::new(), &[Pubkey::new_unique()], 2, 2),
+        ]);
+
+        let scheduling_summary = scheduler
+            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .unwrap();
+        assert_eq!(scheduling_summary.num_scheduled, 1);
+        assert_eq!(scheduling_summary.num_unschedulable, 0);
+        assert_eq!(collect_work(&work_receivers[0]).1, vec![txids!([1])]);
+    }
+
+    #[test]
+    fn test_schedule_single_threaded_scheduling_scan_limit() {
+        let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(
+            1,
+            GreedySchedulerConfig {
+                max_scanned_transactions_per_scheduling_pass: 1, // only allow 1 transaction scheduled
+                ..GreedySchedulerConfig::default()
+            },
+        );
+        let mut container = create_container([
+            (&Keypair::new(), &[Pubkey::new_unique()], 1, 1),
+            (&Keypair::new(), &[Pubkey::new_unique()], 2, 2),
+        ]);
+
+        let scheduling_summary = scheduler
+            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .unwrap();
+        assert_eq!(scheduling_summary.num_scheduled, 1);
+        assert_eq!(scheduling_summary.num_unschedulable, 0);
+        assert_eq!(collect_work(&work_receivers[0]).1, vec![txids!([1])]);
+    }
+
+    #[test]
+    fn test_schedule_single_threaded_scheduling_batch_size() {
+        let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(
+            1,
+            GreedySchedulerConfig {
+                target_transactions_per_batch: 1, // only allow 1 transaction per batch
+                ..GreedySchedulerConfig::default()
+            },
+        );
+        let mut container = create_container([
+            (&Keypair::new(), &[Pubkey::new_unique()], 1, 1),
+            (&Keypair::new(), &[Pubkey::new_unique()], 2, 2),
+        ]);
+
+        let scheduling_summary = scheduler
+            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .unwrap();
+        assert_eq!(scheduling_summary.num_scheduled, 2);
+        assert_eq!(scheduling_summary.num_unschedulable, 0);
+        assert_eq!(
+            collect_work(&work_receivers[0]).1,
+            vec![txids!([1]), txids!([0])]
+        );
+    }
+
+    #[test]
+    fn test_schedule_single_threaded_conflict() {
+        let (mut scheduler, work_receivers, _finished_work_sender) =
+            create_test_frame(1, GreedySchedulerConfig::default());
+        let pubkey = Pubkey::new_unique();
+        let mut container = create_container([
+            (&Keypair::new(), &[pubkey], 1, 1),
+            (&Keypair::new(), &[pubkey], 1, 2),
+        ]);
+
+        let scheduling_summary = scheduler
+            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .unwrap();
+        assert_eq!(scheduling_summary.num_scheduled, 2);
+        assert_eq!(scheduling_summary.num_unschedulable, 0);
+        assert_eq!(
+            collect_work(&work_receivers[0]).1,
+            vec![txids!([1]), txids!([0])]
+        );
+    }
+
+    #[test]
+    fn test_schedule_simple_thread_selection() {
+        let (mut scheduler, work_receivers, _finished_work_sender) =
+            create_test_frame(2, GreedySchedulerConfig::default());
+        let mut container =
+            create_container((0..4).map(|i| (Keypair::new(), [Pubkey::new_unique()], 1, i)));
+
+        let scheduling_summary = scheduler
+            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .unwrap();
+        assert_eq!(scheduling_summary.num_scheduled, 4);
+        assert_eq!(scheduling_summary.num_unschedulable, 0);
+        assert_eq!(collect_work(&work_receivers[0]).1, [txids!([3, 1])]);
+        assert_eq!(collect_work(&work_receivers[1]).1, [txids!([2, 0])]);
+    }
+
+    #[test]
+    fn test_schedule_scan_past_highest_priority() {
+        let (mut scheduler, work_receivers, _finished_work_sender) =
+            create_test_frame(2, GreedySchedulerConfig::default());
+        let pubkey1 = Pubkey::new_unique();
+        let pubkey2 = Pubkey::new_unique();
+        let pubkey3 = Pubkey::new_unique();
+
+        // Dependecy graph:
+        // 3 --
+        //     \
+        //       -> 1 -> 0
+        //     /
+        // 2 --
+        //
+        // Notes:
+        // - 3 and 2 are immediately schedulable at the top of the graph.
+        // - 3 and 2 will be scheduled to different threads.
+        // - 1 conflicts with both 3 and 2 (different threads) so is unschedulable.
+        // - 0 conflicts only with 1. Without priority guarding, it will be scheduled
+        let mut container = create_container([
+            (Keypair::new(), &[pubkey3][..], 0, 0),
+            (Keypair::new(), &[pubkey1, pubkey2, pubkey3][..], 1, 1),
+            (Keypair::new(), &[pubkey2][..], 2, 2),
+            (Keypair::new(), &[pubkey1][..], 3, 3),
+        ]);
+
+        let scheduling_summary = scheduler
+            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .unwrap();
+        assert_eq!(scheduling_summary.num_scheduled, 3);
+        assert_eq!(scheduling_summary.num_unschedulable, 1);
+        assert_eq!(
+            collect_work(&work_receivers[0]).1,
+            [txids!([3]), txids!([0])]
+        );
+        assert_eq!(collect_work(&work_receivers[1]).1, [txids!([2])]);
+    }
+
+    #[test]
+    fn test_schedule_local_fee_markets() {
+        let (mut scheduler, work_receivers, _finished_work_sender) = create_test_frame(
+            2,
+            GreedySchedulerConfig {
+                max_scheduled_cus: 4 * 5_000, // 2 txs per thread
+                ..GreedySchedulerConfig::default()
+            },
+        );
+
+        // Low priority transaction that does not conflict with other work.
+        // Enough work to fill up thread 0 on txs using `conflicting_pubkey`.
+        let conflicting_pubkey = Pubkey::new_unique();
+        let unique_pubkey = Pubkey::new_unique();
+        let mut container = create_container([
+            (Keypair::new(), [unique_pubkey], 0, 0),
+            (Keypair::new(), [conflicting_pubkey], 1, 1),
+            (Keypair::new(), [conflicting_pubkey], 2, 2),
+            (Keypair::new(), [conflicting_pubkey], 3, 3),
+            (Keypair::new(), [conflicting_pubkey], 4, 4),
+            (Keypair::new(), [conflicting_pubkey], 5, 5),
+        ]);
+
+        let scheduling_summary = scheduler
+            .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
+            .unwrap();
+        assert_eq!(scheduling_summary.num_scheduled, 3);
+        assert_eq!(scheduling_summary.num_unschedulable, 3);
+        assert_eq!(
+            collect_work(&work_receivers[0]).1,
+            [txids!([5]), txids!([4])]
+        );
+        assert_eq!(collect_work(&work_receivers[1]).1, [txids!([0])]);
+    }
+}
