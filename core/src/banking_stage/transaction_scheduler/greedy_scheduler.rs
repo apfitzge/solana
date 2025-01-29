@@ -21,6 +21,10 @@ use {
     solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS,
     solana_sdk::{saturating_add_assign, transaction::SanitizedTransaction},
     solana_svm_transaction::svm_message::SVMMessage,
+    std::{
+        num::ParseIntError,
+        time::{Duration, Instant},
+    },
 };
 
 pub(crate) struct GreedySchedulerConfig {
@@ -39,6 +43,18 @@ impl Default for GreedySchedulerConfig {
     }
 }
 
+impl TryFrom<&str> for GreedySchedulerConfig {
+    type Error = ParseIntError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let max_scanned_transactions_per_scheduling_pass: usize = value.parse()?;
+        Ok(GreedySchedulerConfig {
+            max_scanned_transactions_per_scheduling_pass,
+            ..GreedySchedulerConfig::default()
+        })
+    }
+}
+
 /// Dead-simple scheduler that is efficient but **really** greedy.
 /// If the highest-value transaction cannot be scheduled immediately,
 /// the scheduling loop will return immediately.
@@ -50,6 +66,7 @@ pub struct GreedyScheduler {
     working_account_set: ReadWriteAccountSet,
     unschedulables: Vec<TransactionPriorityId>,
     config: GreedySchedulerConfig,
+    last_config_read: Instant,
 }
 
 impl GreedyScheduler {
@@ -67,6 +84,7 @@ impl GreedyScheduler {
             working_account_set: ReadWriteAccountSet::default(),
             unschedulables: Vec::with_capacity(config.max_scanned_transactions_per_scheduling_pass),
             config,
+            last_config_read: Instant::now(),
         }
     }
 }
@@ -224,6 +242,34 @@ impl Scheduler for GreedyScheduler {
             saturating_add_assign!(total_num_retryable, num_retryable);
         }
         Ok((total_num_transactions, total_num_retryable))
+    }
+
+    fn try_update_config(&mut self) {
+        const UPDATE_CONFIG_INTERVAL: Duration = Duration::from_secs(10);
+
+        let now = Instant::now();
+        if now.duration_since(self.last_config_read) > UPDATE_CONFIG_INTERVAL {
+            self.last_config_read = now;
+
+            let Ok(contents) = std::fs::read_to_string("/tmp/scheduler_config") else {
+                return;
+            };
+
+            let Ok(config) = GreedySchedulerConfig::try_from(contents.as_str()) else {
+                error!("failed to read config from file");
+                return;
+            };
+
+            if config.max_scanned_transactions_per_scheduling_pass
+                != self.config.max_scanned_transactions_per_scheduling_pass
+            {
+                info!(
+                    "New scheduler configuration. max_scanned_transactions_per_scheduling_pass={}",
+                    config.max_scanned_transactions_per_scheduling_pass
+                );
+            }
+            self.config = config;
+        }
     }
 }
 

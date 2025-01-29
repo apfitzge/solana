@@ -22,6 +22,8 @@ pub trait Scheduler {
         &mut self,
         container: &mut TransactionStateContainer,
     ) -> Result<(usize, usize), SchedulerError>;
+
+    fn try_update_config(&mut self) {}
 }
 
 /// Metrics from scheduling transactions.
