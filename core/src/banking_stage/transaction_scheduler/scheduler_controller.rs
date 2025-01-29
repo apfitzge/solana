@@ -5,6 +5,7 @@ use {
     super::{
         prio_graph_scheduler::PrioGraphScheduler,
         receive_and_buffer::ReceiveAndBuffer,
+        scheduler::Scheduler,
         scheduler_error::SchedulerError,
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,

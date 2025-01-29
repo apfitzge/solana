@@ -1,6 +1,7 @@
 use {
     super::{
         in_flight_tracker::InFlightTracker,
+        scheduler::Scheduler,
         scheduler_error::SchedulerError,
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
         transaction_state::SanitizedTransactionTTL,
@@ -12,8 +13,8 @@ use {
             ConsumeWork, FinishedConsumeWork, MaxAge, TransactionBatchId, TransactionId,
         },
         transaction_scheduler::{
-            transaction_priority_id::TransactionPriorityId, transaction_state::TransactionState,
-            transaction_state_container::StateContainer,
+            scheduler::SchedulingSummary, transaction_priority_id::TransactionPriorityId,
+            transaction_state::TransactionState, transaction_state_container::StateContainer,
         },
     },
     crossbeam_channel::{Receiver, Sender, TryRecvError},
@@ -84,7 +85,9 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
             config,
         }
     }
+}
 
+impl<Tx: TransactionWithMeta> Scheduler<Tx> for PrioGraphScheduler<Tx> {
     /// Schedule transactions from the given `StateContainer` to be
     /// consumed by the worker threads. Returns summary of scheduling, or an
     /// error.
@@ -101,7 +104,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
     /// This, combined with internal tracking of threads' in-flight transactions, allows
     /// for load-balancing while prioritizing scheduling transactions onto threads that will
     /// not cause conflicts in the near future.
-    pub(crate) fn schedule<S: StateContainer<Tx>>(
+    fn schedule<S: StateContainer<Tx>>(
         &mut self,
         container: &mut S,
         pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
@@ -322,7 +325,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
 
     /// Receive completed batches of transactions without blocking.
     /// Returns (num_transactions, num_retryable_transactions) on success.
-    pub fn receive_completed(
+    fn receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
     ) -> Result<(usize, usize), SchedulerError> {
@@ -338,7 +341,9 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
         }
         Ok((total_num_transactions, total_num_retryable))
     }
+}
 
+impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
     /// Receive completed batches of transactions.
     /// Returns `Ok((num_transactions, num_retryable))` if a batch was received, `Ok((0, 0))` if no batch was received.
     fn try_receive_completed(
@@ -498,19 +503,6 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
                 }
             })
     }
-}
-
-/// Metrics from scheduling transactions.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct SchedulingSummary {
-    /// Number of transactions scheduled.
-    pub num_scheduled: usize,
-    /// Number of transactions that were not scheduled due to conflicts.
-    pub num_unschedulable: usize,
-    /// Number of transactions that were dropped due to filter.
-    pub num_filtered_out: usize,
-    /// Time spent filtering transactions
-    pub filter_time_us: u64,
 }
 
 struct Batches<Tx> {
