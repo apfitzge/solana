@@ -51,6 +51,7 @@ use {
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
     },
+    transaction_scheduler::greedy_scheduler::{GreedyScheduler, GreedySchedulerConfig},
 };
 
 // Below modules are pub to allow use by banking_stage bench
@@ -414,6 +415,7 @@ impl BankingStage {
                 )
             }
             BlockProductionMethod::CentralScheduler => Self::new_central_scheduler(
+                false,
                 cluster_info,
                 poh_recorder,
                 non_vote_receiver,
@@ -519,6 +521,7 @@ impl BankingStage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_central_scheduler(
+        use_greedy_scheduler: bool,
         cluster_info: &impl LikeClusterInfo,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         non_vote_receiver: BankingPacketReceiver,
@@ -626,28 +629,63 @@ impl BankingStage {
         });
 
         // Spawn the central scheduler thread
-        bank_thread_hdls.push({
-            let packet_deserializer = PacketDeserializer::new(non_vote_receiver);
-            let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
-            let scheduler_controller = SchedulerController::new(
-                decision_maker.clone(),
-                packet_deserializer,
-                bank_forks,
-                scheduler,
-                worker_metrics,
-                forwarder,
+        let packet_deserializer = PacketDeserializer::new(non_vote_receiver);
+        if use_greedy_scheduler {
+            bank_thread_hdls.push(
+                Builder::new()
+                    .name("solBnkTxSched".to_string())
+                    .spawn(move || {
+                        let scheduler = GreedyScheduler::new(
+                            work_senders,
+                            finished_work_receiver,
+                            GreedySchedulerConfig::default(),
+                        );
+                        let scheduler_controller = SchedulerController::new(
+                            decision_maker.clone(),
+                            packet_deserializer,
+                            bank_forks,
+                            scheduler,
+                            worker_metrics,
+                            forwarder,
+                        );
+
+                        match scheduler_controller.run() {
+                            Ok(_) => {}
+                            Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                            Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                                warn!("Unexpected worker disconnect from scheduler")
+                            }
+                        }
+                    })
+                    .unwrap(),
             );
-            Builder::new()
-                .name("solBnkTxSched".to_string())
-                .spawn(move || match scheduler_controller.run() {
-                    Ok(_) => {}
-                    Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
-                    Err(SchedulerError::DisconnectedSendChannel(_)) => {
-                        warn!("Unexpected worker disconnect from scheduler")
-                    }
-                })
-                .unwrap()
-        });
+        } else {
+            bank_thread_hdls.push(
+                Builder::new()
+                    .name("solBnkTxSched".to_string())
+                    .spawn(move || {
+                        let scheduler =
+                            PrioGraphScheduler::new(work_senders, finished_work_receiver);
+                        let scheduler_controller = SchedulerController::new(
+                            decision_maker.clone(),
+                            packet_deserializer,
+                            bank_forks,
+                            scheduler,
+                            worker_metrics,
+                            forwarder,
+                        );
+
+                        match scheduler_controller.run() {
+                            Ok(_) => {}
+                            Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                            Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                                warn!("Unexpected worker disconnect from scheduler")
+                            }
+                        }
+                    })
+                    .unwrap(),
+            );
+        }
 
         Self { bank_thread_hdls }
     }
