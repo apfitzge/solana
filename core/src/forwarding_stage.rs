@@ -73,7 +73,7 @@ impl VoteClient {
 
     fn send_batch(&self, input_batch: &mut Vec<(Vec<u8>, SocketAddr)>) {
         let mut batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
-        core::mem::swap(&mut batch, input_batch); // why do we swap?
+        core::mem::swap(&mut batch, input_batch);
         let _res = batch_send(&self.udp_socket, &batch);
     }
 }
