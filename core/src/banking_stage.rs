@@ -430,6 +430,22 @@ impl BankingStage {
                 prioritization_fee_cache,
                 enable_forwarding,
             ),
+            BlockProductionMethod::CentralSchedulerGreedy => Self::new_central_scheduler(
+                true,
+                cluster_info,
+                poh_recorder,
+                non_vote_receiver,
+                tpu_vote_receiver,
+                gossip_vote_receiver,
+                num_threads,
+                transaction_status_sender,
+                replay_vote_sender,
+                log_messages_bytes_limit,
+                connection_cache,
+                bank_forks,
+                prioritization_fee_cache,
+                enable_forwarding,
+            ),
         }
     }
 
