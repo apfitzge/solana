@@ -169,7 +169,7 @@ impl<F: ForwardAddressGetter> ForwardingStage<F> {
                     }
                 };
 
-                // If timeout waas reached, prevent backup by draining all
+                // If timeout was reached, prevent backup by draining all
                 // packets in the channel.
                 if timed_out {
                     warn!("ForwardingStage is backed up, dropping packets");
