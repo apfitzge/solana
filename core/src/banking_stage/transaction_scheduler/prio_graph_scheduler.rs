@@ -1,6 +1,7 @@
 use {
     super::{
         in_flight_tracker::InFlightTracker,
+        scheduler::Scheduler,
         scheduler_error::SchedulerError,
         thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
         transaction_state::SanitizedTransactionTTL,
@@ -13,7 +14,8 @@ use {
             ConsumeWork, FinishedConsumeWork, MaxAge, TransactionBatchId, TransactionId,
         },
         transaction_scheduler::{
-            transaction_priority_id::TransactionPriorityId, transaction_state::TransactionState,
+            scheduler::SchedulingSummary, transaction_priority_id::TransactionPriorityId,
+            transaction_state::TransactionState,
         },
     },
     crossbeam_channel::{Receiver, Sender, TryRecvError},
@@ -63,7 +65,9 @@ impl PrioGraphScheduler {
             prio_graph: PrioGraph::new(passthrough_priority),
         }
     }
+}
 
+impl Scheduler for PrioGraphScheduler {
     /// Schedule transactions from the given `TransactionStateContainer` to be
     /// consumed by the worker threads. Returns summary of scheduling, or an
     /// error.
@@ -80,7 +84,7 @@ impl PrioGraphScheduler {
     /// This, combined with internal tracking of threads' in-flight transactions, allows
     /// for load-balancing while prioritizing scheduling transactions onto threads that will
     /// not cause conflicts in the near future.
-    pub(crate) fn schedule(
+    fn schedule(
         &mut self,
         container: &mut TransactionStateContainer,
         pre_graph_filter: impl Fn(&[&SanitizedTransaction], &mut [bool]),
@@ -300,7 +304,7 @@ impl PrioGraphScheduler {
 
     /// Receive completed batches of transactions without blocking.
     /// Returns (num_transactions, num_retryable_transactions) on success.
-    pub fn receive_completed(
+    fn receive_completed(
         &mut self,
         container: &mut TransactionStateContainer,
     ) -> Result<(usize, usize), SchedulerError> {
@@ -316,7 +320,9 @@ impl PrioGraphScheduler {
         }
         Ok((total_num_transactions, total_num_retryable))
     }
+}
 
+impl PrioGraphScheduler {
     /// Receive completed batches of transactions.
     /// Returns `Ok((num_transactions, num_retryable))` if a batch was received, `Ok((0, 0))` if no batch was received.
     fn try_receive_completed(
@@ -480,19 +486,6 @@ impl PrioGraphScheduler {
                 }
             })
     }
-}
-
-/// Metrics from scheduling transactions.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct SchedulingSummary {
-    /// Number of transactions scheduled.
-    pub num_scheduled: usize,
-    /// Number of transactions that were not scheduled due to conflicts.
-    pub num_unschedulable: usize,
-    /// Number of transactions that were dropped due to filter.
-    pub num_filtered_out: usize,
-    /// Time spent filtering transactions
-    pub filter_time_us: u64,
 }
 
 struct Batches {
