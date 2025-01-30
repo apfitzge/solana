@@ -21,10 +21,7 @@ use {
     solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS,
     solana_sdk::{saturating_add_assign, transaction::SanitizedTransaction},
     solana_svm_transaction::svm_message::SVMMessage,
-    std::{
-        num::ParseIntError,
-        time::{Duration, Instant},
-    },
+    std::time::{Duration, Instant},
 };
 
 pub(crate) struct GreedySchedulerConfig {
@@ -44,12 +41,23 @@ impl Default for GreedySchedulerConfig {
 }
 
 impl TryFrom<&str> for GreedySchedulerConfig {
-    type Error = ParseIntError;
+    type Error = ();
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let max_scanned_transactions_per_scheduling_pass: usize = value.parse()?;
+        let mut split = value.split_ascii_whitespace();
+        let (Some(max_scanned_transactions_per_scheduling_pass), Some(max_scheduled_cus)) =
+            (split.next(), split.next())
+        else {
+            return Err(());
+        };
+        let max_scanned_transactions_per_scheduling_pass: usize =
+            max_scanned_transactions_per_scheduling_pass
+                .parse()
+                .map_err(|_| ())?;
+        let max_scheduled_cus: u64 = max_scheduled_cus.parse().map_err(|_| ())?;
         Ok(GreedySchedulerConfig {
             max_scanned_transactions_per_scheduling_pass,
+            max_scheduled_cus,
             ..GreedySchedulerConfig::default()
         })
     }
