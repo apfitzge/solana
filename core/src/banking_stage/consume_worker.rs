@@ -35,7 +35,7 @@ pub(crate) struct ConsumeWorker<Tx> {
     consumed_sender: Sender<FinishedConsumeWork<Tx>>,
 
     leader_bank_notifier: Arc<LeaderBankNotifier>,
-    metrics: Arc<ConsumeWorkerMetrics>,
+    metrics: ConsumeWorkerMetrics,
 }
 
 impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
@@ -51,12 +51,8 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             consumer,
             consumed_sender,
             leader_bank_notifier,
-            metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
+            metrics: ConsumeWorkerMetrics::new(id),
         }
-    }
-
-    pub fn metrics_handle(&self) -> Arc<ConsumeWorkerMetrics> {
-        self.metrics.clone()
     }
 
     pub fn run(self) -> Result<(), ConsumeWorkerError<Tx>> {
@@ -73,6 +69,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     return Err(ConsumeWorkerError::from(err));
                 }
             }
+            self.metrics.maybe_report_and_reset();
         }
     }
 
