@@ -215,9 +215,9 @@ pub struct TransactionViewStateContainer {
 }
 
 impl TransactionViewStateContainer {
-    // Insert into the map, but NOT into the priority queue.
-    // Returns the id of the transaction if it was inserted.
-    pub(crate) fn try_insert_with_data(
+    /// Insert into the map, but NOT into the priority queue.
+    /// Returns the id of the transaction if it was inserted.
+    pub(crate) fn try_insert_map_only_with_data(
         &mut self,
         data: &[u8],
         f: impl FnOnce(SharedBytes) -> Result<TransactionState<RuntimeTransactionView>, ()>,

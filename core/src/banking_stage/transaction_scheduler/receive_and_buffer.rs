@@ -468,25 +468,27 @@ impl TransactionViewReceiveAndBuffer {
                 num_received += 1;
 
                 // Reserve free-space to copy packet into, run sanitization checks, and insert.
-                if let Some(transaction_id) = container.try_insert_with_data(packet_data, |bytes| {
-                    match Self::try_handle_packet(
-                        bytes,
-                        root_bank,
-                        working_bank,
-                        alt_resolved_slot,
-                        sanitized_epoch,
-                        transaction_account_lock_limit,
-                    ) {
-                        Ok(state) => {
-                            num_buffered += 1;
-                            Ok(state)
+                if let Some(transaction_id) =
+                    container.try_insert_map_only_with_data(packet_data, |bytes| {
+                        match Self::try_handle_packet(
+                            bytes,
+                            root_bank,
+                            working_bank,
+                            alt_resolved_slot,
+                            sanitized_epoch,
+                            transaction_account_lock_limit,
+                        ) {
+                            Ok(state) => {
+                                num_buffered += 1;
+                                Ok(state)
+                            }
+                            Err(()) => {
+                                num_dropped_on_receive += 1;
+                                Err(())
+                            }
                         }
-                        Err(()) => {
-                            num_dropped_on_receive += 1;
-                            Err(())
-                        }
-                    }
-                }) {
+                    })
+                {
                     transaction_ids.push(transaction_id);
 
                     // If at capacity, run checks and remove invalid transactions.
