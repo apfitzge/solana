@@ -417,7 +417,7 @@ impl TransactionViewReceiveAndBuffer {
         let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
         let mut error_counters = TransactionErrorMetrics::default();
 
-        let mut run_status_age_checks =
+        let mut check_and_push_to_queue =
             |container: &mut TransactionViewStateContainer,
              transaction_ids: &mut ArrayVec<usize, 64>| {
                 // Temporary scope so that transaction references are immediately
@@ -491,14 +491,14 @@ impl TransactionViewReceiveAndBuffer {
 
                     // If at capacity, run checks and remove invalid transactions.
                     if transaction_ids.len() == EXTRA_CAPACITY {
-                        run_status_age_checks(container, &mut transaction_ids);
+                        check_and_push_to_queue(container, &mut transaction_ids);
                     }
                 }
             }
         }
 
         // Any remaining packets undergo status/age checks
-        run_status_age_checks(container, &mut transaction_ids);
+        check_and_push_to_queue(container, &mut transaction_ids);
 
         let buffer_time_us = start.elapsed().as_micros() as u64;
         timing_metrics.update(|timing_metrics| {
