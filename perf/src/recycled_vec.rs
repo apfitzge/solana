@@ -149,10 +149,6 @@ impl<T: Clone + Default + Sized> RecycledVec<T> {
         self.x.append(other);
     }
 
-    pub fn append_pinned(&mut self, other: &mut Self) {
-        self.x.append(&mut other.x);
-    }
-
     /// Forces the length of the vector to `new_len`.
     ///
     /// This is a low-level operation that maintains none of the normal
