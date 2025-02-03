@@ -33,9 +33,9 @@ impl<T: Default + Clone + Sized> Reset for RecycledVec<T> {
 }
 
 impl<T: Clone + Default + Sized> From<RecycledVec<T>> for Vec<T> {
-    fn from(mut pinned_vec: RecycledVec<T>) -> Self {
-        pinned_vec.recycler = Weak::default();
-        std::mem::take(&mut pinned_vec.x)
+    fn from(mut recycled_vec: RecycledVec<T>) -> Self {
+        recycled_vec.recycler = Weak::default();
+        std::mem::take(&mut recycled_vec.x)
     }
 }
 
