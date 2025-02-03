@@ -205,7 +205,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pinned_vec() {
+    fn test_recycled_vec() {
         let mut mem = RecycledVec::with_capacity(10);
         mem.push(50);
         mem.resize(2, 10);
