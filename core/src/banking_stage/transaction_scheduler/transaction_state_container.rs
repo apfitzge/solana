@@ -44,6 +44,7 @@ use {
 /// The container maintains a fixed capacity. If the queue is full when pushing
 /// a new transaction, the lowest priority transaction will be dropped.
 pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
+    capacity: usize,
     priority_queue: MinMaxHeap<TransactionPriorityId>,
     id_to_transaction_state: Slab<TransactionState<Tx>>,
 }
@@ -81,13 +82,19 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
             .expect("transaction must exist");
         let priority_id = TransactionPriorityId::new(transaction_state.priority(), transaction_id);
         transaction_state.transition_to_unprocessed(transaction_ttl);
-        self.push_id_into_queue(priority_id);
+        self.push_ids_into_queue(std::iter::once(priority_id));
     }
 
-    /// Pushes a transaction id into the priority queue. If the queue is full, the lowest priority
-    /// transaction will be dropped (removed from the queue and map).
-    /// Returns `true` if a packet was dropped due to capacity limits.
-    fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool;
+    /// Pushes transaction ids into the priority queue. If the queue if full,
+    /// the lowest priority transactions will be dropped (removed from the
+    /// queue and map) **after** all ids have been pushed.
+    /// To avoid allocating, the caller should not push more than
+    /// [`EXTRA_CAPACITY`] ids in a call.
+    /// Returns the number of dropped transactions.
+    fn push_ids_into_queue(
+        &mut self,
+        priority_ids: impl Iterator<Item = TransactionPriorityId>,
+    ) -> usize;
 
     /// Remove transaction by id.
     fn remove_by_id(&mut self, id: TransactionId);
@@ -102,7 +109,8 @@ pub(crate) const EXTRA_CAPACITY: usize = 64;
 impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<Tx> {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            priority_queue: MinMaxHeap::with_capacity(capacity),
+            capacity,
+            priority_queue: MinMaxHeap::with_capacity(capacity + EXTRA_CAPACITY),
             id_to_transaction_state: Slab::with_capacity(capacity + EXTRA_CAPACITY),
         }
     }
@@ -134,8 +142,21 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             .map(|state| state.transaction_ttl())
     }
 
-    fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
-        self.push_id_into_queue_with_remaining_capacity(priority_id, self.remaining_capacity())
+    fn push_ids_into_queue(
+        &mut self,
+        priority_ids: impl Iterator<Item = TransactionPriorityId>,
+    ) -> usize {
+        for id in priority_ids {
+            self.priority_queue.push(id);
+        }
+        let num_dropped = self.priority_queue.len().saturating_sub(self.capacity);
+
+        for _ in 0..num_dropped {
+            let priority_id = self.priority_queue.pop_min().expect("queue is not empty");
+            self.id_to_transaction_state.remove(priority_id.id);
+        }
+
+        num_dropped
     }
 
     fn remove_by_id(&mut self, id: TransactionId) {
@@ -301,8 +322,11 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
     }
 
     #[inline]
-    fn push_id_into_queue(&mut self, priority_id: TransactionPriorityId) -> bool {
-        self.inner.push_id_into_queue(priority_id)
+    fn push_ids_into_queue(
+        &mut self,
+        priority_ids: impl Iterator<Item = TransactionPriorityId>,
+    ) -> usize {
+        self.inner.push_ids_into_queue(priority_ids)
     }
 
     #[inline]
