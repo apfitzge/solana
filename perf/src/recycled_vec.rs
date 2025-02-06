@@ -10,8 +10,7 @@ use {
     },
 };
 
-// A vector wrapper where the underlying memory can be
-// recycled.
+// A vector wrapper where the underlying memory can be recycled.
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RecycledVec<T: Default + Clone + Sized> {
