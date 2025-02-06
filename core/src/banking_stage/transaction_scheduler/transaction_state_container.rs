@@ -345,6 +345,7 @@ mod tests {
     use {
         super::*,
         crate::banking_stage::scheduler_messages::MaxAge,
+        agave_transaction_view::transaction_view::SanitizedTransactionView,
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_sdk::{
             compute_budget::ComputeBudgetInstruction,
@@ -354,8 +355,9 @@ mod tests {
             signature::Keypair,
             signer::Signer,
             system_instruction,
-            transaction::{SanitizedTransaction, Transaction},
+            transaction::{MessageHash, SanitizedTransaction, Transaction},
         },
+        std::collections::HashSet,
     };
 
     /// Returns (transaction_ttl, priority, cost)
@@ -441,5 +443,69 @@ mod tests {
         assert!(container
             .get_mut_transaction_state(non_existing_id)
             .is_none());
+    }
+
+    #[test]
+    fn test_view_push_ids_to_queue() {
+        let mut container = TransactionViewStateContainer::with_capacity(2);
+
+        let reserved_addresses = HashSet::default();
+        let packet_parser = |data, priority, cost| {
+            let view = SanitizedTransactionView::try_new_sanitized(data).unwrap();
+            let view = RuntimeTransaction::<SanitizedTransactionView<_>>::try_from(
+                view,
+                MessageHash::Compute,
+                None,
+            )
+            .unwrap();
+            let view = RuntimeTransaction::<ResolvedTransactionView<_>>::try_from(
+                view,
+                None,
+                &reserved_addresses,
+            )
+            .unwrap();
+
+            Ok(TransactionState::new(
+                SanitizedTransactionTTL {
+                    transaction: view,
+                    max_age: MaxAge::MAX,
+                },
+                None,
+                priority,
+                cost,
+            ))
+        };
+
+        // Push 2 transactions into the queue so buffer is full.
+        for priority in [4, 5] {
+            let (_transaction_ttl, packet, priority, cost) = test_transaction(priority);
+            let id = container
+                .try_insert_map_only_with_data(packet.original_packet().data(..).unwrap(), |data| {
+                    packet_parser(data, priority, cost)
+                })
+                .unwrap();
+            let priority_id = TransactionPriorityId::new(priority, id);
+            assert_eq!(
+                container.push_ids_into_queue(std::iter::once(priority_id)),
+                0
+            );
+        }
+
+        // Push 5 additional packets in. 5 should be dropped.
+        let mut priority_ids = Vec::with_capacity(5);
+        for priority in [10, 11, 12, 1, 2] {
+            let (_transaction_ttl, packet, priority, cost) = test_transaction(priority);
+            let id = container
+                .try_insert_map_only_with_data(packet.original_packet().data(..).unwrap(), |data| {
+                    packet_parser(data, priority, cost)
+                })
+                .unwrap();
+            let priority_id = TransactionPriorityId::new(priority, id);
+            priority_ids.push(priority_id);
+        }
+        assert_eq!(container.push_ids_into_queue(priority_ids.into_iter()), 5);
+        assert_eq!(container.pop().unwrap().priority, 12);
+        assert_eq!(container.pop().unwrap().priority, 11);
+        assert!(container.pop().is_none());
     }
 }
