@@ -56,9 +56,6 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     /// Returns true if the queue is empty.
     fn is_empty(&self) -> bool;
 
-    /// Returns the remaining capacity of the container
-    fn remaining_capacity(&self) -> usize;
-
     /// Get the top transaction id in the priority queue.
     fn pop(&mut self) -> Option<TransactionPriorityId>;
 
@@ -117,12 +114,6 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
 
     fn is_empty(&self) -> bool {
         self.priority_queue.is_empty()
-    }
-
-    fn remaining_capacity(&self) -> usize {
-        self.priority_queue
-            .capacity()
-            .saturating_sub(self.id_to_transaction_state.len())
     }
 
     fn pop(&mut self) -> Option<TransactionPriorityId> {
@@ -184,9 +175,6 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         priority: u64,
         cost: u64,
     ) -> bool {
-        // cache the remaining capacity **before** we take ownership of
-        // the next vacant entry. i.e. get the size before we insert.
-        let remaining_capacity = self.remaining_capacity();
         let priority_id = {
             let entry = self.get_vacant_map_entry();
             let transaction_id = entry.key();
@@ -199,22 +187,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
             TransactionPriorityId::new(priority, transaction_id)
         };
 
-        self.push_id_into_queue_with_remaining_capacity(priority_id, remaining_capacity)
-    }
-
-    fn push_id_into_queue_with_remaining_capacity(
-        &mut self,
-        priority_id: TransactionPriorityId,
-        remaining_capacity: usize,
-    ) -> bool {
-        if remaining_capacity == 0 {
-            let popped_id = self.priority_queue.push_pop_min(priority_id);
-            self.remove_by_id(popped_id.id);
-            true
-        } else {
-            self.priority_queue.push(priority_id);
-            false
-        }
+        self.push_ids_into_queue(std::iter::once(priority_id)) > 0
     }
 
     fn get_vacant_map_entry(&mut self) -> VacantEntry<TransactionState<Tx>> {
@@ -293,11 +266,6 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
     #[inline]
     fn is_empty(&self) -> bool {
         self.inner.is_empty()
-    }
-
-    #[inline]
-    fn remaining_capacity(&self) -> usize {
-        self.inner.remaining_capacity()
     }
 
     #[inline]
