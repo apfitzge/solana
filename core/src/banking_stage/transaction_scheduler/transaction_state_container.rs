@@ -50,6 +50,14 @@ impl TransactionStateContainer {
         }
     }
 
+    pub(crate) fn queue_size(&self) -> usize {
+        self.priority_queue.len()
+    }
+
+    pub(crate) fn buffer_size(&self) -> usize {
+        self.id_to_transaction_state.len()
+    }
+
     /// Returns true if the queue is empty.
     pub(crate) fn is_empty(&self) -> bool {
         self.priority_queue.is_empty()

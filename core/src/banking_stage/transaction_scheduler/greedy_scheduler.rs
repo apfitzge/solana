@@ -110,6 +110,9 @@ impl Scheduler for GreedyScheduler {
         _pre_graph_filter: impl Fn(&[&SanitizedTransaction], &mut [bool]),
         pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
+        let starting_queue_size = container.queue_size();
+        let starting_buffer_size = container.buffer_size();
+
         let num_threads = self.consume_work_senders.len();
         let target_cu_per_thread = self.config.target_scheduled_cus / num_threads as u64;
 
@@ -121,7 +124,11 @@ impl Scheduler for GreedyScheduler {
             }
         }
         if schedulable_threads.is_empty() {
-            return Ok(SchedulingSummary::default());
+            return Ok(SchedulingSummary {
+                starting_queue_size,
+                starting_buffer_size,
+                ..SchedulingSummary::default()
+            });
         }
 
         // Track metrics on filter.
@@ -237,6 +244,8 @@ impl Scheduler for GreedyScheduler {
         }
 
         Ok(SchedulingSummary {
+            starting_queue_size,
+            starting_buffer_size,
             num_scheduled,
             num_unschedulable,
             num_throttled,

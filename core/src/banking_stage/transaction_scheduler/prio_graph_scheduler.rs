@@ -90,6 +90,8 @@ impl Scheduler for PrioGraphScheduler {
         pre_graph_filter: impl Fn(&[&SanitizedTransaction], &mut [bool]),
         pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
+        let starting_queue_size = container.queue_size();
+        let starting_buffer_size = container.buffer_size();
         let num_threads = self.consume_work_senders.len();
         let max_cu_per_thread = MAX_BLOCK_UNITS / num_threads as u64;
 
@@ -100,7 +102,11 @@ impl Scheduler for PrioGraphScheduler {
             }
         }
         if schedulable_threads.is_empty() {
-            return Ok(SchedulingSummary::default());
+            return Ok(SchedulingSummary {
+                starting_queue_size,
+                starting_buffer_size,
+                ..SchedulingSummary::default()
+            });
         }
 
         let mut batches = Batches::new(num_threads);
@@ -295,6 +301,8 @@ impl Scheduler for PrioGraphScheduler {
         );
 
         Ok(SchedulingSummary {
+            starting_queue_size,
+            starting_buffer_size,
             num_scheduled,
             num_unschedulable,
             num_throttled,
