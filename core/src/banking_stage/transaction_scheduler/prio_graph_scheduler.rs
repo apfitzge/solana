@@ -100,12 +100,7 @@ impl Scheduler for PrioGraphScheduler {
             }
         }
         if schedulable_threads.is_empty() {
-            return Ok(SchedulingSummary {
-                num_scheduled: 0,
-                num_unschedulable: 0,
-                num_filtered_out: 0,
-                filter_time_us: 0,
-            });
+            return Ok(SchedulingSummary::default());
         }
 
         let mut batches = Batches::new(num_threads);
@@ -179,6 +174,7 @@ impl Scheduler for PrioGraphScheduler {
         let mut num_scheduled: usize = 0;
         let mut num_sent: usize = 0;
         let mut num_unschedulable: usize = 0;
+        let mut num_throttled: usize = 0;
         while num_scheduled < MAX_TRANSACTIONS_SCANNED_PER_SCHEDULING_PASS {
             // If nothing is in the main-queue of the `PrioGraph` then there's nothing left to schedule.
             if self.prio_graph.is_empty() {
@@ -216,10 +212,13 @@ impl Scheduler for PrioGraphScheduler {
                     Err(TransactionSchedulingError::Filtered) => {
                         container.remove_by_id(&id.id);
                     }
-                    Err(TransactionSchedulingError::UnschedulableConflicts)
-                    | Err(TransactionSchedulingError::UnschedulableThread) => {
+                    Err(TransactionSchedulingError::UnschedulableConflicts) => {
                         unschedulable_ids.push(id);
                         saturating_add_assign!(num_unschedulable, 1);
+                    }
+                    Err(TransactionSchedulingError::UnschedulableThread) => {
+                        unschedulable_ids.push(id);
+                        saturating_add_assign!(num_throttled, 1);
                     }
                     Ok(TransactionSchedulingInfo {
                         thread_id,
@@ -298,6 +297,7 @@ impl Scheduler for PrioGraphScheduler {
         Ok(SchedulingSummary {
             num_scheduled,
             num_unschedulable,
+            num_throttled,
             num_filtered_out,
             filter_time_us: total_filter_time_us,
         })

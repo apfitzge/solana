@@ -33,6 +33,8 @@ pub(crate) struct SchedulingSummary {
     pub num_scheduled: usize,
     /// Number of transactions that were not scheduled due to conflicts.
     pub num_unschedulable: usize,
+    /// Number of transactions that were throttled due to thread limits.
+    pub num_throttled: usize,
     /// Number of transactions that were dropped due to filter.
     pub num_filtered_out: usize,
     /// Time spent filtering transactions

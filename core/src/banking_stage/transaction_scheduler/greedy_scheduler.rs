@@ -130,6 +130,7 @@ impl Scheduler for GreedyScheduler {
         let mut num_scheduled: usize = 0;
         let mut num_sent: usize = 0;
         let mut num_unschedulable: usize = 0;
+        let mut num_throttled: usize = 0;
 
         let mut batches = Batches::new(num_threads);
         while num_scanned < self.config.max_scanned_transactions_per_scheduling_pass
@@ -178,9 +179,12 @@ impl Scheduler for GreedyScheduler {
                     num_filtered_out += 1;
                     container.remove_by_id(&id.id);
                 }
-                Err(TransactionSchedulingError::UnschedulableConflicts)
-                | Err(TransactionSchedulingError::UnschedulableThread) => {
+                Err(TransactionSchedulingError::UnschedulableConflicts) => {
                     num_unschedulable += 1;
+                    self.unschedulables.push(id);
+                }
+                Err(TransactionSchedulingError::UnschedulableThread) => {
+                    num_throttled += 1;
                     self.unschedulables.push(id);
                 }
                 Ok(TransactionSchedulingInfo {
@@ -235,6 +239,7 @@ impl Scheduler for GreedyScheduler {
         Ok(SchedulingSummary {
             num_scheduled,
             num_unschedulable,
+            num_throttled,
             num_filtered_out,
             filter_time_us: 0,
         })
