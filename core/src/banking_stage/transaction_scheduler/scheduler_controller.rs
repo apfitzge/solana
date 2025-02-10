@@ -7,6 +7,7 @@ use {
         scheduler_error::SchedulerError,
         scheduler_metrics::{
             SchedulerCountMetrics, SchedulerLeaderDetectionMetrics, SchedulerTimingMetrics,
+            SchedulingDetails,
         },
         transaction_id_generator::TransactionIdGenerator,
         transaction_state::SanitizedTransactionTTL,
@@ -75,6 +76,8 @@ where
     worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
     /// State for forwarding packets to the leader, if enabled.
     forwarder: Option<Forwarder<C>>,
+
+    scheduling_details: SchedulingDetails,
 }
 
 impl<C, S> SchedulerController<C, S>
@@ -102,6 +105,7 @@ where
             timing_metrics: SchedulerTimingMetrics::default(),
             worker_metrics,
             forwarder,
+            scheduling_details: SchedulingDetails::default(),
         }
     }
 
@@ -150,6 +154,7 @@ where
             self.worker_metrics
                 .iter()
                 .for_each(|metrics| metrics.maybe_report_and_reset());
+            self.scheduling_details.maybe_report();
         }
 
         Ok(())
@@ -198,6 +203,7 @@ where
                     );
                     saturating_add_assign!(timing_metrics.schedule_time_us, schedule_time_us);
                 });
+                self.scheduling_details.update(&scheduling_summary);
             }
             BufferedPacketsDecision::Forward => {
                 if forwarding_enabled {
