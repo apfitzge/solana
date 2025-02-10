@@ -3,7 +3,7 @@ use {
         in_flight_tracker::InFlightTracker,
         scheduler::Scheduler,
         scheduler_error::SchedulerError,
-        thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet},
+        thread_aware_account_locks::{ThreadAwareAccountLocks, ThreadId, ThreadSet, TryLockError},
         transaction_state::SanitizedTransactionTTL,
         transaction_state_container::TransactionStateContainer,
     },
@@ -216,7 +216,8 @@ impl Scheduler for PrioGraphScheduler {
                     Err(TransactionSchedulingError::Filtered) => {
                         container.remove_by_id(&id.id);
                     }
-                    Err(TransactionSchedulingError::UnschedulableConflicts) => {
+                    Err(TransactionSchedulingError::UnschedulableConflicts)
+                    | Err(TransactionSchedulingError::UnschedulableThread) => {
                         unschedulable_ids.push(id);
                         saturating_add_assign!(num_unschedulable, 1);
                     }
@@ -547,6 +548,8 @@ pub(crate) enum TransactionSchedulingError {
     /// Transaction cannot be scheduled due to conflicts, or
     /// higher priority conflicting transactions are unschedulable.
     UnschedulableConflicts,
+    /// Thread is not allowed to be scheduled on at this time.
+    UnschedulableThread,
 }
 
 fn try_schedule_transaction(
@@ -581,14 +584,21 @@ fn try_schedule_transaction(
         .enumerate()
         .filter_map(|(index, key)| (!message.is_writable(index)).then_some(key));
 
-    let Some(thread_id) = account_locks.try_lock_accounts(
+    let thread_id = match account_locks.try_lock_accounts(
         write_account_locks,
         read_account_locks,
         ThreadSet::any(num_threads),
         thread_selector,
-    ) else {
-        blocking_locks.take_locks(message);
-        return Err(TransactionSchedulingError::UnschedulableConflicts);
+    ) {
+        Ok(thread_id) => thread_id,
+        Err(TryLockError::MultipleConflicts) => {
+            blocking_locks.take_locks(transaction.message());
+            return Err(TransactionSchedulingError::UnschedulableConflicts);
+        }
+        Err(TryLockError::ThreadNotAllowed) => {
+            blocking_locks.take_locks(transaction.message());
+            return Err(TransactionSchedulingError::UnschedulableThread);
+        }
     };
 
     let sanitized_transaction_ttl = transaction_state.transition_to_pending();
