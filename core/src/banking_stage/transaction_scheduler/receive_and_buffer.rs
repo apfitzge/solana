@@ -417,45 +417,59 @@ impl TransactionViewReceiveAndBuffer {
         let lock_results: [_; EXTRA_CAPACITY] = core::array::from_fn(|_| Ok(()));
         let mut error_counters = TransactionErrorMetrics::default();
 
-        let mut check_and_push_to_queue = |container: &mut TransactionViewStateContainer,
-                                           transaction_priority_ids: &mut ArrayVec<
-            TransactionPriorityId,
-            64,
-        >| {
-            // Temporary scope so that transaction references are immediately
-            // dropped and transactions not passing
-            let check_results = {
-                let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
-                transactions.extend(transaction_priority_ids.iter().map(|priority_id| {
-                    &container
+        let mut check_and_push_to_queue =
+            |container: &mut TransactionViewStateContainer,
+             transaction_priority_ids: &mut ArrayVec<TransactionPriorityId, 64>| {
+                // Temporary scope so that transaction references are immediately
+                // dropped and transactions not passing
+                let mut check_results = {
+                    let mut transactions = ArrayVec::<_, EXTRA_CAPACITY>::new();
+                    transactions.extend(transaction_priority_ids.iter().map(|priority_id| {
+                        &container
+                            .get_transaction_ttl(priority_id.id)
+                            .expect("transaction must exist")
+                            .transaction
+                    }));
+                    working_bank.check_transactions::<RuntimeTransaction<_>>(
+                        &transactions,
+                        &lock_results[..transactions.len()],
+                        MAX_PROCESSING_AGE,
+                        &mut error_counters,
+                    )
+                };
+
+                // Remove errored transactions
+                for (result, priority_id) in check_results
+                    .iter_mut()
+                    .zip(transaction_priority_ids.iter())
+                {
+                    if result.is_err() {
+                        num_dropped_on_status_age_checks += 1;
+                        container.remove_by_id(priority_id.id);
+                    }
+                    let transaction = &container
                         .get_transaction_ttl(priority_id.id)
                         .expect("transaction must exist")
-                        .transaction
-                }));
-                working_bank.check_transactions::<RuntimeTransaction<_>>(
-                    &transactions,
-                    &lock_results[..transactions.len()],
-                    MAX_PROCESSING_AGE,
-                    &mut error_counters,
-                )
-            };
-
-            // Remove errored transactions
-            for (result, priority_id) in check_results.iter().zip(transaction_priority_ids.iter()) {
-                if result.is_err() {
-                    num_dropped_on_status_age_checks += 1;
-                    container.remove_by_id(priority_id.id);
+                        .transaction;
+                    if let Err(err) = Consumer::check_fee_payer_unlocked(
+                        working_bank,
+                        transaction,
+                        &mut error_counters,
+                    ) {
+                        *result = Err(err);
+                        num_dropped_on_status_age_checks += 1;
+                        container.remove_by_id(priority_id.id);
+                    }
                 }
-            }
-            // Push non-errored transaction into queue.
-            num_dropped_on_capacity += container.push_ids_into_queue(
-                check_results
-                    .into_iter()
-                    .zip(transaction_priority_ids.drain(..))
-                    .filter(|(r, _)| r.is_ok())
-                    .map(|(_, id)| id),
-            );
-        };
+                // Push non-errored transaction into queue.
+                num_dropped_on_capacity += container.push_ids_into_queue(
+                    check_results
+                        .into_iter()
+                        .zip(transaction_priority_ids.drain(..))
+                        .filter(|(r, _)| r.is_ok())
+                        .map(|(_, id)| id),
+                );
+            };
 
         for packet_batch in packet_batch_message.iter() {
             for packet in packet_batch.iter() {
