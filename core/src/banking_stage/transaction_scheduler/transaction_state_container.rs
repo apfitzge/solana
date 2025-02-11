@@ -140,7 +140,15 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         for id in priority_ids {
             self.priority_queue.push(id);
         }
-        let num_dropped = self.priority_queue.len().saturating_sub(self.capacity);
+
+        // The number of items in the `id_to_transaction_state` map is
+        // greater than or equal to the number of elements in the queue.
+        // To avoid the map going over capacity, we use the length of the
+        // map here instead of the queue.
+        let num_dropped = self
+            .id_to_transaction_state
+            .len()
+            .saturating_sub(self.capacity);
 
         for _ in 0..num_dropped {
             let priority_id = self.priority_queue.pop_min().expect("queue is not empty");
@@ -474,6 +482,23 @@ mod tests {
         assert_eq!(container.push_ids_into_queue(priority_ids.into_iter()), 5);
         assert_eq!(container.pop().unwrap().priority, 12);
         assert_eq!(container.pop().unwrap().priority, 11);
+        assert!(container.pop().is_none());
+
+        // Container now has no items in the queue, but still has 5 items in the map.
+        // If we attempt to push additional transactions to the queue, they
+        // are rejected regardless of their priority.
+        let priority = u64::MAX;
+        let (_transaction_ttl, packet, priority, cost) = test_transaction(priority);
+        let id = container
+            .try_insert_map_only_with_data(packet.original_packet().data(..).unwrap(), |data| {
+                packet_parser(data, priority, cost)
+            })
+            .unwrap();
+        let priority_id = TransactionPriorityId::new(priority, id);
+        assert_eq!(
+            container.push_ids_into_queue(std::iter::once(priority_id)),
+            1
+        );
         assert!(container.pop().is_none());
     }
 }
