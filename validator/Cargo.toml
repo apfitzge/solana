@@ -18,6 +18,7 @@ console = { workspace = true }
 core_affinity = { workspace = true }
 crossbeam-channel = { workspace = true }
 fd-lock = { workspace = true }
+firewall = { workspace = true }
 indicatif = { workspace = true }
 itertools = { workspace = true }
 jsonrpc-core = { workspace = true }

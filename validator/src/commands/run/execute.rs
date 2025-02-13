@@ -1325,6 +1325,12 @@ pub fn execute(
     vote_quic_server_config.max_connections_per_peer = 1;
     vote_quic_server_config.max_unstaked_connections = 0;
 
+    // Set up firewall service.
+    {
+        let interface = "enp5s0f0";
+        let bpf = firewall::setup_default();
+    }
+
     let validator = match Validator::new(
         node,
         identity_keypair,
