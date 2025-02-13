@@ -243,6 +243,7 @@ env_logger = "0.9.3"
 etcd-client = "0.11.1"
 fast-math = "0.1"
 fd-lock = "3.0.13"
+firewall = { git = "https://github.com/apfitzge/firewall.git" }
 flate2 = "1.0.31"
 five8_const = "0.1.3"
 fnv = "1.0.7"
