@@ -152,7 +152,7 @@ where
                     );
                     saturating_add_assign!(
                         count_metrics.num_unschedulable,
-                        scheduling_summary.num_unschedulable
+                        scheduling_summary.num_unschedulable_conflicts
                     );
                     saturating_add_assign!(
                         count_metrics.num_schedule_filtered_out,
