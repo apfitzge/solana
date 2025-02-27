@@ -717,7 +717,7 @@ mod test {
             .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 3);
-        assert_eq!(scheduling_summary.num_unschedulable_conflicts, 3);
+        assert_eq!(scheduling_summary.num_unschedulable_threads, 3);
         assert_eq!(collect_work(&work_receivers[0]).1, [vec![5], vec![4]]);
         assert_eq!(collect_work(&work_receivers[1]).1, [vec![0]]);
     }
